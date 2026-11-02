@@ -80,6 +80,8 @@ def init(data_dir, port):
     agent_metrics.init(data_dir)
     import app_update
     app_update.init(data_dir)
+    import telegram_link
+    telegram_link.init(data_dir)
 
 
 def _env_path():
@@ -716,6 +718,15 @@ def _run(job, conv, cmd, env, work, parser):
                                         {"role": "assistant", "text": job["text"], "error": job["error"] if job["state"] != "done" else "", "state": job["state"],
                                          "agent": job["agent"], "model": job["model"], "secs": round(time.time() - job["started"], 1), "t": time.time()},
                                         session=conv.get("session"), n=conv["n"])
+        except Exception:
+            pass
+        try:
+            import telegram_link
+            secs = time.time() - job["started"]
+            if job["state"] == "error":
+                telegram_link.notify("error", f"فشل الوكيل {AGENTS[job['agent']]['name']}: {(job['error'] or '')[:150]}")
+            elif job["state"] == "done" and secs > telegram_link._cfg()["long_secs"] and job["conversation"] != "telegram":
+                telegram_link.notify("long", f"اكتمل ردّ {AGENTS[job['agent']]['name']} بعد {int(secs)} ثانية.")
         except Exception:
             pass
         job["done"].set()

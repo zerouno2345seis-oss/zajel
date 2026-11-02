@@ -6178,6 +6178,96 @@
     loadSyncStatus();
     checkUpdateBtn.click();
 
+    const telegramCard = makeSettingsCard('الوصل مع Telegram', 'أرسل أوامر المساعد إلى بوت Telegram وتابع إشعاراته.');
+    telegramCard.status.textContent = 'جارٍ تحميل حالة Telegram…';
+    const telegramBody = el('div', '');
+    telegramBody.style.cssText = 'display:flex;flex-direction:column;gap:7px;margin-top:7px';
+    telegramCard.card.appendChild(telegramBody);
+    sideContentEl.appendChild(telegramCard.card);
+    let telegramPoll = null;
+    let telegramStatus = null;
+    const telegramError = (err) => { telegramCard.status.textContent = err && err.message ? err.message : 'تعذر تنفيذ طلب Telegram.'; };
+    const telegramButton = (label, action, className = 'btn') => btn(label, async (event) => {
+      const button = event && event.currentTarget;
+      if (button) button.disabled = true;
+      try { await action(); } catch (err) { telegramError(err); }
+      finally { if (button && button.isConnected) button.disabled = false; }
+    }, className);
+    const telegramToggle = (label, key, value, onChange) => {
+      const row = el('label', '');
+      row.style.cssText = 'display:flex;align-items:center;gap:7px';
+      const input = document.createElement('input');
+      input.type = 'checkbox'; input.checked = !!value;
+      input.addEventListener('change', async () => {
+        input.disabled = true;
+        try { const next = await api('/api/assistant/telegram/configure', { [key]: input.checked }); onChange(next); }
+        catch (err) { input.checked = !input.checked; telegramError(err); }
+        finally { input.disabled = false; }
+      });
+      row.append(input, document.createTextNode(label));
+      return row;
+    };
+    const renderTelegram = (status) => {
+      telegramStatus = status || {};
+      telegramBody.replaceChildren();
+      if (telegramStatus.has_token && telegramStatus.paired && telegramPoll) { clearInterval(telegramPoll); telegramPoll = null; }
+      if (!telegramStatus.has_token) {
+        telegramBody.appendChild(el('div', '١. افتح @BotFather في Telegram.'));
+        telegramBody.appendChild(el('div', '٢. أرسل /newbot واتبع التعليمات.'));
+        telegramBody.appendChild(el('div', '٣. انسخ رمز البوت والصقه هنا.'));
+        const input = document.createElement('input');
+        input.type = 'password'; input.autocomplete = 'new-password'; input.placeholder = 'رمز البوت';
+        input.style.cssText = 'width:100%;box-sizing:border-box;padding:7px;border:1px solid var(--line);border-radius:7px;background:var(--side);color:var(--ink)';
+        const save = telegramButton('احفظ المفتاح', async () => {
+          const token = input.value.trim();
+          if (!token) throw new Error('أدخل رمز البوت أولًا.');
+          input.value = '';
+          try { renderTelegram(await api('/api/assistant/telegram/token', { token })); }
+          catch (err) { input.value = ''; throw err; }
+        }, 'btn pri');
+        telegramBody.append(input, save);
+        telegramCard.status.textContent = 'لم يُحفظ مفتاح البوت.';
+        return;
+      }
+      if (!telegramStatus.paired) {
+        telegramCard.status.textContent = 'حُفظ المفتاح. يلزم إقران هذا الجهاز.';
+        const pair = telegramButton('ولّد رمز الاقتران', async () => {
+          const next = await api('/api/assistant/telegram/pair', {});
+          renderTelegram(next);
+        }, 'btn pri');
+        telegramBody.appendChild(pair);
+        if (telegramStatus.pair_code) {
+          const code = el('code', String(telegramStatus.pair_code));
+          code.style.cssText = 'display:block;padding:12px;text-align:center;font-size:1.5em;border-radius:8px;background:var(--side);color:var(--ink);user-select:all;cursor:pointer';
+          code.title = 'اضغط لنسخ الرمز';
+          code.onclick = async () => { try { await navigator.clipboard.writeText(String(telegramStatus.pair_code)); } catch (_) {} };
+          telegramBody.append(code, el('div', 'أرسل للبوت: /start ' + String(telegramStatus.pair_code)));
+        }
+        if (!telegramPoll) telegramPoll = setInterval(async () => {
+          try { renderTelegram(await api('/api/assistant/telegram/status')); }
+          catch (err) { telegramError(err); }
+        }, 3000);
+        return;
+      }
+      if (telegramPoll) { clearInterval(telegramPoll); telegramPoll = null; }
+      telegramCard.status.textContent = (telegramStatus.machine || 'هذا الجهاز') + ' · ' + (telegramStatus.gateway ? 'هذا الجهاز هو البوابة' : (telegramStatus.error || 'جهاز آخر يستقبل الرسائل الآن'));
+      telegramBody.appendChild(telegramToggle('تشغيل الوصل', 'enabled', telegramStatus.enabled, renderTelegram));
+      telegramBody.appendChild(telegramToggle('إشعار عند فشل وكيل', 'notify_error', telegramStatus.notify_error, renderTelegram));
+      telegramBody.appendChild(telegramToggle('إشعار عند اكتمال ردّ طويل', 'notify_long', telegramStatus.notify_long, renderTelegram));
+      telegramBody.appendChild(telegramToggle('إشعار عند توفر تحديث', 'notify_update', telegramStatus.notify_update, renderTelegram));
+      telegramBody.appendChild(el('div', 'أوامر المساعد والأوامر الجاهزة تُكتب للبوت مباشرة، والعمليات الحمراء تنتظر موافقتك داخل زاجل.'));
+      telegramBody.appendChild(telegramButton('رسالة تجربة', async () => {
+        const result = await api('/api/assistant/telegram/test', {});
+        telegramCard.status.textContent = result.sent ? 'أُرسلت رسالة التجربة.' : 'تعذر إرسال رسالة التجربة.';
+      }));
+      telegramBody.appendChild(telegramButton('فك الربط', async () => renderTelegram(await api('/api/assistant/telegram/unpair', {}))));
+      telegramBody.appendChild(telegramButton('حذف المفتاح', async () => {
+        if (!window.confirm('هل تريد حذف مفتاح Telegram من سلسلة مفاتيح هذا الجهاز؟')) return;
+        renderTelegram(await api('/api/assistant/telegram/forget', {}));
+      }));
+    };
+    api('/api/assistant/telegram/status').then(renderTelegram).catch(telegramError);
+
     // بطاقة الهاتف اللاسلكي أعلى تبويب الإعدادات
     renderPhoneCard(sideContentEl);
 

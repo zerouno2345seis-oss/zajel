@@ -679,6 +679,26 @@ def handle(h, method):
             b = _body(h); S.chat_rename(str(b.get("id", "")), b.get("title")); h.send_json({"chats": S.chats_list()})
         elif path == "/api/assistant/chat/delete" and method == "POST":
             S.chat_delete(str(_body(h).get("id", ""))); h.send_json({"chats": S.chats_list()})
+        elif path == "/api/assistant/telegram/status":
+            import telegram_link
+            h.send_json(telegram_link.status())
+        elif path.startswith("/api/assistant/telegram/") and method == "POST":
+            import telegram_link
+            b = _body(h); act = path.rsplit("/", 1)[1]
+            if act == "token":
+                telegram_link.set_token(b.get("token")); h.send_json(telegram_link.status())
+            elif act == "configure":
+                h.send_json(telegram_link.configure(b))
+            elif act == "pair":
+                telegram_link.new_pair_code(); h.send_json(telegram_link.status())
+            elif act == "unpair":
+                telegram_link.unpair(); h.send_json(telegram_link.status())
+            elif act == "forget":
+                telegram_link.forget(); h.send_json(telegram_link.status())
+            elif act == "test":
+                h.send_json({"sent": telegram_link.send("رسالة تجربة من زاجل ✅")})
+            else:
+                h.send_error(404)
         elif path == "/api/assistant/app/update/check":
             import app_update
             h.send_json(app_update.check())
