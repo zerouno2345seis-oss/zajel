@@ -44,7 +44,9 @@ def local_version():
 
 def check():
     try:
-        req = urllib.request.Request(f"https://raw.githubusercontent.com/{REPO}/{BRANCH}/VERSION", headers={"User-Agent": "zajel"})
+        # واجهة GitHub لا الرابط الخام: الخام يُخزَّن مؤقتًا نحو ٥ دقائق فيتأخر ظهور التحديث
+        req = urllib.request.Request(f"https://api.github.com/repos/{REPO}/contents/VERSION?ref={BRANCH}",
+                                     headers={"User-Agent": "zajel", "Accept": "application/vnd.github.raw"})
         with urllib.request.urlopen(req, timeout=15) as r:
             latest = r.read().decode("utf-8").strip()
     except Exception as exc:
