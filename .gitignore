@@ -1,0 +1,18 @@
+# قائمة بيضاء: لا يُرفع إلا شيفرة البرنامج. كل شيء آخر (بيانات، سجلات، أسرار، مسودات) مستبعد افتراضيًا.
+/*
+!/.gitignore
+!/README.md
+!/VERSION
+!/install.sh
+!/launch_backup.sh
+!/*.py
+!/*.js
+!/samsung_backup.html
+!/icon.icns
+!/icon.png
+!/icons/
+!/desktop/
+/desktop/*.bak
+/assistant.js.bak
+/google_oauth_credentials.*
+__pycache__/
