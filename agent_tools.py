@@ -1151,3 +1151,17 @@ def t_stop_server(a, H):
 def t_start_server(a, H):
     import servers
     return servers.start(str(a["id"]))
+
+
+@tool("send_to_telegram", "أرسل ملفًا أو صورة من جهازه إلى محادثته في تيليجرام (حين يطلب «اعرضه لي» أو «أرسله إلى تيليجرام» أو يكلّمك من تيليجرام ويريد رؤية ملف). يعمل لأماكن الكمبيوتر والأقراص والمجلدات السحابية المتزامنة؛ ملف الهاتف أو الآيفون انسخه أولًا إلى الكمبيوتر. الحد ٥٠ ميغابايت.",
+      {"place": PLACE, "path": PATH, "caption": S("وصف قصير يظهر تحت الملف")}, ["place", "path"], YELLOW)
+def t_send_to_telegram(a, H):
+    import telegram_link
+    check_place_path(a["place"], a.get("path"))
+    src = to_src(a["place"])
+    if src["type"] != "local":
+        raise ValueError("الإرسال إلى تيليجرام متاح لملفات الكمبيوتر والأقراص والسحابة المتزامنة؛ انسخ الملف من الهاتف أولًا.")
+    p = H.M.fileops.local_path(src, a["path"])
+    if not p.is_file():
+        raise ValueError("ليس ملفًا أو غير موجود.")
+    return telegram_link.send_file(p, a.get("caption") or "")

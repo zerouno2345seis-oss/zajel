@@ -136,6 +136,10 @@ def start():
         _stop.clear()
         _thread = threading.Thread(target=_loop, daemon=True)
         _thread.start()
+        global _mail_thread
+        if not (_mail_thread and _mail_thread.is_alive()):
+            _mail_thread = threading.Thread(target=_mail_loop, daemon=True)
+            _mail_thread.start()
 
 
 def stop():
@@ -204,10 +208,15 @@ def notify(kind, text):
 
 
 # ================= الاستماع والتوجيه =================
-MAIN_KB = [["الرئيسية", "الوكلاء", "الذاكرة"], ["الأوامر", "المهام", "المساعدة"]]
-BTN = {"الرئيسية": "home", "الوكلاء": "agents", "الذاكرة": "mem", "الأوامر": "cmds", "المهام": "jobs", "المساعدة": "help"}
-COMMANDS = [("home", "الرئيسية"), ("agents", "حال الوكلاء"), ("mem", "الذاكرة"), ("cmds", "الأوامر الجاهزة"), ("jobs", "المهام والموافقات"),
-            ("new", "محادثة جديدة مع المساعد"), ("chats", "محادثات زاجل السابقة"), ("settings", "الإعدادات"), ("help", "المساعدة")]
+MAIN_KB = [["الرئيسية", "الأجهزة", "الوكلاء"], ["العمليات", "الأتمتة", "بحث"], ["الذاكرة", "الأوامر", "المساعدة"]]
+BTN = {"الرئيسية": "home", "الأجهزة": "pc", "الوكلاء": "agents", "العمليات": "ops", "الأتمتة": "auto", "بحث": "findhelp",
+       "الذاكرة": "mem", "الأوامر": "cmds", "المهام": "jobs", "المساعدة": "help"}
+COMMANDS = [("home", "الرئيسية: ملخص الجهاز الحالي"), ("pc", "الأجهزة: بدّل بين الكمبيوترين"), ("agents", "الوكلاء: الحال وتبديل المساعد"),
+            ("ops", "العمليات الجارية: إيقاف مؤقت وإلغاء"), ("auto", "الأتمتة: عرض وتشغيل وإيقاف"), ("find", "بحث في كل الأجهزة: /find كلمة"),
+            ("space", "المساحة الحرة"), ("jobs", "المهام والموافقات المعلّقة"), ("mem", "الذاكرة"), ("cmds", "الأوامر الجاهزة"),
+            ("new", "محادثة جديدة مع المساعد"), ("chats", "تابع محادثة من زاجل"), ("settings", "الإعدادات"), ("help", "المساعدة")]
+HOST = socket.gethostname().split(".")[0]
+FIND = {}
 OPTS = {}          # خيارات الأزرار المقترحة من المساعد: رقم ← نص
 CODES = {}         # رمز التأكيد الثاني لكل طلب أحمر
 SEEN_PENDING = set()
@@ -229,7 +238,7 @@ def _loop():
             STATE["gateway"], STATE["error"] = True, ""
             for u in ups:
                 _save_cfg({"offset": u["update_id"] + 1})
-                threading.Thread(target=_dispatch, args=(u,), daemon=True).start()      # كل طلب في خيط: لا يحجب الاستماع
+                threading.Thread(target=_route, args=(u,), daemon=True).start()      # كل طلب في خيط: لا يحجب الاستماع
         except ConflictError:
             STATE["gateway"], STATE["error"] = False, "هذا البوت يستمع إليه برنامج آخر الآن (جهاز آخر، أو برنامج استعملتَ مفتاحه نفسه مثل Hermes أو AutoClaw)، أو عليه رابط ويب قديم. استعمل بوتًا جديدًا لزاجل وحده من BotFather."
             _stop.wait(20)
@@ -284,8 +293,10 @@ def _on_text(chat, text):
         return
     word = text.split()[0] if text.split() else ""
     name = BTN.get(text) or (word[1:].split("@")[0] if word.startswith("/") else "")
-    if name in ("home", "agents", "mem", "cmds", "jobs", "help", "chats", "settings"):
+    if name in ("home", "agents", "mem", "cmds", "jobs", "help", "chats", "settings", "ops", "auto", "space", "pc", "findhelp"):
         _show(chat, name)
+    elif name == "find":
+        _find(chat, text.split(None, 1)[1] if len(text.split(None, 1)) > 1 else "")
     elif name == "new":
         _save_cfg({"conv": "telegram-" + time.strftime("%m%d%H%M%S")})
         send("بدأت محادثة جديدة مع المساعد.", chat)
@@ -379,6 +390,8 @@ def _ask(chat, q):
     _quiet("deleteMessage", {"chat_id": chat, "message_id": mid})
     out, kb = _opts_kb(v["text"] or "")
     if v["state"] == "done" and out:
+        if len(_presence()) > 1:
+            out += f"\n\n— {HOST}"
         send(out, chat, kb=kb)
     else:
         send("تعذّر: " + (v["error"] or "لا ردّ") if v["state"] == "error" else "أُوقفت المهمة.", chat)
@@ -457,6 +470,38 @@ def _on_callback(chat, mid, data):
         _ask(chat, assistant_store.prompts_list()[int(rest)].get("text") or "")
     elif kind == "cv":
         _save_cfg({"conv": rest}); edit(chat, mid, "تابعنا المحادثة المختارة. اكتب رسالتك.", [])
+    elif kind == "def":
+        import agent_runner
+        agent_runner.set_settings({"default_agent": rest})
+        _save_cfg({"conv": "telegram-" + time.strftime("%m%d%H%M%S")})      # مساعد جديد ← محادثة جديدة
+        edit(chat, mid, "صار المساعد: " + agent_runner.AGENTS[rest]["name"] + ". بدأت محادثة جديدة معه.", [[_b("رجوع", "scr:agents")]])
+    elif kind in ("opp", "opr", "opc"):
+        import agent_server
+        if kind == "opc":
+            r = agent_server.call("cancel_op", {"id": rest}, agent="telegram")
+        else:
+            r = agent_server.call("pause_op", {"id": rest, "paused": kind == "opp"}, agent="telegram")
+        if r.get("error"):
+            send(r["error"], chat)
+        _show(chat, "ops", mid)
+    elif kind in ("aur", "auon", "auoff"):
+        import agent_server
+        if kind == "aur":
+            r = agent_server.call("run_automation_now", {"id": rest}, agent="telegram")
+            send((r.get("result") or {}).get("note") or r.get("error") or "فُحصت القاعدة.", chat)
+        else:
+            agent_server.call("toggle_automation", {"id": rest, "enabled": kind == "auon"}, agent="telegram")
+            _show(chat, "auto", mid)
+    elif kind == "snd":
+        f = FIND.get(rest)
+        if f:
+            import agent_server
+            r = agent_server.call("send_to_telegram", {"place": f[0], "path": f[1]}, agent="telegram")
+            if r.get("error"):
+                send(r["error"], chat)
+    elif kind == "pc":
+        _set_target(rest)
+        _show(chat, "pc", mid)
     elif kind == "tg" and rest in ("notify_error", "notify_long", "notify_update"):     # اعتماد الحمراء يُفتح من زاجل وحده، لا من القناة نفسها
         _save_cfg({rest: not _cfg()[rest]}); _show(chat, "settings", mid)
 
@@ -475,20 +520,26 @@ def _b(t, d):
 
 def _screen(name):
     import agent_runner, agent_metrics, agent_server, assistant_store
+    more = _screen_more(name)
+    if more:
+        return more
     back = [[_b("رجوع", "scr:home")]]
     if name == "home":
         ag = agent_metrics.stats(24, {a["id"]: a["installed"] for a in agent_runner.agents()}, [a["id"] for a in agent_runner.agents()])["agents"]
         up = sum(1 for a in ag if a["status"] in ("ok", "slow"))
         pend = len(agent_server.pending_list())
-        return (f"زاجل على {socket.gethostname().split('.')[0]}\nالوكلاء العاملون: {up} من {len(ag)}\nطلبات تنتظر موافقتك: {pend}\nالمحادثة الحالية: {_cfg()['conv']}",
-                [[_b("الوكلاء", "scr:agents"), _b("الذاكرة", "scr:mem")], [_b("المهام", "scr:jobs"), _b("الأوامر", "scr:cmds")], [_b("المحادثات", "scr:chats"), _b("الإعدادات", "scr:settings")]])
+        return (f"زاجل على {HOST}\nالمساعد: {agent_runner.AGENTS[agent_runner.settings()['default_agent']]['name']}\nالوكلاء العاملون: {up} من {len(ag)}\nطلبات تنتظر موافقتك: {pend}\nالمحادثة: {_cfg()['conv']}",
+                [[_b("الأجهزة", "scr:pc"), _b("الوكلاء", "scr:agents")], [_b("العمليات", "scr:ops"), _b("الأتمتة", "scr:auto")], [_b("المساحة", "scr:space"), _b("الذاكرة", "scr:mem")],
+                 [_b("المهام", "scr:jobs"), _b("الأوامر", "scr:cmds")], [_b("المحادثات", "scr:chats"), _b("الإعدادات", "scr:settings")]])
     if name == "agents":
         names = {a["id"]: a["name"] for a in agent_runner.agents()}
         s = agent_metrics.stats(24, {a["id"]: a["installed"] for a in agent_runner.agents()}, list(names))
         lab = {"ok": "يعمل", "slow": "بطيء", "down": "متوقف", "idle": "لم يُجرَّب"}
         lines = [f"{names.get(a['id'], a['id'])}: {lab[a['status']]}" + (f" — وسيط {a['median']} ثانية" if a["median"] else "") + (f" ({a['why']})" if a["status"] == "down" else "") for a in s["agents"]]
-        kb = [[_b(names.get(a["id"], a["id"]), "ping:" + a["id"])] for a in s["agents"]]
-        return "حال الوكلاء (اضغط اسمًا لفحصه):\n" + "\n".join(lines), kb + back
+        cur = agent_runner.settings()["default_agent"]
+        inst = {a["id"]: a["installed"] for a in agent_runner.agents()}
+        kb = [[_b("فحص " + names.get(a["id"], a["id"]), "ping:" + a["id"])] + ([_b("اجعله المساعد", "def:" + a["id"])] if inst.get(a["id"]) and a["id"] != cur else []) for a in s["agents"]]
+        return f"المساعد الحالي: {names.get(cur, cur)}\n\n" + "\n".join(lines), kb + back
     if name == "mem":
         rows = assistant_store.memory_list()[-8:]
         txt = "الذاكرة: %d عنصرًا\n" % len(assistant_store.memory_list()) + "\n".join("• " + r["text"][:90] for r in rows)
@@ -511,4 +562,271 @@ def _screen(name):
             ] + back
     return ("أنا نفس المساعد الذي في زاجل. اكتب لي بكلامك العادي، أو سجّل رسالة صوتية، وسأفهم وأنفّذ.\n"
             "أمثلة: «ما حال الوكلاء؟» · «انسخ صور هاتفي إلى القرص الأزرق» · «ابحث عن ملف العقد».\n"
-            "العمليات الحمراء (نسخ ونقل وحذف) تصلك ببطاقة موافقة. الأزرار أسفل الشاشة للتنقل السريع."), None
+            "اطلب «اعرض لي الملف كذا» فيصلك الملف هنا.\n"
+            "الأوامر: /pc الأجهزة · /agents الوكلاء وتبديل المساعد · /ops العمليات · /auto الأتمتة · /find بحث · /space المساحة · /jobs الموافقات · /new محادثة جديدة.\n"
+            "لتسأل الجهاز الآخر لمرة واحدة: اكتب اسمه ثم طلبك.\n"
+            "العمليات الحمراء (نسخ ونقل وحذف) تصلك ببطاقة موافقة."), None
+
+
+def _human(n):
+    n = float(n or 0)
+    for u in ("بايت", "كيلوبايت", "ميغابايت", "غيغابايت", "تيرابايت"):
+        if n < 1024:
+            return f"{n:.0f} {u}" if u == "بايت" else f"{n:.1f} {u}"
+        n /= 1024
+    return f"{n:.1f} بيتابايت"
+
+
+def _screen_more(name):
+    """شاشات إضافية: الأجهزة، العمليات، الأتمتة، المساحة، تعليمات البحث."""
+    import agent_server
+    back = [[_b("رجوع", "scr:home")]]
+    if name == "ops":
+        ops = (agent_server.call("list_ops", {}, agent="telegram").get("result") or {}).get("ops", [])
+        run = [o for o in ops if o["state"] == "running"]
+        lines = [f"• {o['title']}: {o['done']}/{o['total']}" + (" (موقوفة مؤقتًا)" if o.get("paused") else "") + (f" · متبقٍ {o['eta']} ث" if o.get("eta") else "") for o in run]
+        lines += [f"✓ {o['title']} ({'تمت' if o['state'] == 'done' else o['state']})" for o in ops if o["state"] != "running"][:5]
+        kb = [[_b("استئناف" if o.get("paused") else "إيقاف مؤقت", ("opr:" if o.get("paused") else "opp:") + o["id"]), _b("إلغاء", "opc:" + o["id"])] for o in run[:5]]
+        return ("العمليات:\n" + "\n".join(lines)) if lines else "لا عمليات جارية ولا حديثة.", kb + [[_b("تحديث", "scr:ops")]] + back
+    if name == "auto":
+        res = agent_server.call("list_automations", {}, agent="telegram").get("result") or {}
+        rules = res.get("rules", [])
+        lines = [f"{'🟢' if r['enabled'] else '⚪'} {r['name']} — كل {r.get('every')} د" + (f" · آخر نتيجة: {r['last_note'][:60]}" if r.get("last_note") else "") for r in rules]
+        kb = [[_b("شغّل الآن: " + r["name"][:20], "aur:" + r["id"]), _b("أوقف" if r["enabled"] else "شغّل", ("auoff:" if r["enabled"] else "auon:") + r["id"])] for r in rules[:6]]
+        txt = ("قواعد الأتمتة:\n" + "\n".join(lines)) if rules else "لا قواعد أتمتة بعد. اطلب من المساعد مثلًا: «راقب مجلد التنزيلات كل ساعة وانقل ملفات PDF إلى مجلد الكتب»."
+        n = res.get("notices") or []
+        if n:
+            txt += "\n\nإشعارات غير مقروءة:\n" + "\n".join("• " + str(x.get("text"))[:90] for x in n[:5])
+        return txt, kb + back
+    if name == "space":
+        r = agent_server.call("disk_space", {}, agent="telegram").get("result") or {}
+        c = r.get("computer") or {}
+        lines = [f"الكمبيوتر: متاح {_human(c.get('free'))} من {_human(c.get('total'))}"]
+        lines += [f"{d['name']}: متاح {_human(d.get('free'))} من {_human(d.get('total'))}" for d in r.get("disks", [])]
+        ph = r.get("phone") or {}
+        if ph.get("free"):
+            lines.append(f"الهاتف: متاح {_human(ph.get('free'))}")
+        return "المساحة:\n" + "\n".join(lines), back
+    if name == "findhelp":
+        return "اكتب: /find ثم جزءًا من اسم الملف.\nمثال: /find عقد الإيجار\nأو اطلب من المساعد بكلامك: «ابحث عن صور رحلة الصيف وأرسل لي أحدثها».", back
+    if name == "pc":
+        tgt = _target()
+        rows, kb = [], []
+        for h, p in sorted(_presence().items()):
+            age = time.time() - p.get("ts", 0)
+            st = "متصل" if age < 1500 else f"غير متصل منذ {int(age // 3600)} ساعة" if age > 3600 else f"غير متصل منذ {int(age // 60)} دقيقة"
+            rows.append(("▶ " if h == tgt else "• ") + f"{h} — {st}" + (" · الإصدار " + p.get("version", "") if p.get("version") else ""))
+            if h != tgt:
+                kb.append([_b("اجعله الحالي: " + h[:30], "pc:" + h)])
+        return "الأجهزة (▶ هو الذي يجيبك الآن):\n" + "\n".join(rows) + "\n\nلتسأل جهازًا لمرة واحدة اكتب أول اسمه ثم طلبك، مثل: «" + " ".join(sorted({h.split('-')[0] for h in _presence()})[:1]) + " ما المساحة الحرة؟». أو اضغط زرًّا ليصير هو الحالي.", kb + [[_b("تحديث", "scr:pc")]] + back
+    return None
+
+
+def _find(chat, q):
+    import agent_server
+    if not q.strip():
+        _show(chat, "findhelp")
+        return
+    note = send("أبحث عن «" + q + "» في كل الأجهزة…", chat)
+    r = agent_server.call("search_all", {"q": q}, agent="telegram")
+    res = r.get("result") or {}
+    ents = res.get("entries") or []
+    if not ents:
+        edit(chat, note, "لا نتائج لـ «" + q + "»." + (" " + r["error"] if r.get("error") else ""))
+        return
+    kb = []
+    for e in ents[:8]:
+        k = uuid_short()
+        FIND[k] = (e.get("place") or e.get("sid"), e.get("path"))
+        kb.append([_b(("📁 " if e.get("is_dir") else "📄 ") + (e.get("name") or "")[:40] + " · " + str(e.get("label") or e.get("sid") or "")[:14], "snd:" + k)])
+    edit(chat, note, f"وجدت {res.get('count', len(ents))} نتيجة لـ «{q}». اضغط ملفًا ليصلك هنا:", kb)
+
+
+def send_file(path, caption=""):
+    """يرسل ملفًا إلى محادثة المستخدم المقترنة (صورة تُعرض صورة، وغيرها مستندًا)."""
+    from pathlib import Path
+    p = Path(path)
+    c = _cfg()
+    if not _tok() or not c["chat_id"]:
+        raise ValueError("تيليجرام غير مقترن على هذا الجهاز.")
+    if p.stat().st_size > 50 * 1024 * 1024:
+        raise ValueError("الملف أكبر من ٥٠ ميغابايت، وهو حد تيليجرام للبوتات.")
+    photo = p.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp") and p.stat().st_size < 10 * 1024 * 1024
+    field, method = ("photo", "sendPhoto") if photo else ("document", "sendDocument")
+    bnd = "zajel" + uuid_short() * 3
+    name = p.name.replace('"', "")
+    body = b""
+    for k, v in (("chat_id", str(c["chat_id"])), ("caption", str(caption)[:900])):
+        body += f'--{bnd}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'.encode()
+    body += f'--{bnd}\r\nContent-Disposition: form-data; name="{field}"; filename="{name}"\r\nContent-Type: application/octet-stream\r\n\r\n'.encode() + p.read_bytes() + f"\r\n--{bnd}--\r\n".encode()
+    req = urllib.request.Request(f"https://api.telegram.org/bot{_tok()}/{method}", data=body, headers={"Content-Type": "multipart/form-data; boundary=" + bnd})
+    try:
+        with urllib.request.urlopen(req, timeout=180) as r:
+            ok = json.loads(r.read().decode()).get("ok")
+    except (urllib.error.URLError, OSError) as exc:
+        raise ValueError("تعذّر الإرسال إلى تيليجرام: " + str(exc)[:80])
+    return {"sent": bool(ok), "name": p.name, "size": p.stat().st_size}
+
+
+# ================= الكمبيوتران: صندوق مشترك في المستودع الخاص =================
+# الجهاز «البوابة» يستلم من تيليجرام؛ إن كان الجهاز المختار غيره يضع الرسالة في صندوقه داخل المستودع الخاص،
+# والجهاز الآخر يمرّ على صندوقه كل ١٠ ثوانٍ وينفّذ ويردّ إليك مباشرة (الإرسال إلى تيليجرام مسموح لأكثر من جهاز).
+MAIL = {"repo": None, "presence": {}, "target": "", "last_presence": 0, "last_pull": 0}
+MAIL_LOCK = threading.Lock()
+_mail_thread = None
+
+
+def _git(*args, timeout=60):
+    import app_update
+    return app_update._run(["git", "-c", "user.name=zajel", "-c", "user.email=zajel@localhost", *args], cwd=MAIL["repo"], timeout=timeout)
+
+
+def _mail_repo():
+    if MAIL["repo"]:
+        return MAIL["repo"]
+    try:
+        import app_update
+        MAIL["repo"] = app_update.ensure_repo()
+    except Exception:
+        MAIL["repo"] = None
+    return MAIL["repo"]
+
+
+def _push(msg):
+    _git("add", "-A")
+    if not _git("status", "--porcelain").stdout.strip():
+        return True
+    _git("commit", "-q", "-m", msg)
+    for _ in range(3):
+        if _git("push", "-q", timeout=90).returncode == 0:
+            return True
+        _git("pull", "--rebase", "-q", timeout=60)
+    return False
+
+
+def _pull():
+    _git("pull", "--rebase", "-q", timeout=60)
+    MAIL["last_pull"] = time.time()
+    d = MAIL["repo"] / "tg"
+    pres = {}
+    for f in (d / "presence").glob("*.json") if (d / "presence").exists() else []:
+        try:
+            pres[f.stem] = json.loads(f.read_text(encoding="utf-8"))
+        except ValueError:
+            pass
+    MAIL["presence"] = pres
+    try:
+        MAIL["target"] = json.loads((d / "target.json").read_text(encoding="utf-8")).get("host", "")
+    except (OSError, ValueError):
+        pass
+    try:
+        cid = json.loads((d / "chat.json").read_text(encoding="utf-8")).get("chat_id", 0)
+        if cid and not _cfg()["chat_id"] and _tok():
+            _save_cfg({"chat_id": cid})        # اقترن جهاز آخر بمحادثتك: هذا الجهاز يتبعه تلقائيًا
+    except (OSError, ValueError):
+        pass
+
+
+def _presence():
+    p = dict(MAIL["presence"])
+    p[HOST] = {"ts": time.time(), "version": _version()}
+    return p
+
+
+def _version():
+    try:
+        import app_update
+        return app_update.local_version()
+    except Exception:
+        return ""
+
+
+def _target():
+    t = MAIL["target"] or HOST
+    return t if t in _presence() else HOST
+
+
+def _set_target(host):
+    with MAIL_LOCK:
+        if not _mail_repo():
+            raise ValueError("التبديل بين الأجهزة يحتاج المزامنة الخاصة: اضغط «زامن الآن» مرة في إعدادات زاجل.")
+        _pull()
+        d = MAIL["repo"] / "tg"
+        d.mkdir(exist_ok=True)
+        (d / "target.json").write_text(json.dumps({"host": host, "t": time.time()}), encoding="utf-8")
+        MAIL["target"] = host
+        _push("تيليجرام: الجهاز الحالي " + host)
+
+
+def _forward(u, host):
+    with MAIL_LOCK:
+        d = MAIL["repo"] / "tg" / "inbox" / host
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f"{u['update_id']}.json").write_text(json.dumps(u, ensure_ascii=False), encoding="utf-8")
+        ok = _push("تيليجرام: طلب إلى " + host)
+    if not ok:
+        send("تعذّر إيصال الطلب إلى " + host + ".")
+
+
+def _route(u):
+    """يقرّر أين يُنفَّذ التحديث: هنا أو في صندوق الجهاز المختار."""
+    m = u.get("message") or {}
+    cb = u.get("callback_query") or {}
+    text = (m.get("text") or "").strip()
+    local = text.startswith("/start") or text.startswith("/pc") or text == "الأجهزة" or (cb.get("data") or "").startswith(("pc:", "scr:pc"))
+    tgt = _target()
+    for h in sorted(_presence(), key=len, reverse=True):     # «اسم الجهاز (أو أوله مثل iMac) ثم الطلب» لمرة واحدة
+        for alias in (h, h.split("-")[0]):
+            if alias and text.lower().startswith(alias.lower() + " "):
+                m["text"] = text[len(alias):].strip(" :،,") or "/home"
+                tgt, local = h, False
+                break
+        else:
+            continue
+        break
+    if local or tgt == HOST or not _mail_repo():
+        _dispatch(u)
+        return
+    age = time.time() - _presence().get(tgt, {}).get("ts", 0)
+    if age > 1500:
+        send(f"الجهاز {tgt} غير متصل منذ {int(age // 60)} دقيقة. نفّذتُ طلبك هنا على {HOST}.", m.get("chat", {}).get("id"))
+        _dispatch(u)
+        return
+    _forward(u, tgt)
+
+
+def _mail_tick():
+    """دورة واحدة: سحب، قراءة صندوق هذا الجهاز، تسجيل الحضور، رفع. تعيد الطلبات الواردة."""
+    items = []
+    with MAIL_LOCK:
+        if time.time() - MAIL["last_pull"] > (30 if STATE["gateway"] else 10):
+            _pull()
+        box = MAIL["repo"] / "tg" / "inbox" / HOST
+        todo = sorted(box.glob("*.json")) if box.exists() else []
+        for f in todo:
+            try:
+                items.append(json.loads(f.read_text(encoding="utf-8")))
+            except ValueError:
+                pass
+            f.unlink()
+        if time.time() - MAIL["last_presence"] > 600 or todo:
+            pd = MAIL["repo"] / "tg" / "presence"
+            pd.mkdir(parents=True, exist_ok=True)
+            (pd / f"{HOST}.json").write_text(json.dumps({"ts": time.time(), "version": _version(), "gateway": STATE["gateway"]}), encoding="utf-8")
+            if _cfg()["chat_id"]:
+                (MAIL["repo"] / "tg" / "chat.json").write_text(json.dumps({"chat_id": _cfg()["chat_id"]}), encoding="utf-8")
+            MAIL["last_presence"] = time.time()
+        if todo or _git("status", "--porcelain").stdout.strip():
+            _push("تيليجرام: " + HOST)
+    return items
+
+
+def _mail_loop():
+    while not _stop.is_set():
+        try:
+            if _cfg()["enabled"] and _mail_repo():
+                for u in _mail_tick():
+                    threading.Thread(target=_dispatch, args=(u,), daemon=True).start()
+        except Exception as exc:
+            STATE["mail_error"] = str(exc)[:120]
+        _stop.wait(5)
