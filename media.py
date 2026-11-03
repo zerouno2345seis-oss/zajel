@@ -825,6 +825,11 @@ def transcribe(path, lang: str | None = None, model: str = "small", wait_seconds
             job["error"] = str(exc)
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
+            try:
+                import telegram_link
+                telegram_link.notify_job("تفريغ الصوت", job["state"], time.time() - job["started"], job.get("error") or "")
+            except Exception:
+                pass
 
     t = threading.Thread(target=worker, daemon=True)
     t.start()
@@ -1022,6 +1027,11 @@ def convert(src, target_ext: str, out_dir=None, options: dict | None = None) -> 
             except Exception as exc:
                 job["state"] = "error"
                 job["error"] = str(exc)
+            try:
+                import telegram_link
+                telegram_link.notify_job("تحويل الملف", job["state"], time.time() - job["started"], job.get("error") or "")
+            except Exception:
+                pass
 
         # نحاول إنجازه خلال 5 ثوانٍ، فإن طال يبقى كـ job
         t = threading.Thread(target=run_ff, daemon=True)

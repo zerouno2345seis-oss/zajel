@@ -601,10 +601,28 @@ def run(job, kind, base: Path, target: Path, options: dict):
         job["state"] = "error"; job["error"] = str(exc)
 
 
+KIND_AR = {"analyze": "تحليل المساحة", "duplicates": "البحث عن الملفات المكررة", "folders": "البحث عن المجلدات المتشابهة",
+           "similar": "البحث عن الصور المتشابهة", "caches": "فحص الذاكرات المؤقتة", "large": "البحث عن الملفات الكبيرة", "empty": "البحث عن المجلدات الفارغة"}
+
+
+def run_notified(fn, job, *args):
+    """يشغّل الفحص ثم يرسل نتيجته إلى Telegram إن كان مفعّلًا (الإلغاء لا يُشعِر)."""
+    try:
+        fn(job, *args)
+    finally:
+        if job.get("state") in ("done", "error"):
+            try:
+                import telegram_link
+                telegram_link.notify_job(KIND_AR.get(job["kind"], "الفحص"), job["state"], time.time() - job["started"], job.get("error", ""),
+                                         "افتح زاجل لرؤية النتيجة." if job["state"] == "done" else "")
+            except Exception:
+                pass
+
+
 def start(kind: str, base: Path, target: Path, options: dict) -> dict:
     job = new_job(kind, str(target))
     job["base"] = str(base)
-    threading.Thread(target=run, args=(job, kind, base, target, options), daemon=True).start()
+    threading.Thread(target=run_notified, args=(run, job, kind, base, target, options), daemon=True).start()
     return job
 
 
@@ -666,6 +684,12 @@ def remove(job_id: str, paths: list[str], permanent: bool) -> list[dict]:
         except Exception as exc:
             report.append({"path": raw, "ok": False, "detail": str(exc)})
     log("permanent" if permanent else "trash", [r["path"] for r in report if r["ok"]], all(r["ok"] for r in report))
+    try:
+        import telegram_link
+        ok_n = sum(1 for r in report if r["ok"])
+        telegram_link.notify_job("التنظيف", "done", 3, detail=f"نُقل أو حُذف {ok_n} من {len(report)}" + (" (بعضها تعذّر)." if ok_n < len(report) else "."))
+    except Exception:
+        pass
     return report
 
 
@@ -752,5 +776,5 @@ def rc_run(job, kind, spec, options):
 def rc_start(kind, spec, options):
     job = new_job(kind, spec)
     job["base"] = spec
-    threading.Thread(target=rc_run, args=(job, kind, spec, options), daemon=True).start()
+    threading.Thread(target=run_notified, args=(rc_run, job, kind, spec, options), daemon=True).start()
     return job

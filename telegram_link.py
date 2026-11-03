@@ -20,7 +20,7 @@ SERVICE = "zajel-telegram-bot"
 STATE = {"gateway": False, "running": False, "error": "", "bot": "", "pair_code": "", "pair_until": 0}
 _thread = None
 _stop = threading.Event()
-DEFAULTS = {"enabled": False, "chat_id": 0, "notify_error": True, "notify_long": True, "notify_update": True, "long_secs": 60, "offset": 0, "conv": "telegram", "approve_red": False}
+DEFAULTS = {"enabled": False, "chat_id": 0, "notify_error": True, "notify_long": True, "notify_update": True, "notify_done": True, "long_secs": 60, "offset": 0, "conv": "telegram", "approve_red": False}
 
 
 def init(data_dir):
@@ -108,11 +108,11 @@ def status():
                   ("هذا الجهاز ينضم تلقائيًا بعد «زامن الآن» على الجهازين، ولا يلزمه اقتران." if not c["chat_id"] else "يجيب هذا الجهاز عندما تختاره من «الأجهزة».")
     return {"pair_link": f"https://t.me/{c.get('bot')}?start={STATE['pair_code']}" if live and c.get("bot") else "", **{"has_token": bool(_token()) if DATA else False, "enabled": c["enabled"], "bot": c.get("bot", ""), "paired": bool(c["chat_id"]), "machine": socket.gethostname().split(".")[0],
             "gateway": STATE["gateway"], "running": STATE["running"], "error": err,
-            "pair_code": STATE["pair_code"] if live else "", "notify_error": c["notify_error"], "notify_long": c["notify_long"], "notify_update": c["notify_update"], "approve_red": c["approve_red"]}}
+            "pair_code": STATE["pair_code"] if live else "", "notify_error": c["notify_error"], "notify_long": c["notify_long"], "notify_update": c["notify_update"], "notify_done": c["notify_done"], "approve_red": c["approve_red"]}}
 
 
 def configure(b):
-    d = {k: bool(b[k]) for k in ("notify_error", "notify_long", "notify_update", "approve_red") if k in b}
+    d = {k: bool(b[k]) for k in ("notify_error", "notify_long", "notify_update", "notify_done", "approve_red") if k in b}
     if "enabled" in b:
         d["enabled"] = bool(b["enabled"])
         if d["enabled"] and not _token():
@@ -210,6 +210,17 @@ def notify(kind, text):
         c = _cfg()
         if c["enabled"] and c["chat_id"] and c.get("notify_" + kind):
             threading.Thread(target=send, args=(f"[{socket.gethostname().split('.')[0]}] {text}",), daemon=True).start()
+    except Exception:
+        pass
+
+
+def notify_job(label, state, secs, error="", detail=""):
+    """إشعار نهاية مهمة (تحليل، تنظيف، تفريغ، تحويل). ما دون ثلاث ثوانٍ لا يُشعِر حتى لا يغرقك البوت."""
+    try:
+        if state == "done" and secs >= 3:
+            notify("done", f"اكتمل {label} بعد {int(secs)} ثانية. {detail}".strip())
+        elif state == "error":
+            notify("error", f"فشل {label}: {str(error)[:200]}")
     except Exception:
         pass
 
@@ -612,7 +623,7 @@ def _on_callback(chat, mid, data):
     elif kind == "one":
         ONESHOT["host"] = rest
         edit(chat, mid, f"اكتب سؤالك الآن (أو سجّله صوتًا)، وسيجيب عنه {rest} وحده، ثم نعود إلى {_target()}.", [])
-    elif kind == "tg" and rest in ("notify_error", "notify_long", "notify_update"):     # اعتماد الحمراء يُفتح من زاجل وحده، لا من القناة نفسها
+    elif kind == "tg" and rest in ("notify_error", "notify_long", "notify_update", "notify_done"):     # اعتماد الحمراء يُفتح من زاجل وحده، لا من القناة نفسها
         _save_cfg({rest: not _cfg()[rest]}); _show(chat, "settings", mid)
 
 
@@ -669,6 +680,7 @@ def _screen(name):
         on = lambda k: "مفعّل" if c[k] else "مغلق"
         return "الإعدادات:\nاعتماد العمليات الحمراء من تيليجرام: " + on("approve_red") + " (يُغيَّر من إعدادات زاجل فقط). يتطلب ضغطتين ورمزًا، والحذف النهائي لا يتم من هنا أبدًا.", [
             [_b("إشعار الفشل: " + on("notify_error"), "tg:notify_error")], [_b("إشعار الردّ الطويل: " + on("notify_long"), "tg:notify_long")],
+            [_b("إشعار اكتمال المهام: " + on("notify_done"), "tg:notify_done")],
             ] + back
     return ("أنا نفس المساعد الذي في زاجل. اكتب لي بكلامك العادي، أو سجّل رسالة صوتية، وسأفهم وأنفّذ.\n"
             "أمثلة: «ما حال الوكلاء؟» · «انسخ صور هاتفي إلى القرص الأزرق» · «ابحث عن ملف العقد».\n"

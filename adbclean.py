@@ -211,7 +211,7 @@ def run(job, kind, serial, path, options):
 def start(serial, kind, path, options):
     job = C.new_job(kind, path)
     job["serial"] = serial
-    threading.Thread(target=run, args=(job, kind, serial, path, options), daemon=True).start()
+    threading.Thread(target=C.run_notified, args=(run, job, kind, serial, path, options), daemon=True).start()
     return job
 
 
