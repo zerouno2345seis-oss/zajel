@@ -16,12 +16,12 @@ MAX_CHARS = 12000
 _HEAD = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
 
 
-def _post(body, sid=""):
+def _post(body, sid="", timeout=60):
     h = dict(_HEAD)
     if sid:
         h["Mcp-Session-Id"] = sid
     req = urllib.request.Request(URL, data=json.dumps(body, ensure_ascii=False).encode("utf-8"), headers=h, method="POST")
-    with urllib.request.urlopen(req, timeout=60) as r:
+    with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.headers.get("Mcp-Session-Id", ""), r.read().decode("utf-8", errors="replace")
 
 
@@ -37,15 +37,15 @@ def parse(text):
     return json.loads(text)
 
 
-def call(name, args=None):
+def call(name, args=None, timeout=60):
     if name not in ALLOWED:
         raise ValueError("هذه الأداة غير متاحة للمساعد.")
     try:
         sid, _ = _post({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
-            "protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "zajel", "version": "1"}}})
-        _post({"jsonrpc": "2.0", "method": "notifications/initialized"}, sid)
-        _, raw = _post({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": name, "arguments": args or {}}}, sid)
-    except (urllib.error.URLError, OSError) as exc:
+            "protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "zajel", "version": "1"}}}, timeout=timeout)
+        _post({"jsonrpc": "2.0", "method": "notifications/initialized"}, sid, timeout)
+        _, raw = _post({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": name, "arguments": args or {}}}, sid, timeout)
+    except (urllib.error.URLError, OSError, ValueError) as exc:
         raise ValueError("جسر واتساب لا يستجيب على هذا الجهاز. تأكد أن خدمة whatsapp-mcp تعمل ومقترنة بحسابك.") from exc
     msg = parse(raw)
     if "error" in msg:

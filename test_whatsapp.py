@@ -220,5 +220,18 @@ class Preview(unittest.TestCase):
             self.assertEqual(T.TOOLS[n]["tier"], "red")
 
 
+class SyncSplit(Flow):
+    def test_state_not_exported_and_import_keeps_state(self):
+        W._save({"vip": ["سارة"], "seen": ["a", "b"], "started": "x"})
+        ex = W.sync_export()
+        self.assertEqual(ex["vip"], ["سارة"])
+        for k in ("seen", "started", "digest_last"):
+            self.assertNotIn(k, ex)
+        W.sync_import({"vip": ["علي"], "seen": ["zzz"]})
+        c = W._cfg()
+        self.assertEqual(c["vip"], ["علي"])
+        self.assertEqual(c["seen"], ["a", "b"])
+
+
 if __name__ == "__main__":
     unittest.main()

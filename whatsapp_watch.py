@@ -37,22 +37,49 @@ def init(data_dir):
     start()
 
 
-def _cfg():
+STATE_KEYS = ("seen", "started", "digest_last")     # حالة تشغيل خاصة بكل جهاز، لا تُزامَن
+
+
+def _read(name):
     try:
-        d = json.loads((DATA / "whatsapp.json").read_text(encoding="utf-8"))
+        d = json.loads((DATA / name).read_text(encoding="utf-8"))
+        return d if isinstance(d, dict) else {}
     except (OSError, ValueError):
-        d = {}
-    return {**DEFAULTS, **d}
+        return {}
+
+
+def _write(name, d):
+    p = DATA / name
+    tmp = p.with_suffix(".tmp")
+    tmp.write_text(json.dumps(d, ensure_ascii=False, indent=1), encoding="utf-8")
+    os.replace(tmp, p)
+
+
+def _cfg():
+    old = _read("whatsapp.json")
+    st = _read("whatsapp_state.json")
+    for k in STATE_KEYS:                     # ملف قديم فيه الحالة مع الإعدادات
+        if k in old and k not in st:
+            st[k] = old[k]
+    return {**DEFAULTS, **old, **st}
 
 
 def _save(d):
     with LOCK:
         c = {**_cfg(), **d}
-        p = DATA / "whatsapp.json"
-        tmp = p.with_suffix(".tmp")
-        tmp.write_text(json.dumps(c, ensure_ascii=False, indent=1), encoding="utf-8")
-        os.replace(tmp, p)
+        _write("whatsapp.json", {k: v for k, v in c.items() if k not in STATE_KEYS})
+        _write("whatsapp_state.json", {k: c[k] for k in STATE_KEYS})
         return c
+
+
+def bridge_state():
+    """هل جسر واتساب موجود على هذا الجهاز؟ ok / unpaired / none"""
+    try:
+        r = WL.call("get_status", {}, timeout=4)
+    except Exception:
+        return "none"
+    t = json.dumps(r, ensure_ascii=False).lower() if not isinstance(r, str) else r.lower()
+    return "unpaired" if ("not connected" in t or "disconnected" in t or '"connected": false' in t) else "ok"
 
 
 # ---------- التقييم ----------
@@ -391,7 +418,7 @@ def status():
             "vip": c["vip"], "keywords": c["keywords"], "alert_groups": c["alert_groups"], "quiet_from": c["quiet_from"], "quiet_to": c["quiet_to"],
             "quiet": f"{c['quiet_from']}–{c['quiet_to']}", "baseline": bool(c["started"]),
             "last_poll_secs_ago": int(time.time() - STATE["last_poll"]) if STATE["last_poll"] else None, "error": STATE["error"],
-            "alerts_sent": STATE["alerts_sent"], "templates": len(c["templates"])}
+            "alerts_sent": STATE["alerts_sent"], "templates": len(c["templates"]), "bridge": bridge_state()}
 
 
 def configure(b):
@@ -464,3 +491,14 @@ def render_template(name, values=None):
         out = out.replace("{" + str(k) + "}", str(v))
     out = re.sub(r"\s*\{[^}]*\}", "", out)       # متغير بلا قيمة يُحذف بدل أن يُرسل خامًا
     return out.strip()
+
+
+# ---------- المزامنة بين الأجهزة (الإعدادات فقط، لا الحالة) ----------
+def sync_export():
+    return {k: v for k, v in _cfg().items() if k not in STATE_KEYS}
+
+
+def sync_import(d):
+    if not isinstance(d, dict):
+        return
+    _save({k: v for k, v in d.items() if k in DEFAULTS and k not in STATE_KEYS})

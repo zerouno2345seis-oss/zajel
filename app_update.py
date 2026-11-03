@@ -227,6 +227,25 @@ def sync_run():
         rs.write_text(ls.read_text(encoding="utf-8"), encoding="utf-8"); settings = "pushed"
     elif rs.exists() and not ls.exists():
         ls.write_text(rs.read_text(encoding="utf-8"), encoding="utf-8"); settings = "pulled"
+    # واتساب: الإعدادات فقط (الأحدث يفوز)، وحالة المتابعة تبقى على كل جهاز
+    wa = "same"
+    try:
+        import whatsapp_watch as W
+        rw, lw = repo / "whatsapp_config.json", DATA / "whatsapp.json"
+        mine = json.dumps(W.sync_export(), ensure_ascii=False, indent=1, sort_keys=True)
+        if rw.exists() and lw.exists():
+            theirs = json.dumps(json.loads(rw.read_text(encoding="utf-8")), ensure_ascii=False, indent=1, sort_keys=True)
+            if theirs != mine:
+                if _git_time(repo, "whatsapp_config.json") > lw.stat().st_mtime:
+                    W.sync_import(json.loads(rw.read_text(encoding="utf-8"))); wa = "pulled"
+                else:
+                    rw.write_text(mine, encoding="utf-8"); wa = "pushed"
+        elif lw.exists():
+            rw.write_text(mine, encoding="utf-8"); wa = "pushed"
+        elif rw.exists():
+            W.sync_import(json.loads(rw.read_text(encoding="utf-8"))); wa = "pulled"
+    except (OSError, ValueError):
+        wa = "error"
     _run(["git", "add", "-A"], cwd=repo)
     if _run(["git", "status", "--porcelain"], cwd=repo).stdout.strip():
         _run(["git", "-c", "user.name=zajel", "-c", "user.email=zajel@localhost", "commit", "-q", "-m", "مزامنة " + time.strftime("%Y-%m-%d %H:%M")], cwd=repo)
@@ -235,4 +254,4 @@ def sync_run():
             raise ValueError("تعذّر رفع المزامنة: " + p.stderr.strip()[:120])
     msg = f"أُضيف {a} وتحدّث {u} وحُذف {d} في الذاكرة" + (f"، ووصلت {auto_new} قاعدة أتمتة (موقوفة)" if auto_new else "")
     _state_file().write_text(json.dumps({"last": time.time(), "msg": msg, "repo": DATA_REPO_NAME}), encoding="utf-8")
-    return {"ok": True, "memory_added": a, "memory_updated": u, "memory_removed": d, "settings": settings, "msg": msg}
+    return {"ok": True, "memory_added": a, "memory_updated": u, "memory_removed": d, "settings": settings, "whatsapp": wa, "msg": msg}

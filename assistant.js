@@ -6330,6 +6330,13 @@
       const sec = waState.sections || {};
       waCard.status.textContent = (waState.error ? 'تنبيه: ' + waState.error : (waState.last_poll_secs_ago == null ? 'لم يبدأ الفحص بعد.' : 'آخر فحص قبل ' + waState.last_poll_secs_ago + ' ثانية.')) + ' (يعمل ما دام زاجل مفتوحًا)';
       const h = (t) => { const d = el('div', t); d.style.cssText = 'font-weight:600;margin-top:6px'; return d; };
+      if (waState.bridge && waState.bridge !== 'ok') {
+        const n = el('div', waState.bridge === 'none'
+          ? 'تنبيه: جسر واتساب غير موجود على هذا الجهاز، فلن يعمل المراقب هنا. ما تكتبه هنا يُحفظ ويصل إلى الجهاز الذي فيه الجسر عند المزامنة (زر المزامنة في الإعدادات).'
+          : 'تنبيه: الجسر موجود لكنه غير مقترن بحسابك؛ افتح صفحة الإقران أولًا.');
+        n.style.cssText = 'padding:6px 8px;border-radius:6px;background:rgba(220,150,0,.15)';
+        waBody.appendChild(n);
+      }
       waBody.appendChild(h('التنبيهات الفورية'));
       waBody.appendChild(waCheck('أرسل لي في Telegram ما يهمّني فور وصوله', waState.enabled, (v) => waSave({ enabled: v })));
       waBody.appendChild(waCheck('اشمل المجموعات (صامتة افتراضيًا)', waState.alert_groups, (v) => waSave({ alert_groups: v })));
