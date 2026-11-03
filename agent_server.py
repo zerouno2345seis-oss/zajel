@@ -36,7 +36,7 @@ def nav_push(place, path, is_file=False):
         del NAV[:-20]
 
 
-OWNED_UI = ("/api/assistant/", "/api/sync/item", "/api/migrate/item")
+OWNED_UI = ("/api/assistant/", "/api/sync/item", "/api/migrate/item", "/api/term/")
 
 
 def owns(path):

@@ -2798,6 +2798,8 @@
   const FLOAT_MIN_H = 260;
   let isSidebarOpen = false;
   let activeTab = 'chats'; // chats | memory | prompts | automations | settings
+  let activeWindow = 'assistant';
+  let controlActiveTab = 'settings';
 
   let agentsList = [];
   let currentSettings = { default_agent: 'agy', models: {}, efforts: {} };
@@ -2863,8 +2865,11 @@
     isSidebarOpen = localStorage.getItem('zajel_as_sidebar_open') === 'true';
     const savedTab = localStorage.getItem('zajel_as_active_tab');
     if (savedTab && ['chats', 'memory', 'prompts', 'scripts', 'automations', 'agents', 'settings'].includes(savedTab)) {
-      activeTab = savedTab;
+      if (['chats', 'memory', 'prompts'].includes(savedTab)) activeTab = savedTab;
+      else controlActiveTab = savedTab;
     }
+    const savedControlTab = localStorage.getItem('zajel_control_active_tab');
+    if (savedControlTab && ['settings', 'agents', 'automations', 'scripts', 'terminal'].includes(savedControlTab)) controlActiveTab = savedControlTab;
     const savedPlaces = localStorage.getItem('zajel_as_search_places');
     if (savedPlaces) {
       const parsed = JSON.parse(savedPlaces);
@@ -2896,6 +2901,12 @@
   let sidebarEl = null;
   let sideTabsNav = null;
   let sideContentEl = null;
+  let assistantContentEl = null;
+  let controlContentEl = null;
+  let controlTabsNav = null;
+  let controlPanelEl = null;
+  let controlChipEl = null;
+  let controlAutomationBadge = null;
   let sourceBadgeText = null;
   let chatContainer = null;
   let scrollBottomBtn = null;
@@ -3178,6 +3189,12 @@
   }
 
   function switchTab(tabKey) {
+    if (['scripts', 'automations', 'agents', 'settings', 'terminal'].includes(tabKey)) { switchControlTab(tabKey); return; }
+    activeWindow = 'assistant';
+    sideContentEl = assistantContentEl;
+    if (controlPanelEl) { controlPanelEl.hidden = true; controlPanelEl.style.display = 'none'; }
+    if (activeWindow === 'control') { stopAutomationsPolling(); stopAgentsPolling(); }
+    window.ZajelTerminalUI?.deactivate?.();
     if (activeTab === 'automations' && tabKey !== 'automations') {
       stopAutomationsPolling();
     }
@@ -3193,7 +3210,24 @@
     loadActiveTabData();
   }
 
+  function switchControlTab(tabKey) {
+    activeWindow = 'control';
+    if (activeTab === 'automations' && tabKey !== 'automations') stopAutomationsPolling();
+    if (activeTab === 'agents' && tabKey !== 'agents') stopAgentsPolling();
+    activeTab = tabKey;
+    controlActiveTab = tabKey;
+    sideContentEl = controlContentEl;
+    try { localStorage.setItem('zajel_control_active_tab', tabKey); localStorage.setItem('zajel_as_active_tab', tabKey); } catch (_) {}
+    if (controlPanelEl) { controlPanelEl.hidden = false; controlPanelEl.style.display = 'flex'; }
+    if (assistantContentEl) assistantContentEl.replaceChildren();
+    if (controlTabsNav) Array.from(controlTabsNav.children).forEach(b => b.classList.toggle('as-active-tab', b.dataset.tab === tabKey));
+    renderActiveTab();
+    loadActiveTabData();
+  }
+
   function loadActiveTabData() {
+    if (activeWindow === 'control' && activeTab === 'terminal') { window.ZajelTerminalUI?.activate?.(controlContentEl); return; }
+    window.ZajelTerminalUI?.deactivate?.();
     if (activeTab === 'chats') {
       loadChats();
     } else if (activeTab === 'memory') {
@@ -5525,7 +5559,7 @@
   function startAutomationsPolling() {
     stopAutomationsPolling();
     automationsPollTimer = setInterval(() => {
-      if (isOpen && isSidebarOpen && activeTab === 'automations') {
+      if ((isOpen && isSidebarOpen || activeWindow === 'control' && controlPanelEl && !controlPanelEl.hidden) && activeTab === 'automations') {
         loadAutomations(true);
       } else {
         stopAutomationsPolling();
@@ -5547,13 +5581,12 @@
   }
 
   function updateAutomationsTabBadge() {
-    if (!automationsTabBadge) return;
-    if (unreadNoticesCount > 0) {
-      automationsTabBadge.textContent = unreadNoticesCount > 99 ? '99+' : String(unreadNoticesCount);
-      automationsTabBadge.hidden = false;
-    } else {
-      automationsTabBadge.hidden = true;
-    }
+    [automationsTabBadge, controlAutomationBadge].forEach(badge => {
+      if (!badge) return;
+      if (unreadNoticesCount > 0) { badge.textContent = unreadNoticesCount > 99 ? '99+' : String(unreadNoticesCount); badge.hidden = false; }
+      else badge.hidden = true;
+    });
+    if (controlChipEl) controlChipEl.classList.toggle('as-alert', unreadNoticesCount > 0);
   }
 
   async function checkAutomationsNoticeBadge() {
@@ -6632,7 +6665,7 @@
 
   const agentChartColors = ['#4f8cff', '#19a974', '#f59e0b', '#e05d8c', '#8b6ce8', '#13a8a8', '#ef6548', '#78909c'];
   function agentColor(i) { return agentChartColors[i % agentChartColors.length]; }
-  function agentsActive() { return isOpen && isSidebarOpen && activeTab === 'agents'; }
+  function agentsActive() { return (isOpen && isSidebarOpen || activeWindow === 'control' && controlPanelEl && !controlPanelEl.hidden) && activeTab === 'agents'; }
   function stopAgentsPolling() { if (agentsPollTimer) clearInterval(agentsPollTimer); agentsPollTimer = null; }
   function startAgentsPolling() {
     stopAgentsPolling();
@@ -6736,8 +6769,9 @@
   }
 
   function renderActiveTab() {
-    if (!sideTabsNav) return;
-    Array.from(sideTabsNav.children).forEach(b => {
+    const nav = activeWindow === 'control' ? controlTabsNav : sideTabsNav;
+    if (!nav) return;
+    Array.from(nav.children).forEach(b => {
       b.classList.toggle('as-active-tab', b.dataset.tab === activeTab);
     });
 
@@ -6748,6 +6782,7 @@
     else if (activeTab === 'automations') renderAutomationsTab();
     else if (activeTab === 'agents') renderAgentsTab();
     else if (activeTab === 'settings') renderSettingsTab();
+    else if (activeTab === 'terminal') window.ZajelTerminalUI?.activate?.(controlContentEl);
   }
 
   /* ==========================================================================
@@ -8040,6 +8075,11 @@
       } else {
         topBar.appendChild(chipEl);
       }
+      controlChipEl = el('span', '', 'chip', { id: 'zajel-control-chip', title: 'مركز التحكم', role: 'button', tabindex: '0', 'aria-label': 'مركز التحكم' });
+      controlChipEl.append(createSvg('settings', 15), document.createTextNode(' مركز التحكم'));
+      controlChipEl.onclick = () => { if (controlPanelEl) { controlPanelEl.hidden = !controlPanelEl.hidden; controlPanelEl.style.display = controlPanelEl.hidden ? 'none' : 'flex'; if (controlPanelEl.hidden) { stopAutomationsPolling(); stopAgentsPolling(); window.ZajelTerminalUI?.deactivate?.(); } } if (controlPanelEl && !controlPanelEl.hidden) switchControlTab(controlActiveTab); };
+      controlChipEl.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); controlChipEl.click(); } };
+      topBar.insertBefore(controlChipEl, vclean && vclean.parentNode === topBar ? vclean : null);
     }
 
     // 2. النافذة الجانبية الكاملة
@@ -8341,11 +8381,7 @@
     const tabsConfig = [
       { key: 'chats', title: 'المحادثات', icon: 'chat' },
       { key: 'memory', title: 'الذاكرة', icon: 'brain' },
-      { key: 'prompts', title: 'الأوامر', icon: 'spark' },
-      { key: 'scripts', title: 'المكتبة', icon: 'layers' },
-      { key: 'automations', title: 'الأتمتة', icon: 'activity' },
-      { key: 'agents', title: 'الوكلاء', icon: 'activity' },
-      { key: 'settings', title: 'الإعدادات', icon: 'settings' }
+      { key: 'prompts', title: 'الأوامر', icon: 'spark' }
     ];
 
     tabsConfig.forEach(t => {
@@ -8365,7 +8401,34 @@
     });
 
     sideContentEl = el('div', '', 'as-side-content');
+    assistantContentEl = sideContentEl;
     sidebarEl.append(sideTabsNav, sideContentEl, sideGrip);
+
+    controlPanelEl = el('aside', '', 'as-panel as-control-panel', { id: 'zajel-control-panel', role: 'region', 'aria-label': 'مركز التحكم' });
+    controlPanelEl.hidden = true;
+    controlPanelEl.style.display = 'none';
+    controlPanelEl.style.cssText = 'position:fixed;inset:12px 12px 12px auto;z-index:10001;display:flex;flex-direction:column;width:min(760px,96vw);max-height:calc(100vh - 24px);background:var(--bg);box-shadow:0 8px 40px #0005;border-radius:12px;overflow:hidden';
+    const controlHead = el('header', '', 'as-head');
+    controlHead.append(el('strong', 'مركز التحكم', 'as-head-title'));
+    const closeControl = el('button', '', 'as-icon-btn', { type: 'button', title: 'إغلاق مركز التحكم', 'aria-label': 'إغلاق مركز التحكم' });
+    closeControl.appendChild(createSvg('close', 15)); closeControl.onclick = () => { controlPanelEl.hidden = true; controlPanelEl.style.display = 'none'; stopAutomationsPolling(); stopAgentsPolling(); window.ZajelTerminalUI?.deactivate?.(); };
+    controlHead.appendChild(closeControl);
+    const controlBody = el('div', '', 'as-body-layout');
+    const controlSide = el('aside', '', 'as-sidebar');
+    controlTabsNav = el('nav', '', 'as-side-tabs');
+    [ ['settings','الإعدادات','settings'], ['agents','الوكلاء','activity'], ['automations','الأتمتة','activity'], ['scripts','المكتبة','layers'], ['terminal','الطرفية','activity'] ].forEach(([key,title,icon]) => {
+      const tab = el('button', '', 'as-tab-btn', { type:'button', title, 'data-tab':key });
+      tab.append(createSvg(icon,15), document.createTextNode(title));
+      if (key === 'automations') { controlAutomationBadge = el('span','','as-tab-unread-badge'); controlAutomationBadge.hidden = true; tab.appendChild(controlAutomationBadge); }
+      tab.onclick = () => switchControlTab(key); controlTabsNav.appendChild(tab);
+    });
+    controlContentEl = el('div','','as-side-content');
+    controlSide.append(controlTabsNav, controlContentEl);
+    controlSide.style.cssText = 'flex:1 1 auto;width:100%;max-width:none;min-width:0;border:0';
+    controlBody.style.cssText = 'display:flex;flex:1;min-height:0';
+    controlBody.append(controlSide);
+    controlPanelEl.append(controlHead, controlBody);
+    document.body.appendChild(controlPanelEl);
 
     // المنطقة الرئيسية
     const mainArea = el('main', '', 'as-main');
