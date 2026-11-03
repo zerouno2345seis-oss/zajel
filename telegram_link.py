@@ -380,7 +380,37 @@ def _on_text(chat, text):
             raise ValueError("اكتب /run ثم رقم الأمر كما في قائمة الأوامر.")
         _ask(chat, p.get("text") or "")
     else:
-        _ask(chat, re.sub(r"^/ask\s*", "", text))
+        _ask_batched(chat, re.sub(r"^/ask\s*", "", text))
+
+
+BATCH = {"msgs": [], "timer": None}
+BATCH_LOCK = threading.Lock()
+BATCH_WAIT = 4.0
+
+
+def _ask_batched(chat, q):
+    """رسائل تصل متتابعة (رابط ثم «تحليل» ثم رابط معاد توجيهه) تخص طلبًا واحدًا: ننتظر هدوءًا قصيرًا ونرسلها معًا.
+    وإلا بدأ المساعد العمل على أول رسالة وحدها بلا الباقي فيسأل «ماذا تريد؟»."""
+    with BATCH_LOCK:
+        BATCH["msgs"].append(q)
+        if BATCH["timer"]:
+            BATCH["timer"].cancel()
+        BATCH["timer"] = threading.Timer(BATCH_WAIT, _flush_batch, args=(chat,))
+        BATCH["timer"].daemon = True
+        BATCH["timer"].start()
+
+
+def _flush_batch(chat):
+    with BATCH_LOCK:
+        msgs, BATCH["msgs"], BATCH["timer"] = BATCH["msgs"], [], None
+    msgs = [m for m in msgs if m.strip()]
+    if not msgs:
+        return
+    q = msgs[0] if len(msgs) == 1 else "[رسائل متتابعة من تيليجرام تخص طلبًا واحدًا؛ اقرأها معًا:]\n" + "\n".join(f"{i}. {m}" for i, m in enumerate(msgs, 1))
+    try:
+        _ask(chat, q)
+    except Exception as exc:
+        send("تعذّر تنفيذ الطلب: " + str(exc)[:150], chat)
 
 
 def _on_voice(chat, v):
@@ -440,6 +470,8 @@ def _ask(chat, q):
         raise ValueError("السؤال فارغ.")
     agent = _pick_agent()
     r = agent_runner.start_chat(agent, q, "", _cfg()["conv"])
+    if r.get("conversation") and r["conversation"] != _cfg()["conv"]:
+        _save_cfg({"conv": r["conversation"]})     # المحادثة الفعلية تأخذ معرّفًا جديدًا؛ بدون حفظه تبدأ كل رسالة محادثة جديدة بلا ذاكرة، وتُرفض الرسالة التالية بـ«يعمل على محادثة أخرى»
     jid = r["job"]
     mid = send("أعمل على طلبك…", chat)
     last, t0, tick = "", time.time(), 0
