@@ -1,4 +1,5 @@
 import time
+from pathlib import Path
 import unittest
 
 import terminal as T
@@ -47,7 +48,24 @@ if __name__ == "__main__":
 
 @unittest.skipUnless(T.available(), "tmux غير مثبت")
 class Council(unittest.TestCase):
+    FAKE = r'''import sys, re, time
+buf = ""
+name = sys.argv[1] if len(sys.argv) > 1 else "fake"
+print("ready", flush=True)
+for line in sys.stdin:
+    buf += line
+    m = re.search(r"ثم A- ثم (\w+) ثم", buf)
+    if m and buf.rstrip().endswith("في أي مكان آخر."):
+        tok = m.group(1)
+        time.sleep(1)
+        print(f"● ⟦A-{tok}⟧")
+        print(f"  جواب من {name}: وصل {len(buf)} حرفًا")
+        print(f"● ⟦Z-{tok}⟧", flush=True)
+        buf = ""
+'''
+
     def setUp(self):
+        Path("/tmp/fake_agent.py").write_text(self.FAKE, encoding="utf-8")
         T.SOCK = "zajel-test2"
         T.ANSWER_TIMEOUT = 40
         for i, nm in (("fa", "A"), ("fb", "B"), ("fm", "M")):

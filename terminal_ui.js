@@ -72,8 +72,8 @@
   function syncSelects(){slots.forEach((slot,i)=>{if(!slot.select)return;if(!slot.id&&agents[i])slot.id=agents[i].id||agents[0]?.id||'';if(!slot.id&&agents[0])slot.id=agents[0].id;const sel=slot.select;sel.replaceChildren();agents.forEach(a=>{const o=document.createElement('option');o.value=a.id;o.textContent=a.name+' · '+a.label;sel.appendChild(o);});if(slot.id)sel.value=slot.id;});}
   async function refreshList(){if(!root||listBusy)return;listBusy=true;try{const data=await req('list');agents=Array.isArray(data.agents)?data.agents:[];notify=!!data.notify;const hint=root.querySelector('.as-memory-hint'),app=root.querySelector('.as-terminal');if(data.available===false){hint.hidden=false;hint.textContent=data.hint||'الطرفية غير متاحة';app.hidden=true;}else{hint.hidden=true;app.hidden=false;if(builtLayout!==layout){build();builtLayout=layout;}else renderAgents();syncSelects();}}catch(e){const hint=root.querySelector('.as-memory-hint');hint.hidden=false;hint.textContent='تعذر تحميل قائمة الطرفيات: '+e.message;}finally{listBusy=false;}}
   async function refreshScreens(force){if(!root||root.hidden)return;for(const slot of slots){if(!slot.id||!slot.pre)continue;try{const d=await req('screen?id='+encodeURIComponent(slot.id)+'&since='+encodeURIComponent(force?'':slot.hash)+'&hist='+hist);if(d.hash)slot.hash=d.hash;if(!d.unchanged&&typeof d.text==='string'){const pre=slot.pre,stick=pre.scrollHeight-pre.scrollTop-pre.clientHeight<40||!pre.dataset.init;pre.innerHTML=ansiHtml(d.text);pre.dataset.init='1';if(stick)pre.scrollTop=pre.scrollHeight;}if(d.alive===false)slot.pre.dataset.dead='true';}catch(_){}}}
-  const councilStateText={queued:'في الانتظار',starting:'يبدأ',asking:'يجيب',done:'انتهى',done_raw:'انتهى بلا علامات',timeout:'انتهت المهلة',error:'خطأ',stopped:'متوقف'};
-  const councilStateColor={queued:'#a3a3a3',starting:'#eab308',asking:'#3b82f6',done:'#22c55e',done_raw:'#16a34a',timeout:'#f97316',error:'#ef4444',stopped:'#737373'};
+  const councilStateText={restarting:'يُعاد تشغيله',queued:'في الانتظار',starting:'يبدأ',asking:'يجيب',done:'انتهى',done_raw:'انتهى بلا علامات',timeout:'انتهت المهلة',error:'خطأ',stopped:'متوقف'};
+  const councilStateColor={restarting:'#a855f7',queued:'#a3a3a3',starting:'#eab308',asking:'#3b82f6',done:'#22c55e',done_raw:'#16a34a',timeout:'#f97316',error:'#ef4444',stopped:'#737373'};
   function councilButton(label,action,primary){const b=document.createElement('button');b.type='button';b.className='btn'+(primary?' pri':'');b.textContent=label;b.onclick=action;return b;}
   const agentColors = { claude: '#d97757', codex: '#10a37f', agy: '#4285f4', hermes: '#a855f7', opencode: '#14b8a6', pi: '#ec4899' };
   const colorOf = id => agentColors[id] || '#64748b';
@@ -177,13 +177,14 @@
 
     // ===== مربع الكتابة والمرفقات =====
     const composer = mk('div', 'cn-composer'); const attBar = mk('div', 'cn-atts'); attBar.hidden = true;
-    const ta = mk('textarea'); ta.rows = 1; ta.dir = 'auto'; ta.placeholder = 'اسأل المجلس… (⌘↩ للإرسال)';
+    const ta = mk('textarea'); ta.rows = 1; ta.dir = 'auto'; ta.placeholder = 'اسأل المجلس… أرفق ملفًا أو اكتب مساره على الكمبيوتر (Markdown أو Word أو PDF) · ⌘↩ للإرسال';
     const row = mk('div', 'cn-row'); const attachBtn = mk('button', 'cn-ibtn', '📎'); attachBtn.type = 'button'; attachBtn.title = 'إرفاق ملفات لوكيل أو للحكم';
     const fileIn = mk('input'); fileIn.type = 'file'; fileIn.multiple = true; fileIn.hidden = true;
     const limSel = mk('select', 'cn-btn'); limSel.title = 'بعد هذه المدة يحكم الرئيسي بما وصل ويكمل البطيء'; [[180, 'مهلة الحكم: ٣ د'], [300, 'مهلة الحكم: ٥ د'], [600, 'مهلة الحكم: ١٠ د'], [0, 'بلا مهلة']].forEach(([v, t]) => { const o = mk('option', '', t); o.value = v; limSel.appendChild(o); }); limSel.value = (() => { try { return localStorage.getItem('zajel_council_limit') || '300'; } catch (_) { return '300'; } })(); limSel.onchange = () => { try { localStorage.setItem('zajel_council_limit', limSel.value); } catch (_) {} };
+    const modeSel = mk('select', 'cn-btn'); modeSel.title = 'مباشر: إجابات كاملة موثوقة للنصوص الكبيرة · عبر الطرفيات: تشاهد الوكيل وهو يكتب'; [['direct', 'مباشر (موثوق)'], ['terminal', 'عبر الطرفيات (حي)']].forEach(([v, t]) => { const o = mk('option', '', t); o.value = v; modeSel.appendChild(o); }); modeSel.value = (() => { try { return localStorage.getItem('zajel_council_mode') || 'direct'; } catch (_) { return 'direct'; } })(); modeSel.onchange = () => { try { localStorage.setItem('zajel_council_mode', modeSel.value); } catch (_) {} };
     const ctx = mk('span', 'cn-sub'); const newBtn = mk('button', 'cn-btn', 'سؤال جديد'); newBtn.type = 'button'; newBtn.hidden = true;
     const sendBtn = mk('button', 'cn-send', 'أرسل'); sendBtn.type = 'button';
-    row.append(attachBtn, fileIn, limSel, ctx, newBtn, mk('span', 'sp'), sendBtn);
+    row.append(attachBtn, fileIn, modeSel, limSel, ctx, newBtn, mk('span', 'sp'), sendBtn);
     composer.append(attBar, ta, row); host.appendChild(composer);
     const thread = mk('div', 'cn-thread'); host.appendChild(thread);
     const empty = mk('div', 'cn-empty', 'اختر الوكلاء بالضغط على أسمائهم، وعيّن الحكم بالتاج، ثم اطرح سؤالك.'); thread.appendChild(empty);
@@ -205,7 +206,7 @@
     ta.addEventListener('input', grow);
 
     let warmTimer = null;
-    const warmUp = () => { clearTimeout(warmTimer); warmTimer = setTimeout(() => { const ids = [...new Set([...selected, ...(main ? [main] : [])])].filter(id => available.some(a => a.id === id)); if (ids.length && (!activeId || lastDoneId === activeId)) req('council/warm', { ids }).catch(() => {}); }, 1200); };
+    const warmUp = () => { clearTimeout(warmTimer); warmTimer = setTimeout(() => { const ids = [...new Set([...selected, ...(main ? [main] : [])])].filter(id => available.some(a => a.id === id)); if (ids.length && modeSel.value === 'terminal' && (!activeId || lastDoneId === activeId)) req('council/warm', { ids }).catch(() => {}); }, 1200); };
     const renderRoster = () => {
       roster.replaceChildren();
       available.forEach(a => {
@@ -248,7 +249,7 @@
     host.addEventListener('drop', ev => { if (ev.dataTransfer?.files?.length) { ev.preventDefault(); [...ev.dataTransfer.files].forEach(upload); } });
 
     // ===== عرض الجولة =====
-    const badge = state => { const b = mk('span', 'cn-badge' + (['asking', 'starting'].includes(state) ? ' run' : ''), councilStateText[state] || 'في الانتظار'); b.style.background = councilStateColor[state] || '#737373'; return b; };
+    const badge = state => { const b = mk('span', 'cn-badge' + (['asking', 'starting', 'restarting'].includes(state) ? ' run' : ''), councilStateText[state] || 'في الانتظار'); b.style.background = councilStateColor[state] || '#737373'; return b; };
     const secs = t => { const n = Math.round(t); return n < 60 ? n + ' ث' : Math.floor(n / 60) + ' د ' + (n % 60) + ' ث'; };
     const card = (title, id, state, answer, live, judge, data) => {
       const c = mk('section', 'cn-card' + (judge ? ' judge' : '')); if (!judge) c.style.setProperty('--c', colorOf(id));
@@ -256,6 +257,7 @@
       h.append(av, mk('strong', '', title));
       if (data && data.sent_at) h.appendChild(mk('span', 'cn-time', secs(((data.finished_at || Date.now() / 1000) - data.sent_at))));
       h.appendChild(badge(state)); c.appendChild(h);
+      if (data && data.note) c.appendChild(mk('div', 'cn-sub', '↻ ' + data.note));
       if (answer) {
         let body;
         const m = judge ? answer.search(/^##\s*الحكم النهائي.*$/m) : -1;
@@ -278,7 +280,7 @@
       let box = boxes[r.id];
       if (!box) { setFold(true); empty.remove(); box = boxes[r.id] = mk('section', 'cn-round'); thread.appendChild(box); setTimeout(() => box.scrollIntoView({ behavior: 'smooth', block: 'start' }), 50); }
       box.replaceChildren();
-      const q = mk('div', 'cn-q', r.question); if ((r.attachments || []).length) q.appendChild(mk('div', 'cn-qfiles', '📎 ' + r.attachments.map(a => a.name || a.path.split('/').pop()).join('، '))); box.appendChild(q);
+      const q = mk('div', 'cn-q', r.question); if ((r.attachments || []).length) q.appendChild(mk('div', 'cn-qfiles', '📎 ' + r.attachments.map(a => (a.name || a.path.split('/').pop()) + (a.scanned ? ' (⚠ مصوَّر بلا نص)' : a.text ? ' (✓ استُخرج نصه)' : '')).join('، '))); box.appendChild(q);
       const st = r.agents || {}; const ev = r.eval || {};
       { const tot = (r.delegates || []).length, dn = (r.delegates || []).filter(id => ['done', 'done_raw', 'error', 'timeout', 'stopped'].includes((st[id] || {}).state)).length; const judged = !r.main || ['done', 'done_raw'].includes(ev.state); const all = tot + (r.main ? 1 : 0), cur = dn + (r.main && judged ? 1 : 0);
         if (!finished(r)) { const pg = mk('div'); const t = mk('div', 'cn-prog-t'); t.append(mk('span', '', dn < tot ? `${dn} من ${tot} أجابوا` : (r.main ? 'الحكم يكتب تقييمه…' : 'اكتملت الإجابات')), mk('span', '', Math.round(cur / all * 100) + '%')); const bar = mk('div', 'cn-prog'); const i = mk('i'); i.style.width = Math.round(cur / all * 100) + '%'; bar.appendChild(i); pg.append(t, bar); box.appendChild(pg); } }
@@ -286,7 +288,7 @@
       const grid = mk('div', 'cn-grid'); (r.delegates || []).forEach(id => { const d = st[id] || {}; grid.appendChild(card(d.name || nameOf(id), id, d.state, d.answer || d.error, d.live, false, d)); }); box.appendChild(grid);
       const foot = mk('div', 'cn-foot');
       const anyAns = Object.values(st).some(x => x.answer);
-      if (r.cut && r.pending > 0) { foot.appendChild(mk('span', 'cn-sub', 'حكم الرئيسي بما وصل؛ ما زال ' + r.pending + ' يكتب إجابته…')); }
+      if (r.phase === 'refining') { foot.appendChild(mk('span', 'cn-sub', 'زاجل ينتظر ' + (r.pending || 'بعض') + ' وكيل ليحدّث الحكم بإجاباتهم…')); }
       if (r.main && anyAns && ev.state !== 'done' && ev.state !== 'done_raw' && !finished(r)) { const b = mk('button', 'cn-btn', 'قيّم الآن بما وصل'); b.type = 'button'; b.onclick = async () => { try { await req('council/evaluate', { id: r.id }); poll(); } catch (e) { err(e); } }; foot.appendChild(b); }
       if (finished(r) && anyAns) { foot.appendChild(mk('span', 'cn-sub', 'حفظ كامل الجلسة:')); [['Word', 'docx'], ['PDF', 'pdf'], ['Markdown', 'md']].forEach(([t, f]) => { const b = mk('button', 'cn-btn', t); b.type = 'button'; b.onclick = async () => { try { const x = await req('council/export', { id: r.id, fmt: f }); b.textContent = '✓ ' + t; foot.querySelector('.cn-sub').textContent = 'حُفظ في: ' + x.path; } catch (e) { err(e); } }; foot.appendChild(b); }); }
       if (foot.childNodes.length) box.appendChild(foot);
@@ -312,7 +314,7 @@
       if (!ta.value.trim() || !ids.length) { err(new Error('اكتب سؤالًا واختر مفوَّضًا واحدًا على الأقل')); return; }
       const files = atts.filter(a => a.status === 'ok').map(a => ({ path: a.path, name: a.name, to: a.to }));
       try {
-        const d = await req('council/send', { ids, text: ta.value, main, evaluate: true, attachments: files, parent: lastDoneId || '', limit: Number(limSel.value) });
+        const d = await req('council/send', { ids, text: ta.value, main, evaluate: true, attachments: files, parent: lastDoneId || '', limit: Number(limSel.value), mode: modeSel.value });
         setFold(true); activeId = d.id; lastDoneId = ''; ta.value = ''; atts = []; renderAtts(); grow(); sync();
         try { window.ZajelTerminalUI?.showAgents?.(main && !ids.includes(main) ? [...ids, main] : ids); } catch (_) {}
         clearInterval(councilTimer); councilTimer = setInterval(poll, 1500); poll();

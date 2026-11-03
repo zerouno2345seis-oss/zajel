@@ -274,7 +274,7 @@ COUNCIL_MAX = 12
 AGENT_LOCKS = {}
 ANSWER_TIMEOUT = 900          # أقصى انتظار لإجابة وكيل (ثوانٍ)
 MAX_Q = 8000
-MAX_ANS_IN_EVAL = 6000
+MAX_ANS_IN_EVAL = 14000
 
 
 def _plain(i, hist=5000):
@@ -310,7 +310,7 @@ def extract_answer(text, tok):
     zs = list(z.finditer(text))
     if zs:                                           # علامة نهاية بلا بداية: نبدأ بعد آخر تعليمة تنسيق مرتدّة
         tail = text[:zs[-1].start()]
-        k = tail.rfind("في أي مكان آخر.")
+        k = max(tail.rfind("في أي مكان آخر."), tail.rfind("العلامتين في أي مكان آخر."))
         if k != -1:
             body = _clean_body(tail[k + len("في أي مكان آخر."):])
             body = "\n".join(ln for ln in body.splitlines() if "⟦A-" not in ln and re.search(r"\w", ln) or not ln.strip())
@@ -320,8 +320,10 @@ def extract_answer(text, tok):
 
 
 def _wrap_question(text, tok):
-    return (f"{text.strip()}\n\n[تنسيق الإجابة فقط] اكتب إجابتك الكاملة بين سطرين مستقلين: سطر فيه ⟦A-{tok}⟧ وحده قبل الإجابة، "
-            f"وسطر فيه ⟦Z-{tok}⟧ وحده بعدها. لا تكتب هاتين العلامتين في أي مكان آخر.")
+    # العلامة لا تُكتب هنا حرفيًا: لو ظهرت في التعليمة المعروضة على الشاشة لظنّ المجلس أن الإجابة انتهت قبل أن تبدأ
+    return (f"{text.strip()}\n\n[تنسيق الإجابة فقط] ابدأ إجابتك بسطر مستقل فيه: القوس ⟦ ثم A- ثم {tok} ثم القوس ⟧ ملتصقة بلا مسافات، "
+            f"واختمها بسطر مستقل بالطريقة نفسها لكن بحرف Z بدل A. اعمل بكامل أدواتك وخذ وقتك، ثم اكتب الإجابة كاملة بين السطرين. "
+            f"لا تكتب العلامتين في أي مكان آخر.")
 
 
 def _save_council():
@@ -365,23 +367,37 @@ def _type_message(i, text):
     send(i, "", keys=["Enter"])
 
 
-HEADLESS = {"claude": ["claude", "-p"], "codex": ["codex", "exec", "--skip-git-repo-check"], "hermes": ["hermes", "-z"],
-            "agy": ["agy", "-p", "--print-timeout", "10m"], "opencode": ["opencode", "run", "-m", "opencode/glm-5.3-flash-free"]}
+HEADLESS = {"claude": ["claude", "-p", "--allowedTools=Read,Grep,Glob,WebSearch,WebFetch"], "codex": ["codex", "exec", "--skip-git-repo-check"], "hermes": ["hermes", "-z"],
+            "agy": ["agy", "--print-timeout", "10m", "-p"], "opencode": ["opencode", "run", "-m", "opencode/glm-5.3-flash-free"]}
 
 
-def _headless(i, question):
-    """احتياط حين تعجز الطرفية التفاعلية عن إيصال الإجابة (واجهة ملء الشاشة بلا سجل): نسأل الوكيل بوضعه غير التفاعلي. يعيد النص أو None."""
+def _headless(i, question, entry=None, rd=None, timeout=900):
+    """يسأل الوكيل بوضعه غير التفاعلي (بلا شاشة) ويعيد إجابته كاملة، أو None. يكتب في entry زمن العمل حيًّا."""
     base = HEADLESS.get(i)
     exe = base and shutil.which(base[0], path=EXTRA_PATH_STR())
     if not exe:
         return None
     try:
-        r = subprocess.run([exe] + base[1:] + [question], cwd=str(Path.home()), stdin=subprocess.DEVNULL, capture_output=True, text=True,
-                           timeout=420, env={**os.environ, "PATH": EXTRA_PATH_STR()})
-    except (subprocess.TimeoutExpired, OSError):
+        pr = subprocess.Popen([exe] + base[1:] + [question], cwd=str(Path.home()), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, text=True, env={**os.environ, "PATH": EXTRA_PATH_STR()})
+    except OSError:
         return None
-    out = re.sub(r"\x1b\[[0-9;]*m", "", r.stdout or "").strip()
-    return out if r.returncode == 0 and out and "Error:" not in out[:200] else None
+    t0 = time.time()
+    while pr.poll() is None:
+        if (rd and rd.get("stop")) or time.time() - t0 > timeout:
+            pr.kill()
+            return None
+        if entry is not None:
+            entry["live"] = f"يقرأ ويعمل بكامل أدواته في الخلفية… ({int(time.time() - t0)} ث)"
+        time.sleep(2)
+    out, _err = pr.communicate()
+    out = re.sub(r"\x1b\[[0-9;]*m", "", out or "").strip()
+    return out if pr.returncode == 0 and out and "Error:" not in out[:200] else None
+
+
+def can_direct(i):
+    base = HEADLESS.get(i)
+    return bool(base and shutil.which(base[0], path=EXTRA_PATH_STR()))
 
 
 def EXTRA_PATH_STR():
@@ -390,6 +406,21 @@ def EXTRA_PATH_STR():
 
 def _ask(rd, i, entry, question, tok):
     """يرسل السؤال إلى وكيل ويلتقط إجابته من شاشته. يملأ entry ويعيد."""
+    if rd.get("mode", "direct") == "direct" and can_direct(i):
+        try:
+            entry.update(state="asking", sent_at=time.time(), via="direct")
+            ans = _headless(i, question, entry, rd)
+            if rd.get("stop"):
+                entry.update(state="stopped", finished_at=time.time())
+            elif ans:
+                entry.update(state="done", answer=ans, finished_at=time.time())
+            else:
+                entry.update(state="error", error="لم يُرجع الوكيل إجابة (تحقق من تسجيل دخوله أو مفتاحه، أو أن المهمة تجاوزت ١٥ دقيقة).", finished_at=time.time())
+        except Exception as exc:
+            entry.update(state="error", error=str(exc)[:200], finished_at=time.time())
+        finally:
+            _save_council()
+        return
     lock = AGENT_LOCKS.setdefault(i, threading.Lock())
     with lock:
         try:
@@ -446,6 +477,60 @@ def _ask(rd, i, entry, question, tok):
             _save_council()
 
 
+DOC_EXT = (".docx", ".doc", ".rtf", ".odt", ".pages", ".html", ".htm", ".rtfd")
+
+
+def extract_text(path):
+    """يحوّل Word/PDF إلى ملف نصي بجانبه (يُقرأ بلا أدوات ولا أذونات). يعيد مسار النص أو None."""
+    src = Path(path)
+    if not src.is_file():
+        return None
+    out = src.with_suffix(src.suffix + ".txt")
+    if out.is_file() and out.stat().st_mtime >= src.stat().st_mtime:
+        return str(out)
+    ext = src.suffix.lower()
+    if ext in (".md", ".markdown", ".txt"):
+        return None          # نص عادي أصلًا: يُقرأ مباشرة من مساره
+    try:
+        if ext in DOC_EXT:
+            subprocess.run(["/usr/bin/textutil", "-convert", "txt", "-encoding", "UTF-8", "-output", str(out), str(src)],
+                           capture_output=True, timeout=120)
+        elif ext == ".pdf":
+            try:
+                import fitz
+                with fitz.open(str(src)) as d:
+                    out.write_text("\n\n".join(f"--- صفحة {n + 1} ---\n" + pg.get_text() for n, pg in enumerate(d)), encoding="utf-8")
+            except ImportError:
+                exe = shutil.which("pdftotext", path=EXTRA_PATH_STR())
+                if exe:
+                    subprocess.run([exe, "-layout", str(src), str(out)], capture_output=True, timeout=120)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if out.is_file() and _meaningful(re.sub(r"--- صفحة \d+ ---", "", out.read_text(encoding="utf-8", errors="ignore")[:200000])) < 40:
+        out.unlink()                       # ملف مصوَّر (صفحات صور بلا نص): لا نوهم الوكلاء بنص فارغ
+        return None
+    return str(out) if out.is_file() and out.stat().st_size > 20 else None
+
+
+def _att(path, name="", to="*"):
+    text = extract_text(path)
+    scanned = not text and Path(path).suffix.lower() == ".pdf"
+    return {"path": path, "name": name or Path(path).name, "to": to, "text": text, "scanned": scanned}
+
+
+PATH_RE = re.compile(r"(?:~|/Users|/Volumes|/private|/tmp)[^\n\"'«»<>|]*?\.(?:md|markdown|txt|docx?|rtf|odt|pages|pdf|html?)\b", re.I)
+
+
+def paths_in(text):
+    """مسارات ملفات موجودة فعلًا ذُكرت في نص السؤال (تُعامَل كمرفقات للجميع)."""
+    found = []
+    for m in PATH_RE.finditer(text or ""):
+        p = os.path.expanduser(m.group(0).strip().strip("`'\""))
+        if os.path.isfile(p) and p not in found:
+            found.append(p)
+    return found[:8]
+
+
 def _prev_note(rd):
     pr = COUNCIL.get(rd.get("parent") or "")
     return f"\n\n(هذه متابعة لسؤال سابق في المجلس: «{pr['question'][:300]}»)" if pr else ""
@@ -453,64 +538,151 @@ def _prev_note(rd):
 
 def _files_note(rd, who):
     """سطور المرفقات الموجَّهة إلى وكيل معيّن (who: معرّف الوكيل أو "main")."""
-    paths = [a["path"] for a in rd.get("attachments", []) if a.get("to") in ("*", who)]
-    if not paths:
+    mine = [a for a in rd.get("attachments", []) if a.get("to") in ("*", who)]
+    if not mine:
         return ""
-    return "\n\nملفات مرفقة (اقرأها من هذه المسارات قبل الإجابة):\n" + "\n".join(f"- {p}" for p in paths)
+    lines = []
+    for a in mine:
+        if a.get("scanned"):
+            lines.append(f"- {a.get('name') or Path(a['path']).name}: ملف PDF مصوَّر (صفحاته صور بلا نص) في {a['path']} — اقرأه بأداة تعرّف ضوئي إن كانت لديك، وإلا فصرّح بأنك لم تستطع قراءته ولا تخمّن محتواه")
+        elif a.get("text"):
+            lines.append(f"- {a.get('name') or Path(a['path']).name}: نصّه الكامل جاهز للقراءة في {a['text']} (الأصل: {a['path']})")
+        else:
+            lines.append(f"- {a['path']}")
+    return ("\n\nملفات مرفقة — اقرأها كاملة قبل الإجابة (النص المستخرج ملف نصي عادي يُقرأ مباشرة):\n" + "\n".join(lines))
 
 
 def _eval_prompt(rd):
-    parts = [f"أنت الوكيل الرئيسي في «مجلس الوكلاء». سُئل عدّة وكلاء السؤال التالي:\n\n«{rd['question']}»{_prev_note(rd)}{_files_note(rd, 'main')}\n\nهذه إجاباتهم:"]
+    parts = [f"أنت الوكيل الرئيسي (الحَكَم) في «مجلس الوكلاء» داخل برنامج زاجل. سُئل عدّة وكلاء السؤال التالي:\n\n«{rd['question']}»{_prev_note(rd)}{_files_note(rd, 'main')}\n\nهذه إجاباتهم:"]
     for i in rd["delegates"]:
         e = rd["agents"][i]
-        if e.get("answer"):
-            parts.append(f"\n===== إجابة {BY_ID[i]['name']} =====\n{e['answer'][:MAX_ANS_IN_EVAL]}")
+        tag = f"{BY_ID[i]['name']} (المعرّف: {i}" + (f"، أعاد زاجل تشغيله {e['retries']} مرة" if e.get("retries") else "") + ")"
+        if _real(e):
+            parts.append(f"\n===== إجابة {tag} =====\n{e['answer'][:MAX_ANS_IN_EVAL]}")
+        elif e.get("answer"):
+            parts.append(f"\n===== {tag}: لم تُلتقط إجابته نظيفة، هذا آخر ما على شاشته (قد يكون ضجيجًا) =====\n{e['answer'][:1500]}")
         else:
-            parts.append(f"\n===== {BY_ID[i]['name']}: لم تصل إجابة ({e.get('state')}) =====")
-    parts.append("\n\nأنت الحكم. اكتب حكمك بصيغة Markdown بهذه العناوين بالترتيب: ## الاتفاق (ما اتفقوا عليه) ، ## الاختلاف (ما اختلفوا فيه ومن الأصح ولماذا) ، "
-                 "## الأخطاء والمبالغات ، ## الترتيب (من الأفضل مع سبب مختصر لكل واحد) ، ## الحكم النهائي (إجابة موحّدة مرجَّحة). "
-                 "لا تنقل إجاباتهم كاملة (ستُرفق تلقائيًا). لا تنفّذ أي أوامر ولا تعدّل ملفات: التقييم نصّي فقط.")
+            parts.append(f"\n===== {tag}: لم تصل إجابة ({e.get('state')}) =====")
+    parts.append("\n\nأنت الحكم. احكم على المضمون فقط، وابنِ حكمك على الإجابات الحقيقية، واقرأ المرفقات بنفسك إن احتجت. "
+                 "اكتب حكمك بصيغة Markdown بهذه العناوين بالترتيب: ## الاتفاق ، ## الاختلاف (ومن الأصح ولماذا) ، ## الأخطاء والمبالغات ، "
+                 "## الترتيب (من الأفضل مع سبب مختصر) ، ## الحكم النهائي (إجابة موحّدة مرجَّحة كاملة). لا تنقل إجاباتهم كاملة (ستُرفق تلقائيًا). "
+                 "إن رأيت أن وكيلًا لم يعمل أو جاءت إجابته ناقصة أو غير منطقية، فاكتب في آخر حكمك سطرًا مستقلًا بالصيغة: "
+                 "RETRY: معرّف1, معرّف2 — فيعيد زاجل تشغيله ويسأله من جديد ثم يعرض عليك إجابته لتحدّث حكمك. لا تنفّذ أوامر تعدّل الملفات.")
     return "".join(parts)
 
 
+RETRY_RE = re.compile(r"^\s*\**RETRY\**\s*[:：]\s*(.+)$", re.M | re.I)
+
+
 def _run_eval(rd):
+    """يسأل الحَكَم؛ يعيد قائمة الوكلاء الذين طلب إعادتهم."""
     main = rd["main"]
     if not main:
-        rd["phase"] = "done"
-        return
+        return []
+    if not any(_real(e) for e in rd["agents"].values()):
+        rd["eval"].update(state="error", error="لم تصل أي إجابة حقيقية؛ لم يُطلب الحكم.", answer="")
+        return []
     rd["phase"] = "evaluating"
     ev = rd["eval"]
-    ev["tok"] = secrets.token_hex(3)
+    ev.update(tok=secrets.token_hex(3), state="queued", answer="", live="", version=ev.get("version", 0) + 1)
     _save_council()
     _ask(rd, main, ev, _eval_prompt(rd), ev["tok"])
-    rd["phase"] = "stopped" if rd["stop"] else "done"
+    want = []
+    m = RETRY_RE.search(ev.get("answer") or "")
+    if m:
+        want = [x for x in re.split(r"[,،\s]+", m.group(1)) if x in rd["agents"]]
+        ev["answer"] = RETRY_RE.sub("", ev["answer"]).strip()
     _save_council()
+    return want
 
 
 FINAL = ("done", "done_raw", "error", "timeout", "stopped")
+NOISE = re.compile(r"RTL Support Plugin|Commands: |Build · |ctrl\+p|tab agents|Brewed for|Churned for|Worked for|for shortcuts|MCP: |LSP: |\$\d+\.\d+|[─━▀▄█╹┃│]{4,}")
+
+
+def _meaningful(text):
+    """كم كلمة حقيقية في النص بعد حذف سطور واجهة الطرفية (شعارات، شريط حالة، خطوط)."""
+    keep = [ln for ln in str(text or "").splitlines() if ln.strip() and not NOISE.search(ln) and not re.search(r"⟦[AZ]-", ln)]
+    return len(re.findall(r"[\w\u0600-\u06FF]{2,}", "\n".join(keep)))
+
+
+def _real(e):
+    """إجابة يُبنى عليها حكم: التُقطت بعلاماتها (أو بالوضع الهادئ) وفيها كلام فعلي."""
+    return e.get("state") == "done" and _meaningful(e.get("answer")) >= 2
+
+
+MAX_RETRY = 1
+
+
+def _weak(e):
+    return e.get("state") in ("done_raw", "error", "timeout") or (e.get("state") == "done" and not _real(e))
+
+
+def _retry(rd, i, why):
+    """يعيد تشغيل جلسة الوكيل نظيفة ويسأله من جديد (بالعلامات ثم بالوضع الهادئ احتياطًا)."""
+    e = rd["agents"][i]
+    e.update(state="restarting", answer="", live="", error="", retries=e.get("retries", 0) + 1, note=why)
+    _save_council()
+    if not (rd.get("mode", "direct") == "direct" and can_direct(i)):
+        try:
+            restart(i)
+        except Exception:
+            pass
+    _ask(rd, i, e, rd["question"] + _files_note(rd, i), rd["tok"])
 
 
 def _run_round(rd):
-    threads = []
+    threads = {}
     for i in rd["delegates"]:
         t = threading.Thread(target=_ask, args=(rd, i, rd["agents"][i], rd["question"] + _files_note(rd, i), rd["tok"]), daemon=True)
         t.start()
-        threads.append(t)
-    t0, limit = time.time(), rd.get("limit") or 0
-    while any(t.is_alive() for t in threads):
-        time.sleep(1)
-        if rd["stop"]:
-            break
-        got = any(e.get("answer") and e.get("state") in ("done", "done_raw") for e in rd["agents"].values())
-        if limit and got and rd["main"] and time.time() - t0 > limit:    # انتهت المهلة: يحكم الرئيسي بما وصل ويبقى البطيء يكمل
-            rd["cut"] = True
-            break
+        threads[i] = t
+
+    def supervise():
+        """زاجل يراقب: من انتهى بإجابة ضعيفة أو تعطّل يُعاد تشغيله مرة واحدة."""
+        for i, t in list(threads.items()):
+            e = rd["agents"][i]
+            if not t.is_alive() and _weak(e) and e.get("retries", 0) < MAX_RETRY and not rd["stop"]:
+                threads[i] = threading.Thread(target=_retry, args=(rd, i, "أعاد زاجل تشغيله: لم تصل إجابة صالحة"), daemon=True)
+                threads[i].start()
+
+    def wait(until_cut):
+        t0, limit = time.time(), rd.get("limit") or 0
+        while any(t.is_alive() for t in threads.values()) and not rd["stop"]:
+            time.sleep(1)
+            supervise()
+            if until_cut and limit and rd["main"] and time.time() - t0 > limit and any(_real(e) for e in rd["agents"].values()):
+                rd["cut"] = True       # انتهت المهلة: يحكم الحَكَم بما وصل ويكمل البطيء
+                return
+            if not until_cut and time.time() - t0 > ANSWER_TIMEOUT:
+                return
+        supervise()
+        if any(t.is_alive() for t in threads.values()) and not rd["stop"]:
+            wait(until_cut)
+
+    wait(True)
     if rd["stop"]:
-        rd["phase"] = "stopped"
-    elif rd["evaluate"] and rd["main"]:
-        _run_eval(rd)
-    else:
-        rd["phase"] = "done"
+        rd["phase"] = "stopped"; _save_council(); return
+    if not (rd["evaluate"] and rd["main"]):
+        rd["phase"] = "refining" if rd.get("cut") else "done"
+        wait(False)
+        rd["phase"] = "stopped" if rd["stop"] else "done"; _save_council(); return
+
+    seen = {i for i, e in rd["agents"].items() if _real(e)}
+    want = _run_eval(rd)
+    # الحَكَم طلب إعادة وكلاء، أو هناك بطيئون لم يصلوا بعد: ننتظرهم ثم نحدّث الحكم مرة واحدة
+    for i in want:
+        if rd["agents"][i].get("retries", 0) < MAX_RETRY + 1 and not (threads[i].is_alive()):
+            threads[i] = threading.Thread(target=_retry, args=(rd, i, "أعاده الحَكَم: إجابته ناقصة أو غير منطقية"), daemon=True)
+            threads[i].start()
+    if any(t.is_alive() for t in threads.values()) and not rd["stop"]:
+        rd["phase"] = "refining"; _save_council()
+        wait(False)
+        fresh = {i for i, e in rd["agents"].items() if _real(e)} - seen
+        if (fresh or want) and not rd["stop"]:
+            rd["eval"]["note"] = "حكم محدَّث بعد وصول إجابات جديدة"
+            _run_eval(rd)
+    rd["phase"] = "stopped" if rd["stop"] else "done"
     _save_council()
 
 
@@ -534,7 +706,7 @@ def warm(ids):
     return {"ok": True, "warming": ids}
 
 
-def council_start(ids, text, main="", evaluate=True, attachments=None, parent="", limit=300):
+def council_start(ids, text, main="", evaluate=True, attachments=None, parent="", limit=300, mode="direct"):
     text = str(text or "").strip()
     if not text or len(text) > MAX_Q:
         raise ValueError(f"اكتب سؤالًا (حتى {MAX_Q} حرف).")
@@ -554,8 +726,11 @@ def council_start(ids, text, main="", evaluate=True, attachments=None, parent=""
     for a in (attachments or [])[:12]:
         to = str(a.get("to") or "*")
         if str(a.get("path", "")).strip() and (to in ("*", "main") or to in ids):
-            atts.append({"path": str(a["path"]), "name": str(a.get("name", ""))[:120], "to": to})
-    rd = {"id": rid, "limit": max(0, min(int(limit or 0), 3600)), "cut": False, "attachments": atts, "parent": parent if parent in COUNCIL else "", "tok": secrets.token_hex(3), "question": text, "main": main or "", "delegates": ids, "evaluate": bool(evaluate and main),
+            atts.append(_att(str(a["path"]), str(a.get("name", ""))[:120], to))
+    for p in paths_in(text):
+        if not any(a["path"] == p for a in atts):
+            atts.append(_att(p))
+    rd = {"id": rid, "mode": mode if mode in ("direct", "terminal") else "direct", "limit": max(0, min(int(limit or 0), 3600)), "cut": False, "attachments": atts, "parent": parent if parent in COUNCIL else "", "tok": secrets.token_hex(3), "question": text, "main": main or "", "delegates": ids, "evaluate": bool(evaluate and main),
           "created": time.time(), "phase": "asking", "stop": False,
           "agents": {i: {"name": BY_ID[i]["name"], "state": "queued", "answer": ""} for i in ids},
           "eval": {"name": BY_ID[main]["name"] if main else "", "state": "queued", "answer": ""}}
@@ -593,10 +768,15 @@ def council_evaluate(rid=""):
     rd = COUNCIL.get(rid or (COUNCIL_ORDER[-1] if COUNCIL_ORDER else ""))
     if not rd or not rd["main"]:
         raise ValueError("عيّن وكيلًا رئيسيًا أولًا.")
-    if not any(e.get("answer") for e in rd["agents"].values()):
-        raise ValueError("لم تصل أي إجابة بعد.")
+    if not any(_real(e) for e in rd["agents"].values()):
+        raise ValueError("لم تصل أي إجابة حقيقية بعد (رسائل التشغيل وشريط الحالة لا تُحسب).")
     rd["stop"] = False
-    threading.Thread(target=_run_eval, args=(rd,), daemon=True).start()
+
+    def run():
+        _run_eval(rd)
+        rd["phase"] = "done"
+        _save_council()
+    threading.Thread(target=run, daemon=True).start()
     return {"ok": True}
 
 

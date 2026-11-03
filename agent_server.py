@@ -690,7 +690,7 @@ def handle(h, method):
             b = _body(h)
             act = path.rsplit("/", 1)[1]
             if act == "send":
-                h.send_json(terminal.council_start(b.get("ids") or [], b.get("text", ""), str(b.get("main", "")), b.get("evaluate", True), b.get("attachments") or [], str(b.get("parent", "")), int(b.get("limit", 300) or 0)))
+                h.send_json(terminal.council_start(b.get("ids") or [], b.get("text", ""), str(b.get("main", "")), b.get("evaluate", True), b.get("attachments") or [], str(b.get("parent", "")), int(b.get("limit", 300) or 0), str(b.get("mode", "direct"))))
             elif act == "stop":
                 h.send_json(terminal.council_stop(str(b.get("id", ""))))
             elif act == "evaluate":
