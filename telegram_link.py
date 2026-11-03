@@ -181,7 +181,7 @@ def _loop():
                     except Exception as exc:
                         send("تعذّر تنفيذ الطلب: " + str(exc)[:150], m["chat"]["id"])
         except ConflictError:
-            STATE["gateway"], STATE["error"] = False, "جهاز آخر هو البوابة الآن؛ سأتولى تلقائيًا إن أُغلق."
+            STATE["gateway"], STATE["error"] = False, "هذا البوت يستمع إليه برنامج آخر الآن (جهاز آخر، أو برنامج استعملتَ مفتاحه نفسه مثل Hermes أو AutoClaw)، أو عليه رابط ويب قديم. استعمل بوتًا جديدًا لزاجل وحده من BotFather."
             _stop.wait(20)
         except ValueError as exc:
             STATE["gateway"], STATE["error"] = False, str(exc)

@@ -6239,6 +6239,12 @@
           telegramBody.appendChild(open);
           telegramBody.appendChild(el('div', 'أو أرسل للبوت يدويًا: /start ' + String(telegramStatus.pair_code)));
         }
+        {
+          const why = telegramStatus.gateway ? 'الاستماع يعمل. بانتظار ضغطك Start.' : (telegramStatus.error || (telegramStatus.running ? 'جارٍ الاتصال بـ Telegram…' : 'الاستماع متوقف.'));
+          const line = el('div', 'الحالة: ' + why);
+          line.style.cssText = 'font-size:.9em;opacity:.85;margin:6px 0';
+          telegramBody.appendChild(line);
+        }
         telegramBody.appendChild(telegramButton('رمز اقتران جديد', async () => renderTelegram(await api('/api/assistant/telegram/pair', {}))));
         if (!telegramPoll) telegramPoll = setInterval(async () => {
           try { renderTelegram(await api('/api/assistant/telegram/status')); }
