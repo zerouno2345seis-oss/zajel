@@ -679,6 +679,20 @@ def handle(h, method):
             b = _body(h); S.chat_rename(str(b.get("id", "")), b.get("title")); h.send_json({"chats": S.chats_list()})
         elif path == "/api/assistant/chat/delete" and method == "POST":
             S.chat_delete(str(_body(h).get("id", ""))); h.send_json({"chats": S.chats_list()})
+        elif path == "/api/assistant/whatsapp/status":
+            import whatsapp_watch
+            h.send_json(whatsapp_watch.status())
+        elif path.startswith("/api/assistant/whatsapp/") and method == "POST":
+            import whatsapp_watch
+            act = path.rsplit("/", 1)[1]
+            if act == "configure":
+                h.send_json(whatsapp_watch.configure(_body(h)))
+            elif act == "preview":
+                h.send_json(whatsapp_watch.preview())
+            elif act == "digest":
+                h.send_json(whatsapp_watch.digest_now())
+            else:
+                h.send_json({"error": "غير معروف"}, 404)
         elif path == "/api/assistant/telegram/status":
             import telegram_link
             h.send_json(telegram_link.status())

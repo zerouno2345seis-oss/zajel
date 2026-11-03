@@ -21,7 +21,9 @@ _thread = None
 STATE = {"last_poll": 0, "error": "", "alerts_sent": 0}
 POLL_SECS, MAX_SEEN, MAX_ALERTS_PER_POLL = 60, 3000, 8
 DEFAULTS = {"enabled": False, "vip": [], "keywords": [], "alert_groups": False, "quiet_from": 23, "quiet_to": 6,
-            "digest": False, "digest_hour": 7, "digest_last": "", "started": "", "seen": [],
+            "digest": False, "digest_hour": 7, "digest_minute": 0, "digest_days": "all", "digest_last": "", "started": "", "seen": [],
+            "window_hours": 24, "format": "detailed", "max_top": 6, "body_chars": 220, "title": "",
+            "sections": {"top": True, "pending": True, "busiest": True, "counts": True, "media": False},
             "templates": [{"id": "t1", "name": "استلام", "text": "وصلتني رسالتك، شكرًا لك."},
                           {"id": "t2", "name": "لاحقًا", "text": "سأرد عليك لاحقًا بإذن الله."},
                           {"id": "t3", "name": "جزاك الله", "text": "جزاك الله خيرًا يا {الاسم}."}]}
@@ -155,39 +157,67 @@ def poll_once(now=None):
 
 
 # ---------- التقرير ----------
-def build_digest(now=None, hours=24):
-    c = _cfg()
+FORMATS = ("detailed", "compact", "names")
+SECTIONS = ("top", "pending", "busiest", "counts", "media")
+
+
+def build_digest(now=None, hours=None, c=None):
+    """يبني نص التقرير حسب إعدادك: الفترة، الأقسام المختارة، والشكل (مفصّل / مختصر / أسماء فقط)."""
+    c = c or _cfg()
     now = now or dt.datetime.now()
+    hours = int(hours or c["window_hours"])
+    sec = {**DEFAULTS["sections"], **(c.get("sections") or {})}
+    fmt = c["format"] if c["format"] in FORMATS else "detailed"
     since = (now - dt.timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
     msgs = [m for m in WL.messages_since((now - dt.timedelta(hours=hours + 2)).strftime("%Y-%m-%d"), 300) if m["ts"] >= since]
     real = [m for m in msgs if score(m, c) is not None]
+    title = c.get("title") or "☀️ تقرير واتساب"
     if not real:
-        return "☀️ تقرير واتساب: لا رسائل جديدة في آخر ٢٤ ساعة."
+        return f"{title}: لا رسائل جديدة في آخر {hours} ساعة."
     chats = {}
     for m in msgs:
         chats.setdefault(m["jid"], []).append(m)
+    lines = [title + (f" — {len(real)} رسالة واردة من {len({m['jid'] for m in real})} محادثة (آخر {hours} ساعة)" if sec["counts"] else ""), ""]
     ranked = sorted(((score(m, c)[0], m) for m in real), key=lambda x: (-x[0], x[1]["ts"]))
-    top = [(p, m) for p, m in ranked if p >= 2][:6]
-    lines = [f"☀️ تقرير واتساب — {len(real)} رسالة واردة من {len({m['jid'] for m in real})} محادثة (آخر {hours} ساعة)", ""]
-    if top:
-        lines.append("الأهم:")
-        for i, (p, m) in enumerate(top, 1):
-            who, body = _line(m)
-            lines.append(f"{i}) {who}: {body}")
-    pending = []
-    for jid, ms in chats.items():
-        if jid.endswith(("@g.us", "@newsletter", "@broadcast")) or jid.startswith("status@"):
-            continue
-        ms.sort(key=lambda x: x["ts"])
-        if not ms[-1]["me"]:
-            pending.append(ms[-1]["chat"])
-    if pending:
-        lines += ["", "بلا ردّ منك: " + "، ".join(dict.fromkeys(pending))[:300]]
-    busy = sorted(((len([m for m in ms if not m["me"]]), ms[0]["chat"]) for jid, ms in chats.items()
-                   if not jid.startswith("status@") and not jid.endswith(("@newsletter", "@broadcast"))), reverse=True)[:3]
-    if busy and busy[0][0] > 1:
-        lines += ["", "الأنشط: " + "، ".join(f"{n} ({k})" for k, n in busy if k > 1)]
-    return "\n".join(lines)
+    if sec["top"]:
+        top = [(p, m) for p, m in ranked if p >= 2][:int(c["max_top"])]
+        if top:
+            lines.append("الأهم:")
+            if fmt == "names":
+                per = {}
+                for _, m in top:
+                    per.setdefault(_line(m)[0], []).append(m)
+                for i, (who, ms) in enumerate(per.items(), 1):
+                    lines.append(f"{i}) {who} ({len(ms)})")
+            else:
+                n = int(c["body_chars"]) if fmt == "detailed" else 70
+                for i, (_, m) in enumerate(top, 1):
+                    who, body = _line(m)
+                    lines.append(f"{i}) {who}: {_short(body, n)}")
+    if sec["pending"]:
+        pending = []
+        for jid, ms in chats.items():
+            if jid.endswith(("@g.us", "@newsletter", "@broadcast")) or jid.startswith("status@"):
+                continue
+            ms.sort(key=lambda x: x["ts"])
+            if not ms[-1]["me"]:
+                pending.append(ms[-1]["chat"])
+        if pending:
+            lines += ["", "بلا ردّ منك: " + "، ".join(dict.fromkeys(pending))[:300]]
+    if sec["busiest"]:
+        busy = sorted(((len([m for m in ms if not m["me"]]), ms[0]["chat"]) for jid, ms in chats.items()
+                       if not jid.startswith("status@") and not jid.endswith(("@newsletter", "@broadcast"))), reverse=True)[:3]
+        if busy and busy[0][0] > 1:
+            lines += ["", "الأنشط: " + "، ".join(f"{k} ({n})" for n, k in busy if n > 1)]
+    if sec["media"]:
+        kinds = {}
+        for m in real:
+            if m["kind"] in ("audio", "image", "video", "document"):
+                kinds[m["kind"]] = kinds.get(m["kind"], 0) + 1
+        names = {"audio": "صوتية", "image": "صور", "video": "فيديو", "document": "مستندات"}
+        if kinds:
+            lines += ["", "وسائط وصلتك: " + "، ".join(f"{n} {names[k]}" for k, n in kinds.items())]
+    return "\n".join(lines).strip()
 
 
 def digest_now():
@@ -195,12 +225,23 @@ def digest_now():
     return {"sent": _tg(text), "text": text}
 
 
+def preview():
+    return {"text": build_digest()}
+
+
+def _digest_due(c, now):
+    if not c["digest"] or c["digest_last"] == now.strftime("%Y-%m-%d"):
+        return False
+    if c["digest_days"] == "weekdays" and now.weekday() >= 5:
+        return False
+    return (now.hour, now.minute) >= (int(c["digest_hour"]), int(c["digest_minute"]))
+
+
 def _maybe_digest(now):
     c = _cfg()
-    today = now.strftime("%Y-%m-%d")
-    if c["digest"] and now.hour >= int(c["digest_hour"]) and c["digest_last"] != today:
-        _save({"digest_last": today})
-        _tg(build_digest(now))
+    if _digest_due(c, now):
+        _save({"digest_last": now.strftime("%Y-%m-%d")})
+        _tg(build_digest(now, c=c))
 
 
 # ---------- الحلقة ----------
@@ -228,8 +269,11 @@ def start():
 
 def status():
     c = _cfg()
-    return {"enabled": c["enabled"], "digest": c["digest"], "digest_hour": c["digest_hour"], "vip": c["vip"], "keywords": c["keywords"],
-            "alert_groups": c["alert_groups"], "quiet": f"{c['quiet_from']}–{c['quiet_to']}", "baseline": bool(c["started"]),
+    return {"enabled": c["enabled"], "digest": c["digest"], "digest_hour": c["digest_hour"], "digest_minute": c["digest_minute"],
+            "digest_days": c["digest_days"], "window_hours": c["window_hours"], "format": c["format"], "max_top": c["max_top"],
+            "body_chars": c["body_chars"], "title": c["title"], "sections": {**DEFAULTS["sections"], **(c.get("sections") or {})},
+            "vip": c["vip"], "keywords": c["keywords"], "alert_groups": c["alert_groups"], "quiet_from": c["quiet_from"], "quiet_to": c["quiet_to"],
+            "quiet": f"{c['quiet_from']}–{c['quiet_to']}", "baseline": bool(c["started"]),
             "last_poll_secs_ago": int(time.time() - STATE["last_poll"]) if STATE["last_poll"] else None, "error": STATE["error"],
             "alerts_sent": STATE["alerts_sent"], "templates": len(c["templates"])}
 
@@ -243,12 +287,24 @@ def configure(b):
         if k in b:
             v = b[k] if isinstance(b[k], list) else re.split(r"[،,\n]", str(b[k]))
             d[k] = [str(x).strip() for x in v if str(x).strip()][:40]
-    for k, lo, hi in (("digest_hour", 0, 23), ("quiet_from", 0, 23), ("quiet_to", 0, 23)):
+    for k, lo, hi in (("digest_hour", 0, 23), ("digest_minute", 0, 59), ("quiet_from", 0, 23), ("quiet_to", 0, 23),
+                      ("max_top", 1, 12), ("body_chars", 40, 500)):
         if k in b:
             d[k] = max(lo, min(int(b[k]), hi))
-    if d.get("enabled") or d.get("digest"):
-        if not _cfg()["started"]:
-            d["started"] = ""       # يُنشأ خط الأساس عند أول دورة
+    if "window_hours" in b:
+        d["window_hours"] = min((6, 12, 24, 48, 72), key=lambda x: abs(x - int(b["window_hours"])))
+    if "format" in b:
+        if b["format"] not in FORMATS:
+            raise ValueError("شكل غير معروف؛ المتاح: مفصّل أو مختصر أو أسماء فقط.")
+        d["format"] = b["format"]
+    if "digest_days" in b:
+        d["digest_days"] = "weekdays" if b["digest_days"] == "weekdays" else "all"
+    if "title" in b:
+        d["title"] = str(b["title"]).strip()[:60]
+    if isinstance(b.get("sections"), dict):
+        d["sections"] = {**DEFAULTS["sections"], **(_cfg().get("sections") or {}), **{k: bool(v) for k, v in b["sections"].items() if k in SECTIONS}}
+    if "digest_hour" in d or "digest_minute" in d:
+        d["digest_last"] = ""        # الوقت الجديد يسري اليوم نفسه إن لم يحن بعد
     _save(d)
     return status()
 

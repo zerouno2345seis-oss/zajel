@@ -335,6 +335,8 @@ def _codex_cmd(prompt, conv, work, model, effort):
     spec = _mcp_spec()
     cfg = ["-c", 'approval_policy="never"', "-c", "mcp_servers.zajel.command=" + json.dumps(spec["command"]),
            "-c", "mcp_servers.zajel.args=" + json.dumps(spec["args"]),
+           "-c", 'mcp_servers.zajel.default_tools_approval_mode="approve"',     # بلا هذا يُلغي Codex كل نداء أداة؛ والموافقات الحقيقية يفرضها حارس زاجل
+
            "-c", "mcp_servers.zajel.env=" + '{PB_DATA=%s,ZAJEL_AGENT="codex"}' % json.dumps(str(DATA))]
     if effort:
         cfg += ["-c", "model_reasoning_effort=" + json.dumps(effort)]

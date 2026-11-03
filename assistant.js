@@ -6277,6 +6277,104 @@
     };
     api('/api/assistant/telegram/status').then(renderTelegram).catch(telegramError);
 
+    // بطاقة واتساب: التنبيهات والتقرير الصباحي (الوقت والمحتوى والشكل)
+    const waCard = makeSettingsCard('واتساب: التنبيهات والتقرير الصباحي', 'يراقب رسائلك الواردة ويرسل إلى Telegram ما يهمّك، وتقريرًا مرتّبًا في الوقت الذي تختاره. لا يرسل شيئًا إلى واتساب.');
+    waCard.status.textContent = 'جارٍ تحميل الإعدادات…';
+    const waBody = el('div', '');
+    waBody.style.cssText = 'display:flex;flex-direction:column;gap:7px;margin-top:7px';
+    waCard.card.appendChild(waBody);
+    sideContentEl.appendChild(waCard.card);
+    const waError = (err) => { waCard.status.textContent = err && err.message ? err.message : 'تعذر تنفيذ الطلب.'; };
+    let waState = null;
+    const waSave = async (patch) => { try { renderWa(await api('/api/assistant/whatsapp/configure', patch)); } catch (err) { waError(err); renderWa(waState); } };
+    const waRow = (label, control) => {
+      const row = el('label', '');
+      row.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:7px';
+      row.append(document.createTextNode(label), control);
+      return row;
+    };
+    const waCheck = (label, value, onChange) => {
+      const input = document.createElement('input');
+      input.type = 'checkbox'; input.checked = !!value;
+      input.addEventListener('change', () => onChange(input.checked));
+      const row = el('label', '');
+      row.style.cssText = 'display:flex;align-items:center;gap:7px';
+      row.append(input, document.createTextNode(label));
+      return row;
+    };
+    const waInputStyle = 'padding:5px;border:1px solid var(--line);border-radius:7px;background:var(--side);color:var(--ink)';
+    const waText = (value, placeholder, onSave) => {
+      const input = document.createElement('input');
+      input.type = 'text'; input.value = value || ''; input.placeholder = placeholder || '';
+      input.style.cssText = 'width:100%;box-sizing:border-box;' + waInputStyle;
+      input.addEventListener('change', () => onSave(input.value));
+      return input;
+    };
+    const waNumber = (value, min, max, onSave) => {
+      const input = document.createElement('input');
+      input.type = 'number'; input.min = min; input.max = max; input.value = value;
+      input.style.cssText = 'width:70px;' + waInputStyle;
+      input.addEventListener('change', () => onSave(Number(input.value)));
+      return input;
+    };
+    const waSelect = (value, options, onSave) => {
+      const select = document.createElement('select');
+      select.style.cssText = waInputStyle;
+      options.forEach(([v, label]) => { const o = document.createElement('option'); o.value = v; o.textContent = label; if (String(v) === String(value)) o.selected = true; select.appendChild(o); });
+      select.addEventListener('change', () => onSave(select.value));
+      return select;
+    };
+    const renderWa = (st) => {
+      waState = st || {};
+      waBody.replaceChildren();
+      const sec = waState.sections || {};
+      waCard.status.textContent = (waState.error ? 'تنبيه: ' + waState.error : (waState.last_poll_secs_ago == null ? 'لم يبدأ الفحص بعد.' : 'آخر فحص قبل ' + waState.last_poll_secs_ago + ' ثانية.')) + ' (يعمل ما دام زاجل مفتوحًا)';
+      const h = (t) => { const d = el('div', t); d.style.cssText = 'font-weight:600;margin-top:6px'; return d; };
+      waBody.appendChild(h('التنبيهات الفورية'));
+      waBody.appendChild(waCheck('أرسل لي في Telegram ما يهمّني فور وصوله', waState.enabled, (v) => waSave({ enabled: v })));
+      waBody.appendChild(waCheck('اشمل المجموعات (صامتة افتراضيًا)', waState.alert_groups, (v) => waSave({ alert_groups: v })));
+      waBody.appendChild(el('div', 'أشخاص مهمّون (اسم أو رقم، يفصل بينهم فاصلة):'));
+      waBody.appendChild(waText((waState.vip || []).join('، '), 'مثل: أحمد، أمي', (v) => waSave({ vip: v })));
+      waBody.appendChild(el('div', 'كلمات تُنبّهك:'));
+      waBody.appendChild(waText((waState.keywords || []).join('، '), 'مثل: عقد، موعد', (v) => waSave({ keywords: v })));
+      const quiet = el('div', '');
+      quiet.style.cssText = 'display:flex;align-items:center;gap:6px';
+      quiet.append(document.createTextNode('ساعات الهدوء (تُؤجَّل للتقرير) من'), waNumber(waState.quiet_from, 0, 23, (v) => waSave({ quiet_from: v })), document.createTextNode('إلى'), waNumber(waState.quiet_to, 0, 23, (v) => waSave({ quiet_to: v })));
+      waBody.appendChild(quiet);
+
+      waBody.appendChild(h('التقرير الصباحي'));
+      waBody.appendChild(waCheck('أرسل لي تقريرًا يوميًا في Telegram', waState.digest, (v) => waSave({ digest: v })));
+      const time = document.createElement('input');
+      time.type = 'time'; time.style.cssText = waInputStyle;
+      time.value = String(waState.digest_hour ?? 7).padStart(2, '0') + ':' + String(waState.digest_minute ?? 0).padStart(2, '0');
+      time.addEventListener('change', () => { const [hh, mm] = (time.value || '07:00').split(':').map(Number); waSave({ digest_hour: hh, digest_minute: mm }); });
+      waBody.appendChild(waRow('وقت وصوله', time));
+      waBody.appendChild(waRow('الأيام', waSelect(waState.digest_days || 'all', [['all', 'كل يوم'], ['weekdays', 'أيام العمل (الاثنين–الجمعة)']], (v) => waSave({ digest_days: v }))));
+      waBody.appendChild(waRow('الفترة التي يغطيها', waSelect(waState.window_hours || 24, [[12, 'آخر ١٢ ساعة'], [24, 'آخر ٢٤ ساعة'], [48, 'آخر ٤٨ ساعة'], [72, 'آخر ٧٢ ساعة']], (v) => waSave({ window_hours: Number(v) }))));
+      waBody.appendChild(waRow('شكله', waSelect(waState.format || 'detailed', [['detailed', 'مفصّل (مع نص الرسائل)'], ['compact', 'مختصر (سطر لكل رسالة)'], ['names', 'أسماء فقط (بلا نص)']], (v) => waSave({ format: v }))));
+      waBody.appendChild(waRow('عنوانه', waText(waState.title || '', '☀️ تقرير واتساب', (v) => waSave({ title: v }))));
+      waBody.appendChild(waRow('عدد أهم الرسائل', waNumber(waState.max_top ?? 6, 1, 12, (v) => waSave({ max_top: v }))));
+      waBody.appendChild(waRow('طول مقتطف الرسالة (حرفًا)', waNumber(waState.body_chars ?? 220, 40, 500, (v) => waSave({ body_chars: v }))));
+      waBody.appendChild(el('div', 'ما يتضمنه:'));
+      [['counts', 'الإحصاء في العنوان (عدد الرسائل والمحادثات)'], ['top', 'أهم الرسائل'], ['pending', 'من ينتظر ردّك'], ['busiest', 'أنشط المحادثات'], ['media', 'ما وصلك من صوتيات وصور']].forEach(([k, label]) => {
+        waBody.appendChild(waCheck(label, sec[k], (v) => waSave({ sections: { [k]: v } })));
+      });
+      const preview = el('pre', '');
+      preview.style.cssText = 'white-space:pre-wrap;margin:0;padding:8px;border:1px dashed var(--line);border-radius:7px;display:none;max-height:240px;overflow:auto';
+      waBody.appendChild(telegramButton('معاينة التقرير الآن', async () => {
+        waCard.status.textContent = 'جارٍ بناء المعاينة…';
+        const r = await api('/api/assistant/whatsapp/preview', {});
+        preview.textContent = r.text || ''; preview.style.display = 'block';
+        waCard.status.textContent = 'هذه معاينة ولم تُرسل.';
+      }));
+      waBody.appendChild(preview);
+      waBody.appendChild(telegramButton('أرسل التقرير إلى Telegram الآن', async () => {
+        const r = await api('/api/assistant/whatsapp/digest', {});
+        waCard.status.textContent = r.sent ? 'أُرسل التقرير إلى Telegram.' : 'لم يُرسل: تأكد أن Telegram مفعّل ومقترن.';
+      }));
+    };
+    api('/api/assistant/whatsapp/status').then(renderWa).catch(waError);
+
     // بطاقة الهاتف اللاسلكي أعلى تبويب الإعدادات
     renderPhoneCard(sideContentEl);
 

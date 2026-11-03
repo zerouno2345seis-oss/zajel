@@ -109,6 +109,40 @@ class Flow(unittest.TestCase):
             W.render_template("شكر")
 
 
+class Custom(Flow):
+    def test_formats_and_sections(self):
+        ms = WL.parse_messages(SAMPLE)
+        self.feed(ms)
+        now = dt.datetime(2026, 11, 3, 9, 0)
+        W.configure({"vip": ["أحمد"], "format": "names"})
+        names = W.build_digest(now)
+        self.assertNotIn("هل وصلتك", names)                 # الأسماء فقط بلا نص الرسائل
+        W.configure({"format": "detailed", "title": "صباح الخير يا زاهر"})
+        full = W.build_digest(now)
+        self.assertIn("هل وصلتك", full)
+        self.assertTrue(full.startswith("صباح الخير يا زاهر"))
+        W.configure({"sections": {"top": False, "pending": False, "busiest": False, "counts": False}})
+        bare = W.build_digest(now)
+        self.assertNotIn("الأهم", bare)
+        W.configure({"sections": {"media": True}})
+        self.assertIn("وسائط", W.build_digest(now)) if any(m["kind"] in ("audio", "image") for m in ms) else None
+
+    def test_due_time_and_days(self):
+        c = {**W.DEFAULTS, "digest": True, "digest_hour": 7, "digest_minute": 30}
+        self.assertFalse(W._digest_due(c, dt.datetime(2026, 11, 3, 7, 29)))
+        self.assertTrue(W._digest_due(c, dt.datetime(2026, 11, 3, 7, 30)))
+        self.assertFalse(W._digest_due({**c, "digest_last": "2026-11-03"}, dt.datetime(2026, 11, 3, 9, 0)))
+        sat = dt.datetime(2026, 11, 7, 8, 0)
+        self.assertTrue(W._digest_due(c, sat))
+        self.assertFalse(W._digest_due({**c, "digest_days": "weekdays"}, sat))
+
+    def test_configure_validation(self):
+        with self.assertRaises(ValueError):
+            W.configure({"format": "غريب"})
+        s = W.configure({"digest_hour": 99, "digest_minute": -5, "window_hours": 30, "max_top": 100})
+        self.assertEqual((s["digest_hour"], s["digest_minute"], s["window_hours"], s["max_top"]), (23, 0, 24, 12))
+
+
 class Preview(unittest.TestCase):
     def test_send_preview_shows_text(self):
         import agent_tools as T

@@ -1333,9 +1333,14 @@ def t_whatsapp_watch_status(a, H):
 
 
 @tool("whatsapp_watch_config", "اضبط مراقب واتساب: enabled لتنبيهات تيليجرام، vip أسماء أو أرقام الأشخاص المهمين، keywords كلمات مراقبة، alert_groups للمجموعات، "
-      "quiet_from وquiet_to ساعات الهدوء، digest للتقرير الصباحي وdigest_hour ساعته. لا يرسل شيئًا إلى واتساب أبدًا.",
+      "quiet_from وquiet_to ساعات الهدوء، digest للتقرير الصباحي وdigest_hour وdigest_minute وقته وdigest_days (all أو weekdays)، "
+      "window_hours الفترة (٦ و١٢ و٢٤ و٤٨ و٧٢)، format شكله (detailed مفصّل أو compact مختصر أو names أسماء فقط)، max_top عدد الأهم وbody_chars طول النص، "
+      "title عنوانه، sections أقسامه (top الأهم وpending بلا ردّ وbusiest الأنشط وcounts الإحصاء وmedia الوسائط). لا يرسل شيئًا إلى واتساب أبدًا.",
       {"enabled": B("تفعيل التنبيهات"), "vip": L("أسماء أو أرقام مهمة"), "keywords": L("كلمات تُنبّه"), "alert_groups": B("تنبيه من المجموعات"),
-       "quiet_from": N("بداية ساعات الهدوء (٠–٢٣)"), "quiet_to": N("نهايتها"), "digest": B("التقرير الصباحي"), "digest_hour": N("ساعة التقرير (٠–٢٣)")}, [], YELLOW)
+       "quiet_from": N("بداية ساعات الهدوء (٠–٢٣)"), "quiet_to": N("نهايتها"), "digest": B("التقرير الصباحي"), "digest_hour": N("ساعة التقرير (٠–٢٣)"),
+       "digest_minute": N("دقيقة التقرير (٠–٥٩)"), "digest_days": S("all كل يوم أو weekdays أيام العمل"), "window_hours": N("الفترة بالساعات"),
+       "format": S("detailed أو compact أو names"), "max_top": N("عدد أهم الرسائل"), "body_chars": N("طول مقتطف الرسالة"), "title": S("عنوان التقرير"),
+       "sections": {"type": "object", "description": "مثل {\"media\": true, \"busiest\": false}"}}, [], YELLOW)
 def t_whatsapp_watch_config(a, H):
     import whatsapp_watch
     return whatsapp_watch.configure(a)
