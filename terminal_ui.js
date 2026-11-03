@@ -262,6 +262,9 @@
 .mbar{display:flex;flex-direction:column;gap:6px}
 .brow{display:flex;min-width:0}
 .roster,.tiles{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(0,1fr);gap:0;width:100%;min-width:0}
+.roster{grid-auto-columns:minmax(104px,1fr);overflow-x:auto;scrollbar-width:thin}
+.roster .chip .nm{overflow:visible;text-overflow:clip}
+.opt.locked .tile{opacity:.55!important}
 .brow.cfg{display:grid;grid-template-columns:3fr 4fr;gap:6px}
 .msel{display:none}
 .chip,.tile{position:relative;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;min-height:58px;padding:6px 4px;
@@ -272,7 +275,15 @@
 .chip:hover,.tile:hover{background:var(--side)}
 .chip.on{background:color-mix(in srgb,var(--c,var(--acc)) 14%,var(--card));box-shadow:inset 0 -3px 0 var(--c,var(--acc));z-index:1}
 .chip.judge{box-shadow:inset 0 -3px 0 var(--c,var(--acc)),inset 0 0 0 2px var(--gold);z-index:2}
-.chip.off{opacity:.5}
+.chip.off{opacity:.62}
+.cn .chip,.cn .chip .nm{color:var(--txt)!important;text-shadow:none!important}
+.cn .chip.on{background:color-mix(in srgb,var(--c,var(--acc)) 22%,var(--card))!important}
+.cn .chip.on .nm{font-weight:700}
+.cn .chip.off .nm{text-decoration:line-through;text-decoration-thickness:1px}
+.cn .tile,.cn .tile .tl,.cn .tile .ic{color:var(--txt)!important}
+.cn .tile.on,.cn .opt input:checked+.tile{background:color-mix(in srgb,var(--acc) 24%,var(--card))!important;box-shadow:inset 0 -3px 0 var(--acc)!important}
+.cn .tile.on .tl,.cn .opt input:checked+.tile .tl{font-weight:700;color:var(--txt)!important}
+.cn .tile .tm,.cn .tile.on .tm{color:var(--mut)!important}
 .chip .av{width:24px;height:24px;border-radius:4px;display:grid;place-items:center;color:#fff;font-size:12px;font-weight:700;background:var(--c,#64748b)}
 .chip .nm{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600}
 .chip .dot{position:absolute;top:6px;inset-inline-start:6px;width:7px;height:7px;border-radius:50%}
