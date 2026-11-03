@@ -2875,7 +2875,7 @@
       else controlActiveTab = savedTab;
     }
     const savedControlTab = localStorage.getItem('zajel_control_active_tab');
-    if (savedControlTab && ['settings', 'agents', 'automations', 'scripts', 'terminal'].includes(savedControlTab)) controlActiveTab = savedControlTab;
+    if (savedControlTab && ['settings', 'agents', 'automations', 'scripts'].includes(savedControlTab)) controlActiveTab = savedControlTab;
     const savedPlaces = localStorage.getItem('zajel_as_search_places');
     if (savedPlaces) {
       const parsed = JSON.parse(savedPlaces);
@@ -6897,8 +6897,15 @@
     });
   }
 
+  let councilMode = false, councilBodyEl = null;
   async function sendMsg() {
     if (!inputEl) return;
+    if (councilMode) {
+      const q = inputEl.value.trim();
+      if (!q) return;
+      try { await window.ZajelTerminalUI?.councilAsk?.(q); inputEl.value = ''; inputEl.dispatchEvent(new Event('input')); } catch (_) {}
+      return;
+    }
     const raw = inputEl.value.trim();
     const readyAtts = pendingAttachments.filter(a => a.status === 'done');
     const hasUploading = pendingAttachments.some(a => a.status === 'uploading');
@@ -8092,7 +8099,7 @@
       topBar.insertBefore(controlChipEl, vclean && vclean.parentNode === topBar ? vclean : null);
       const termChipEl = el('span', '', 'chip', { id: 'zajel-terminal-chip', title: 'الطرفية', role: 'button', tabindex: '0', 'aria-label': 'الطرفية' });
       termChipEl.append(createSvg('terminal', 15), document.createTextNode(' الطرفية'));
-      termChipEl.onclick = () => { if (controlPanelEl && !controlPanelEl.hidden && controlActiveTab === 'terminal') { controlChipEl.click(); return; } switchControlTab('terminal'); };
+      termChipEl.onclick = () => window.ZajelTerminalUI?.toggleWindow?.();
       termChipEl.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); termChipEl.click(); } };
       topBar.insertBefore(termChipEl, vclean && vclean.parentNode === topBar ? vclean : null);
     }
@@ -8440,7 +8447,7 @@
     const controlBody = el('div', '', 'as-body-layout');
     const controlSide = el('aside', '', 'as-sidebar');
     controlTabsNav = el('nav', '', 'as-side-tabs');
-    [ ['settings','الإعدادات','settings'], ['agents','الوكلاء','activity'], ['automations','الأتمتة','activity'], ['scripts','المكتبة','layers'], ['terminal','الطرفية','activity'] ].forEach(([key,title,icon]) => {
+    [ ['settings','الإعدادات','settings'], ['agents','الوكلاء','activity'], ['automations','الأتمتة','activity'], ['scripts','المكتبة','layers'] ].forEach(([key,title,icon]) => {
       const tab = el('button', '', 'as-tab-btn', { type:'button', title, 'data-tab':key });
       tab.append(createSvg(icon,15), document.createTextNode(title));
       if (key === 'automations') { controlAutomationBadge = el('span','','as-tab-unread-badge'); controlAutomationBadge.hidden = true; tab.appendChild(controlAutomationBadge); }
@@ -8727,7 +8734,23 @@
     // مربع إدخال واحد متجاوب: النص بعرض كامل، وتحته صف أزرار (إرفاق، حفظ كأمر، ثم إيقاف وإرسال)
     const composer = el('div', '', 'as-composer');
     const composerRow = el('div', '', 'as-composer-row');
-    composerRow.append(attachBtn, starPromptBtn, el('span', '', 'as-composer-spacer'), stopBtn, sendBtn);
+    const setCouncilMode = on => {
+      councilMode = on;
+      councilToggleBtn.classList.toggle('pri', on);
+      chatContainer.hidden = on; inputBar.hidden = on;
+      if (improveRowEl) improveRowEl.hidden = on;
+      if (on) {
+        councilBodyEl = el('div', '', 'as-council-body');
+        councilBodyEl.style.cssText = 'flex:1;min-height:0;overflow:auto;padding:10px;display:flex;flex-direction:column';
+        chatContainer.after(councilBodyEl);
+        window.ZajelTerminalUI?.mountCouncil?.(councilBodyEl, { embedded: true, onExit: () => setCouncilMode(false) });
+      } else {
+        window.ZajelTerminalUI?.unmountCouncil?.(councilBodyEl);
+        councilBodyEl?.remove(); councilBodyEl = null;
+      }
+    };
+    const councilToggleBtn = btn('⚖ وضع المجلس', () => setCouncilMode(!councilMode), 'btn as-council-toggle', { title: 'حوّل المساعد إلى مجلس وكلاء: سؤالك يذهب إلى عدة وكلاء ثم يحكم بينهم الرئيسي' });
+    composerRow.append(attachBtn, starPromptBtn, councilToggleBtn, el('span', '', 'as-composer-spacer'), stopBtn, sendBtn);
     composer.append(inputWrap, composerRow);
     inputBar.append(composer, fileInputEl);
 

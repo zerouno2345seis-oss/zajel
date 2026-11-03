@@ -690,11 +690,13 @@ def handle(h, method):
             b = _body(h)
             act = path.rsplit("/", 1)[1]
             if act == "send":
-                h.send_json(terminal.council_start(b.get("ids") or [], b.get("text", ""), str(b.get("main", "")), b.get("evaluate", True)))
+                h.send_json(terminal.council_start(b.get("ids") or [], b.get("text", ""), str(b.get("main", "")), b.get("evaluate", True), b.get("attachments") or [], str(b.get("parent", ""))))
             elif act == "stop":
                 h.send_json(terminal.council_stop(str(b.get("id", ""))))
             elif act == "evaluate":
                 h.send_json(terminal.council_evaluate(str(b.get("id", ""))))
+            elif act == "export":
+                h.send_json(terminal.council_export(str(b.get("id", "")), str(b.get("fmt", "md"))))
             else:
                 h.send_json({"error": "غير موجود."}, 404)
         elif path == "/api/term/list":
