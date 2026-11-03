@@ -322,7 +322,7 @@ def call(name, args, agent="", job=""):
                 _red_times.append(now)
             audit(agent, name, args, tier, "pending:" + pid, job=job)
             return {"pending": True, "id": pid, "preview": pv,
-                    "message": "بانتظار موافقة المستخدم. ستظهر له بطاقة في نافذة المساعد في زاجل (صالحة 10 دقائق). لا تعد الطلب؛ اطلب منه الموافقة ثم افحص approval_status."}
+                    "message": "بانتظار موافقة المستخدم. ستصله بطاقة موافقة بأزرار في تيليجرام، وتظهر أيضًا في نافذة زاجل، وله أن يوافق من أيهما (صالحة 10 دقائق). لا تقل له إن الموافقة في نافذة زاجل فقط؛ قل: «ضغط «تابع» في بطاقة تيليجرام أو في زاجل». لا تعد الطلب، ثم افحص approval_status."}
         res = t["run"](args, H)
         extra = {"search_id": res["id"], "search_place": args.get("place") or "", "search_count": res.get("count")} if name in ("search", "search_all", "search_result") and isinstance(res, dict) and res.get("id") else None
         audit(agent, name, args, tier, "done", json.dumps(res, ensure_ascii=False)[:200] if res is not None else "", job, extra)

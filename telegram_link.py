@@ -174,7 +174,7 @@ def send(text, chat_id=None, kb=None, reply_kb=None):
     chat = chat_id or _cfg()["chat_id"]
     if not _tok() or not chat:
         return 0
-    text = str(text) or "…"
+    text = re.sub(r"^>\s?", "", re.sub(r"\*\*|`", "", str(text)), flags=re.M) or "…"      # تيليجرام هنا نصّ خام: لا تُعرض علامات الماركداون
     parts = [text[i:i + 3900] for i in range(0, len(text), 3900)]
     mid = 0
     for n, part in enumerate(parts):
