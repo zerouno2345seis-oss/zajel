@@ -579,6 +579,7 @@
       }
 
       /* محتوى التبويب النشط */
+      #zajel-control-panel .as-side-content > :not(.as-terminal-ui) { flex-shrink: 0; }
       .as-side-content {
         flex: 1;
         min-height: 0;
@@ -8407,12 +8408,16 @@
     controlPanelEl = el('aside', '', 'as-panel as-control-panel', { id: 'zajel-control-panel', role: 'region', 'aria-label': 'مركز التحكم' });
     controlPanelEl.hidden = true;
     controlPanelEl.style.display = 'none';
-    controlPanelEl.style.cssText = 'position:fixed;inset:12px 12px 12px auto;z-index:10001;display:flex;flex-direction:column;width:min(760px,96vw);max-height:calc(100vh - 24px);background:var(--bg);box-shadow:0 8px 40px #0005;border-radius:12px;overflow:hidden';
+    controlPanelEl.style.cssText = 'position:fixed;inset:12px 12px 12px auto;z-index:10001;display:flex;flex-direction:column;width:min(1040px,96vw);height:calc(100vh - 24px);background:var(--bg);box-shadow:0 8px 40px #0005;border-radius:12px;overflow:hidden';
     const controlHead = el('header', '', 'as-head');
     controlHead.append(el('strong', 'مركز التحكم', 'as-head-title'));
     const closeControl = el('button', '', 'as-icon-btn', { type: 'button', title: 'إغلاق مركز التحكم', 'aria-label': 'إغلاق مركز التحكم' });
     closeControl.appendChild(createSvg('close', 15)); closeControl.onclick = () => { controlPanelEl.hidden = true; controlPanelEl.style.display = 'none'; stopAutomationsPolling(); stopAgentsPolling(); window.ZajelTerminalUI?.deactivate?.(); };
-    controlHead.appendChild(closeControl);
+    const minCtl = el('button', '', 'as-icon-btn', { type: 'button', title: 'تصغير مركز التحكم', 'aria-label': 'تصغير مركز التحكم' });
+    minCtl.appendChild(el('span', '—', 'as-min-dash'));
+    const maxCtl = el('button', '', 'as-icon-btn', { type: 'button', title: 'تكبير مركز التحكم', 'aria-label': 'تكبير مركز التحكم' });
+    maxCtl.appendChild(el('span', '▢', 'as-min-dash'));
+    controlHead.append(minCtl, maxCtl, closeControl);
     const controlBody = el('div', '', 'as-body-layout');
     const controlSide = el('aside', '', 'as-sidebar');
     controlTabsNav = el('nav', '', 'as-side-tabs');
@@ -8424,11 +8429,89 @@
     });
     controlContentEl = el('div','','as-side-content');
     controlSide.append(controlTabsNav, controlContentEl);
-    controlSide.style.cssText = 'flex:1 1 auto;width:100%;max-width:none;min-width:0;border:0';
-    controlBody.style.cssText = 'display:flex;flex:1;min-height:0';
+    controlSide.style.cssText = 'position:static;transform:none;opacity:1;display:flex;flex-direction:column;flex:1 1 auto;width:100%;max-width:none;min-width:0;min-height:0;border:0';
+    controlBody.style.cssText = 'display:flex;flex-direction:column;flex:1;min-height:0;overflow:hidden;position:relative';
+    controlTabsNav.style.cssText = 'overflow-x:auto;flex:none';
+    controlContentEl.style.cssText = 'flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;display:flex;flex-direction:column;padding:12px';
     controlBody.append(controlSide);
     controlPanelEl.append(controlHead, controlBody);
     document.body.appendChild(controlPanelEl);
+
+    // مركز التحكم: تحريك من الشريط العلوي، تغيير الحجم من الزوايا، تصغير إلى الشريط، وتكبير للشاشة
+    {
+      const GEO_KEY = 'zajel_control_geo';
+      let geo = null, minimized = false, maximized = false;
+      try { geo = JSON.parse(localStorage.getItem(GEO_KEY) || 'null'); } catch (_) {}
+      const MINW = 360, MINH = 260;
+      const saveGeo = () => { try { localStorage.setItem(GEO_KEY, JSON.stringify(geo)); } catch (_) {} };
+      const fit = () => {
+        if (geo) {
+          geo.w = Math.max(MINW, Math.min(geo.w, innerWidth));
+          geo.h = Math.max(MINH, Math.min(geo.h, innerHeight));
+          geo.x = Math.max(0, Math.min(geo.x, innerWidth - geo.w));
+          geo.y = Math.max(0, Math.min(geo.y, innerHeight - 40));
+        }
+      };
+      const apply = () => {
+        const st = controlPanelEl.style;
+        if (maximized) {
+          st.left = '12px'; st.top = '12px'; st.right = '12px'; st.bottom = 'auto'; st.width = 'auto'; st.height = 'calc(100vh - 24px)';
+        } else if (geo) {
+          fit();
+          st.left = geo.x + 'px'; st.top = geo.y + 'px'; st.right = 'auto'; st.bottom = 'auto'; st.width = geo.w + 'px'; st.height = minimized ? 'auto' : geo.h + 'px';
+        } else {
+          st.left = 'auto'; st.right = '12px'; st.top = '12px'; st.bottom = 'auto'; st.width = 'min(1040px,96vw)'; st.height = minimized ? 'auto' : 'calc(100vh - 24px)';
+        }
+        if (maximized) st.height = minimized ? 'auto' : 'calc(100vh - 24px)';
+        controlBody.style.display = minimized ? 'none' : 'flex';
+        grips.forEach(g => { g.style.display = minimized || maximized ? 'none' : 'block'; });
+        minCtl.title = minimized ? 'استعادة مركز التحكم' : 'تصغير مركز التحكم';
+        maxCtl.title = maximized ? 'استعادة الحجم' : 'تكبير مركز التحكم';
+      };
+      const materialize = () => {
+        if (geo) return;
+        const r = controlPanelEl.getBoundingClientRect();
+        geo = { x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) };
+      };
+      minCtl.onclick = () => { minimized = !minimized; if (minimized) materialize(); apply(); };
+      maxCtl.onclick = () => { maximized = !maximized; if (maximized) minimized = false; apply(); };
+      controlHead.style.cursor = 'move';
+      controlHead.style.touchAction = 'none';
+      controlHead.onpointerdown = ev => {
+        if (ev.target.closest('button') || maximized) return;
+        ev.preventDefault();
+        materialize();
+        const sx = ev.clientX, sy = ev.clientY, ox = geo.x, oy = geo.y;
+        controlHead.setPointerCapture(ev.pointerId);
+        controlHead.onpointermove = e2 => { geo.x = ox + e2.clientX - sx; geo.y = oy + e2.clientY - sy; apply(); };
+        const end = e3 => { try { controlHead.releasePointerCapture(e3.pointerId); } catch (_) {} controlHead.onpointermove = controlHead.onpointerup = controlHead.onpointercancel = null; saveGeo(); };
+        controlHead.onpointerup = end; controlHead.onpointercancel = end;
+      };
+      controlHead.ondblclick = ev => { if (!ev.target.closest('button')) maxCtl.onclick(); };
+      const mkGrip = side => {
+        const g = el('div', '', 'as-control-grip');
+        g.style.cssText = 'position:absolute;bottom:0;' + side + ':0;width:18px;height:18px;z-index:2;touch-action:none;cursor:' + (side === 'right' ? 'nwse-resize' : 'nesw-resize');
+        g.onpointerdown = ev => {
+          ev.preventDefault(); ev.stopPropagation();
+          materialize();
+          const sx = ev.clientX, sy = ev.clientY, o = { ...geo };
+          g.setPointerCapture(ev.pointerId);
+          g.onpointermove = e2 => {
+            const dx = e2.clientX - sx, dy = e2.clientY - sy;
+            geo.h = o.h + dy;
+            if (side === 'right') geo.w = o.w + dx; else { geo.w = o.w - dx; geo.x = o.x + dx; }
+            apply();
+          };
+          const end = e3 => { try { g.releasePointerCapture(e3.pointerId); } catch (_) {} g.onpointermove = g.onpointerup = g.onpointercancel = null; saveGeo(); };
+          g.onpointerup = end; g.onpointercancel = end;
+        };
+        controlPanelEl.appendChild(g);
+        return g;
+      };
+      const grips = [mkGrip('left'), mkGrip('right')];
+      addEventListener('resize', () => { if (geo) { fit(); apply(); } });
+      apply();
+    }
 
     // المنطقة الرئيسية
     const mainArea = el('main', '', 'as-main');
