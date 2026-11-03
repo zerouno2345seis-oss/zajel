@@ -43,3 +43,31 @@ class Term(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(T.available(), "tmux غير مثبت")
+class Council(unittest.TestCase):
+    def setUp(self):
+        T.SOCK = "zajel-test2"
+        T.ANSWER_TIMEOUT = 40
+        for i, nm in (("fa", "A"), ("fb", "B"), ("fm", "M")):
+            T.BY_ID[i] = {"id": i, "name": nm, "cmd": "python3 -u /tmp/fake_agent.py " + nm}
+
+    def tearDown(self):
+        T._t("kill-server")
+        for i in ("fa", "fb", "fm"):
+            T.BY_ID.pop(i, None)
+
+    def test_round(self):
+        r = T.council_start(["fa", "fb"], "ما عاصمة فرنسا؟", main="fm")
+        rid = r["id"]
+        for _ in range(90):
+            v = T.council_view(rid)["round"]
+            if v["phase"] in ("done", "stopped"):
+                break
+            time.sleep(1)
+        self.assertEqual(v["phase"], "done", v)
+        self.assertIn("جواب من A", v["agents"]["fa"]["answer"])
+        self.assertIn("جواب من B", v["agents"]["fb"]["answer"])
+        self.assertIn("جواب من M", v["eval"]["answer"])
+        self.assertIn("إجابة A", T._eval_prompt(T.COUNCIL[rid]))

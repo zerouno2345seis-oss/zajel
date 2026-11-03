@@ -679,6 +679,24 @@ def handle(h, method):
             b = _body(h); S.chat_rename(str(b.get("id", "")), b.get("title")); h.send_json({"chats": S.chats_list()})
         elif path == "/api/assistant/chat/delete" and method == "POST":
             S.chat_delete(str(_body(h).get("id", ""))); h.send_json({"chats": S.chats_list()})
+        elif path == "/api/term/council/status":
+            import terminal
+            h.send_json(terminal.council_view(query.get("id", [""])[0]))
+        elif path == "/api/term/council/history":
+            import terminal
+            h.send_json({"rounds": terminal.council_history()})
+        elif path.startswith("/api/term/council/") and method == "POST":
+            import terminal
+            b = _body(h)
+            act = path.rsplit("/", 1)[1]
+            if act == "send":
+                h.send_json(terminal.council_start(b.get("ids") or [], b.get("text", ""), str(b.get("main", "")), b.get("evaluate", True)))
+            elif act == "stop":
+                h.send_json(terminal.council_stop(str(b.get("id", ""))))
+            elif act == "evaluate":
+                h.send_json(terminal.council_evaluate(str(b.get("id", ""))))
+            else:
+                h.send_json({"error": "غير موجود."}, 404)
         elif path == "/api/term/list":
             import terminal
             h.send_json(terminal.listing())

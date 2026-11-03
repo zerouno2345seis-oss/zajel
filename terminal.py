@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import threading
@@ -43,6 +44,7 @@ def init(data_dir):
         CFG.update(json.loads((DATA / "terminal.json").read_text(encoding="utf-8")))
     except (OSError, ValueError):
         pass
+    _load_council()
     if not (_mon_thread and _mon_thread.is_alive()):
         _mon_thread = threading.Thread(target=_monitor, daemon=True)
         _mon_thread.start()
@@ -262,3 +264,236 @@ def _monitor():
                 m["state"] = st
         except Exception:
             pass
+
+
+# ================= مجلس الوكلاء: سؤال واحد إلى عدّة وكلاء، ثم وكيل رئيسي يقارن =================
+COUNCIL = {}
+COUNCIL_ORDER = []
+COUNCIL_MAX = 12
+AGENT_LOCKS = {}
+ANSWER_TIMEOUT = 900          # أقصى انتظار لإجابة وكيل (ثوانٍ)
+MAX_Q = 8000
+MAX_ANS_IN_EVAL = 6000
+
+
+def _plain(i, hist=5000):
+    r = _t("capture-pane", "-p", "-J", "-t", _name(i), "-S", "-" + str(hist), timeout=15)
+    return r.stdout if r.returncode == 0 else ""
+
+
+def _clean_body(body):
+    out = []
+    for ln in body.splitlines():
+        ln = re.sub(r"^\s*[│┃]\s?", "", ln)
+        ln = re.sub(r"\s*[│┃]\s*$", "", ln).rstrip()
+        out.append(ln)
+    while out and not out[0].strip():
+        out.pop(0)
+    while out and not out[-1].strip():
+        out.pop()
+    ind = min((len(x) - len(x.lstrip()) for x in out if x.strip()), default=0)
+    out = [x[ind:] if x.strip() else "" for x in out]
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(out))
+
+
+def extract_answer(text, tok):
+    """النص بين سطر ⟦A-tok⟧ وسطر ⟦Z-tok⟧ (الأخير المكتمل)، أو None. العلامتان تُقبلان فقط في سطر مستقل
+    (مع رموز زخرفة خفيفة) حتى لا يلتقط الاستخراج نص التعليمات المرتدّ في الشاشة."""
+    a = re.compile(r"^[^\w⟦]{0,6}⟦A-%s⟧[^\w]{0,6}$" % re.escape(tok), re.M)
+    z = re.compile(r"^[^\w⟦]{0,6}⟦Z-%s⟧[^\w]{0,6}$" % re.escape(tok), re.M)
+    for m in reversed(list(a.finditer(text))):
+        e = z.search(text, m.end())
+        if e:
+            return _clean_body(text[m.end():e.start()])
+    return None
+
+
+def _wrap_question(text, tok):
+    return (f"{text.strip()}\n\n[تنسيق الإجابة فقط] اكتب إجابتك الكاملة بين سطرين مستقلين: سطر فيه ⟦A-{tok}⟧ وحده قبل الإجابة، "
+            f"وسطر فيه ⟦Z-{tok}⟧ وحده بعدها. لا تكتب هاتين العلامتين في أي مكان آخر.")
+
+
+def _save_council():
+    try:
+        rows = [COUNCIL[k] for k in COUNCIL_ORDER[-COUNCIL_MAX:] if k in COUNCIL]
+        (DATA / "terminal_council.json").write_text(json.dumps(rows, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _load_council():
+    try:
+        for r in json.loads((DATA / "terminal_council.json").read_text(encoding="utf-8")):
+            if r.get("phase") in ("asking", "evaluating"):
+                r["phase"] = "stopped"
+            COUNCIL[r["id"]] = r
+            COUNCIL_ORDER.append(r["id"])
+    except (OSError, ValueError, KeyError):
+        pass
+
+
+def _ensure_ready(i, timeout=45):
+    """يشغّل الوكيل إن لزم، وينتظر حتى تهدأ شاشته ويظهر أنه جاهز لاستقبال الكتابة."""
+    if _t("has-session", "-t", _name(i)).returncode != 0:
+        start(i)
+    t0 = time.time()
+    time.sleep(2)
+    while time.time() - t0 < timeout:
+        st, _, idle = state_of(i)
+        if st in ("idle", "waiting") and idle >= 3:
+            return True
+        if st == "shell" and time.time() - t0 > 8:
+            raise ValueError("خرج الوكيل إلى الطرفية؛ أعد تشغيله.")
+        time.sleep(1.5)
+    return False
+
+
+def _type_message(i, text):
+    send(i, text, paste=True)
+    time.sleep(0.6)
+    send(i, "", keys=["Enter"])
+
+
+def _ask(rd, i, entry, question, tok):
+    """يرسل السؤال إلى وكيل ويلتقط إجابته من شاشته. يملأ entry ويعيد."""
+    lock = AGENT_LOCKS.setdefault(i, threading.Lock())
+    with lock:
+        try:
+            entry["state"] = "starting"
+            _ensure_ready(i)
+            if rd["stop"]:
+                entry["state"] = "stopped"
+                return
+            entry["state"] = "asking"
+            entry["sent_at"] = time.time()
+            _type_message(i, _wrap_question(question, tok))
+            quiet_since = None
+            worked = False
+            while time.time() - entry["sent_at"] < ANSWER_TIMEOUT:
+                if rd["stop"]:
+                    entry["state"] = "stopped"
+                    return
+                time.sleep(2)
+                txt = _plain(i)
+                ans = extract_answer(txt, tok)
+                if ans is not None:
+                    entry.update(state="done", answer=ans, finished_at=time.time())
+                    return
+                st, _, idle = state_of(i)
+                if st == "working":
+                    worked, quiet_since = True, None
+                elif worked:
+                    quiet_since = quiet_since or time.time()
+                    if time.time() - quiet_since > 40:        # انتهى العمل بلا علامات: نعرض آخر الشاشة خامًا
+                        tail = "\n".join(_clean_body(txt).splitlines()[-60:])
+                        entry.update(state="done_raw", answer=tail, finished_at=time.time())
+                        return
+            entry.update(state="timeout", answer="", finished_at=time.time())
+        except Exception as exc:
+            entry.update(state="error", error=str(exc)[:200], finished_at=time.time())
+        finally:
+            _save_council()
+
+
+def _eval_prompt(rd):
+    parts = [f"أنت الوكيل الرئيسي في «مجلس الوكلاء». سُئل عدّة وكلاء السؤال التالي:\n\n«{rd['question']}»\n\nهذه إجاباتهم:"]
+    for i in rd["delegates"]:
+        e = rd["agents"][i]
+        if e.get("answer"):
+            parts.append(f"\n===== إجابة {BY_ID[i]['name']} =====\n{e['answer'][:MAX_ANS_IN_EVAL]}")
+        else:
+            parts.append(f"\n===== {BY_ID[i]['name']}: لم تصل إجابة ({e.get('state')}) =====")
+    parts.append("\n\nقارن بين الإجابات بإيجاز ودقة: (١) ما اتفقوا عليه، (٢) ما اختلفوا فيه ومن الأصح ولماذا، (٣) أخطاء أو مبالغات، "
+                 "(٤) ترتيب الإجابات من الأفضل، (٥) إجابة نهائية موحّدة. لا تنفّذ أي أوامر ولا تعدّل ملفات: التقييم نصّي فقط.")
+    return "".join(parts)
+
+
+def _run_eval(rd):
+    main = rd["main"]
+    if not main:
+        rd["phase"] = "done"
+        return
+    rd["phase"] = "evaluating"
+    ev = rd["eval"]
+    ev["tok"] = secrets.token_hex(3)
+    _save_council()
+    _ask(rd, main, ev, _eval_prompt(rd), ev["tok"])
+    rd["phase"] = "stopped" if rd["stop"] else "done"
+    _save_council()
+
+
+def _run_round(rd):
+    threads = []
+    for i in rd["delegates"]:
+        t = threading.Thread(target=_ask, args=(rd, i, rd["agents"][i], rd["question"], rd["tok"]), daemon=True)
+        t.start()
+        threads.append(t)
+    for t in threads:
+        t.join()
+    if rd["stop"]:
+        rd["phase"] = "stopped"
+    elif rd["evaluate"] and rd["main"]:
+        _run_eval(rd)
+    else:
+        rd["phase"] = "done"
+    _save_council()
+
+
+def council_start(ids, text, main="", evaluate=True):
+    text = str(text or "").strip()
+    if not text or len(text) > MAX_Q:
+        raise ValueError(f"اكتب سؤالًا (حتى {MAX_Q} حرف).")
+    ids = [i for i in dict.fromkeys(ids or []) if i in BY_ID and BY_ID[i]["cmd"]]
+    if not ids:
+        raise ValueError("اختر وكيلًا مفوَّضًا واحدًا على الأقل.")
+    if main and (main not in BY_ID or not BY_ID[main]["cmd"]):
+        raise ValueError("الوكيل الرئيسي غير معروف.")
+    if not available():
+        raise ValueError("tmux غير مثبت على هذا الجهاز.")
+    for k in COUNCIL_ORDER:
+        r = COUNCIL.get(k)
+        if r and r["phase"] in ("asking", "evaluating") and not r["stop"]:
+            raise ValueError("يعمل مجلس الآن؛ أوقفه أو انتظر نهايته.")
+    rid = secrets.token_hex(4)
+    rd = {"id": rid, "tok": secrets.token_hex(3), "question": text, "main": main or "", "delegates": ids, "evaluate": bool(evaluate and main),
+          "created": time.time(), "phase": "asking", "stop": False,
+          "agents": {i: {"name": BY_ID[i]["name"], "state": "queued", "answer": ""} for i in ids},
+          "eval": {"name": BY_ID[main]["name"] if main else "", "state": "queued", "answer": ""}}
+    COUNCIL[rid] = rd
+    COUNCIL_ORDER.append(rid)
+    threading.Thread(target=_run_round, args=(rd,), daemon=True).start()
+    _save_council()
+    return {"ok": True, "id": rid}
+
+
+def council_view(rid=""):
+    rid = rid or (COUNCIL_ORDER[-1] if COUNCIL_ORDER else "")
+    rd = COUNCIL.get(rid)
+    if not rd:
+        return {"round": None}
+    return {"round": {k: v for k, v in rd.items() if k != "stop"} | {"stopped": rd["stop"]}}
+
+
+def council_history():
+    return [{"id": k, "question": COUNCIL[k]["question"][:80], "phase": COUNCIL[k]["phase"], "created": COUNCIL[k]["created"]}
+            for k in reversed(COUNCIL_ORDER[-COUNCIL_MAX:]) if k in COUNCIL]
+
+
+def council_stop(rid=""):
+    rd = COUNCIL.get(rid or (COUNCIL_ORDER[-1] if COUNCIL_ORDER else ""))
+    if not rd:
+        raise ValueError("لا مجلس.")
+    rd["stop"] = True
+    return {"ok": True}
+
+
+def council_evaluate(rid=""):
+    """تقييم يدوي بما وصل حتى الآن (دون انتظار الباقين)."""
+    rd = COUNCIL.get(rid or (COUNCIL_ORDER[-1] if COUNCIL_ORDER else ""))
+    if not rd or not rd["main"]:
+        raise ValueError("عيّن وكيلًا رئيسيًا أولًا.")
+    if not any(e.get("answer") for e in rd["agents"].values()):
+        raise ValueError("لم تصل أي إجابة بعد.")
+    rd["stop"] = False
+    threading.Thread(target=_run_eval, args=(rd,), daemon=True).start()
+    return {"ok": True}

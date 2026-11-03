@@ -3191,6 +3191,7 @@
 
   function switchTab(tabKey) {
     if (['scripts', 'automations', 'agents', 'settings', 'terminal'].includes(tabKey)) { switchControlTab(tabKey); return; }
+    if (activeTab === 'council') window.ZajelTerminalUI?.unmountCouncil?.(assistantContentEl);
     activeWindow = 'assistant';
     sideContentEl = assistantContentEl;
     if (controlPanelEl) { controlPanelEl.hidden = true; controlPanelEl.style.display = 'none'; }
@@ -3212,6 +3213,7 @@
   }
 
   function switchControlTab(tabKey) {
+    if (activeTab === 'council') window.ZajelTerminalUI?.unmountCouncil?.(assistantContentEl);
     activeWindow = 'control';
     if (activeTab === 'automations' && tabKey !== 'automations') stopAutomationsPolling();
     if (activeTab === 'agents' && tabKey !== 'agents') stopAgentsPolling();
@@ -3228,6 +3230,7 @@
 
   function loadActiveTabData() {
     if (activeWindow === 'control' && activeTab === 'terminal') { window.ZajelTerminalUI?.activate?.(controlContentEl); return; }
+    if (activeWindow === 'assistant' && activeTab === 'council') { window.ZajelTerminalUI?.mountCouncil?.(sideContentEl); return; }
     window.ZajelTerminalUI?.deactivate?.();
     if (activeTab === 'chats') {
       loadChats();
@@ -6784,6 +6787,7 @@
     else if (activeTab === 'agents') renderAgentsTab();
     else if (activeTab === 'settings') renderSettingsTab();
     else if (activeTab === 'terminal') window.ZajelTerminalUI?.activate?.(controlContentEl);
+    else if (activeTab === 'council' && activeWindow === 'assistant') window.ZajelTerminalUI?.mountCouncil?.(sideContentEl);
   }
 
   /* ==========================================================================
@@ -8382,7 +8386,8 @@
     const tabsConfig = [
       { key: 'chats', title: 'المحادثات', icon: 'chat' },
       { key: 'memory', title: 'الذاكرة', icon: 'brain' },
-      { key: 'prompts', title: 'الأوامر', icon: 'spark' }
+      { key: 'prompts', title: 'الأوامر', icon: 'spark' },
+      { key: 'council', title: 'المجلس', icon: 'users' }
     ];
 
     tabsConfig.forEach(t => {
