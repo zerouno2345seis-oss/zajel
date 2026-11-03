@@ -487,14 +487,24 @@ def _run_eval(rd):
     _save_council()
 
 
+FINAL = ("done", "done_raw", "error", "timeout", "stopped")
+
+
 def _run_round(rd):
     threads = []
     for i in rd["delegates"]:
         t = threading.Thread(target=_ask, args=(rd, i, rd["agents"][i], rd["question"] + _files_note(rd, i), rd["tok"]), daemon=True)
         t.start()
         threads.append(t)
-    for t in threads:
-        t.join()
+    t0, limit = time.time(), rd.get("limit") or 0
+    while any(t.is_alive() for t in threads):
+        time.sleep(1)
+        if rd["stop"]:
+            break
+        got = any(e.get("answer") and e.get("state") in ("done", "done_raw") for e in rd["agents"].values())
+        if limit and got and rd["main"] and time.time() - t0 > limit:    # انتهت المهلة: يحكم الرئيسي بما وصل ويبقى البطيء يكمل
+            rd["cut"] = True
+            break
     if rd["stop"]:
         rd["phase"] = "stopped"
     elif rd["evaluate"] and rd["main"]:
@@ -504,7 +514,27 @@ def _run_round(rd):
     _save_council()
 
 
-def council_start(ids, text, main="", evaluate=True, attachments=None, parent=""):
+def warm(ids):
+    """يجهّز الوكلاء (يشغّل المتوقف وينتظر جاهزيته) في الخلفية قبل أن يُطرح السؤال، فيبدأ الجميع معًا."""
+    ids = [i for i in dict.fromkeys(ids or []) if i in BY_ID and BY_ID[i]["cmd"]][:6]
+    if not ids or not available():
+        return {"ok": True, "warming": []}
+
+    def one(i):
+        lock = AGENT_LOCKS.setdefault(i, threading.Lock())
+        if lock.acquire(blocking=False):
+            try:
+                _ensure_ready(i)
+            except Exception:
+                pass
+            finally:
+                lock.release()
+    for i in ids:
+        threading.Thread(target=one, args=(i,), daemon=True).start()
+    return {"ok": True, "warming": ids}
+
+
+def council_start(ids, text, main="", evaluate=True, attachments=None, parent="", limit=300):
     text = str(text or "").strip()
     if not text or len(text) > MAX_Q:
         raise ValueError(f"اكتب سؤالًا (حتى {MAX_Q} حرف).")
@@ -525,7 +555,7 @@ def council_start(ids, text, main="", evaluate=True, attachments=None, parent=""
         to = str(a.get("to") or "*")
         if str(a.get("path", "")).strip() and (to in ("*", "main") or to in ids):
             atts.append({"path": str(a["path"]), "name": str(a.get("name", ""))[:120], "to": to})
-    rd = {"id": rid, "attachments": atts, "parent": parent if parent in COUNCIL else "", "tok": secrets.token_hex(3), "question": text, "main": main or "", "delegates": ids, "evaluate": bool(evaluate and main),
+    rd = {"id": rid, "limit": max(0, min(int(limit or 0), 3600)), "cut": False, "attachments": atts, "parent": parent if parent in COUNCIL else "", "tok": secrets.token_hex(3), "question": text, "main": main or "", "delegates": ids, "evaluate": bool(evaluate and main),
           "created": time.time(), "phase": "asking", "stop": False,
           "agents": {i: {"name": BY_ID[i]["name"], "state": "queued", "answer": ""} for i in ids},
           "eval": {"name": BY_ID[main]["name"] if main else "", "state": "queued", "answer": ""}}
@@ -541,7 +571,8 @@ def council_view(rid=""):
     rd = COUNCIL.get(rid)
     if not rd:
         return {"round": None}
-    return {"round": {k: v for k, v in rd.items() if k != "stop"} | {"stopped": rd["stop"]}}
+    pending = sum(1 for e in rd["agents"].values() if e.get("state") not in FINAL)
+    return {"round": {k: v for k, v in rd.items() if k != "stop"} | {"stopped": rd["stop"], "pending": pending}}
 
 
 def council_history():

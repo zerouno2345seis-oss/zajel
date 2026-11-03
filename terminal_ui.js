@@ -180,9 +180,10 @@
     const ta = mk('textarea'); ta.rows = 1; ta.dir = 'auto'; ta.placeholder = 'اسأل المجلس… (⌘↩ للإرسال)';
     const row = mk('div', 'cn-row'); const attachBtn = mk('button', 'cn-ibtn', '📎'); attachBtn.type = 'button'; attachBtn.title = 'إرفاق ملفات لوكيل أو للحكم';
     const fileIn = mk('input'); fileIn.type = 'file'; fileIn.multiple = true; fileIn.hidden = true;
+    const limSel = mk('select', 'cn-btn'); limSel.title = 'بعد هذه المدة يحكم الرئيسي بما وصل ويكمل البطيء'; [[180, 'مهلة الحكم: ٣ د'], [300, 'مهلة الحكم: ٥ د'], [600, 'مهلة الحكم: ١٠ د'], [0, 'بلا مهلة']].forEach(([v, t]) => { const o = mk('option', '', t); o.value = v; limSel.appendChild(o); }); limSel.value = (() => { try { return localStorage.getItem('zajel_council_limit') || '300'; } catch (_) { return '300'; } })(); limSel.onchange = () => { try { localStorage.setItem('zajel_council_limit', limSel.value); } catch (_) {} };
     const ctx = mk('span', 'cn-sub'); const newBtn = mk('button', 'cn-btn', 'سؤال جديد'); newBtn.type = 'button'; newBtn.hidden = true;
     const sendBtn = mk('button', 'cn-send', 'أرسل'); sendBtn.type = 'button';
-    row.append(attachBtn, fileIn, ctx, newBtn, mk('span', 'sp'), sendBtn);
+    row.append(attachBtn, fileIn, limSel, ctx, newBtn, mk('span', 'sp'), sendBtn);
     composer.append(attBar, ta, row); host.appendChild(composer);
     const thread = mk('div', 'cn-thread'); host.appendChild(thread);
     const empty = mk('div', 'cn-empty', 'اختر الوكلاء بالضغط على أسمائهم، وعيّن الحكم بالتاج، ثم اطرح سؤالك.'); thread.appendChild(empty);
@@ -203,6 +204,8 @@
     const grow = () => { ta.style.height = 'auto'; ta.style.height = Math.min(200, ta.scrollHeight) + 'px'; };
     ta.addEventListener('input', grow);
 
+    let warmTimer = null;
+    const warmUp = () => { clearTimeout(warmTimer); warmTimer = setTimeout(() => { const ids = [...new Set([...selected, ...(main ? [main] : [])])].filter(id => available.some(a => a.id === id)); if (ids.length && (!activeId || lastDoneId === activeId)) req('council/warm', { ids }).catch(() => {}); }, 1200); };
     const renderRoster = () => {
       roster.replaceChildren();
       available.forEach(a => {
@@ -213,6 +216,7 @@
         chip.onclick = () => { selected.has(a.id) ? selected.delete(a.id) : selected.add(a.id); persist(); renderRoster(); renderAttTargets(); };
         chip.append(av, nm, crown); roster.appendChild(chip);
       });
+      warmUp();
       const n = [...selected].filter(id => available.some(a => a.id === id)).length;
       teamBar.textContent = '▾ الفريق: ' + ([...selected].filter(id => available.some(a => a.id === id)).map(nameOf).join('، ') || 'لا أحد') + (main ? ' · الحكم: ' + nameOf(main) : '');
       summary.textContent = n ? `${n} مفوَّض يجيبون معًا` + (main ? ` · الحكم: ${nameOf(main)}` : ' · بلا حكم (إجابات فقط)') : 'لم تختر أي مفوَّض بعد';
@@ -282,6 +286,7 @@
       const grid = mk('div', 'cn-grid'); (r.delegates || []).forEach(id => { const d = st[id] || {}; grid.appendChild(card(d.name || nameOf(id), id, d.state, d.answer || d.error, d.live, false, d)); }); box.appendChild(grid);
       const foot = mk('div', 'cn-foot');
       const anyAns = Object.values(st).some(x => x.answer);
+      if (r.cut && r.pending > 0) { foot.appendChild(mk('span', 'cn-sub', 'حكم الرئيسي بما وصل؛ ما زال ' + r.pending + ' يكتب إجابته…')); }
       if (r.main && anyAns && ev.state !== 'done' && ev.state !== 'done_raw' && !finished(r)) { const b = mk('button', 'cn-btn', 'قيّم الآن بما وصل'); b.type = 'button'; b.onclick = async () => { try { await req('council/evaluate', { id: r.id }); poll(); } catch (e) { err(e); } }; foot.appendChild(b); }
       if (finished(r) && anyAns) { foot.appendChild(mk('span', 'cn-sub', 'حفظ كامل الجلسة:')); [['Word', 'docx'], ['PDF', 'pdf'], ['Markdown', 'md']].forEach(([t, f]) => { const b = mk('button', 'cn-btn', t); b.type = 'button'; b.onclick = async () => { try { const x = await req('council/export', { id: r.id, fmt: f }); b.textContent = '✓ ' + t; foot.querySelector('.cn-sub').textContent = 'حُفظ في: ' + x.path; } catch (e) { err(e); } }; foot.appendChild(b); }); }
       if (foot.childNodes.length) box.appendChild(foot);
@@ -289,7 +294,7 @@
     // ===== الاستعلام الدوري =====
     async function poll() {
       if (councilRoot !== host || !host.isConnected || !activeId) return;
-      try { const d = await req('council/status?id=' + encodeURIComponent(activeId)); if (!d.round) return; renderRound(d.round); if (finished(d.round)) { clearInterval(councilTimer); councilTimer = null; lastDoneId = d.round.id; sync(); } }
+      try { const d = await req('council/status?id=' + encodeURIComponent(activeId)); if (!d.round) return; renderRound(d.round); if (finished(d.round) && !(d.round.pending > 0)) { clearInterval(councilTimer); councilTimer = null; lastDoneId = d.round.id; sync(); } }
       catch (e) { err(e); }
     }
     function sync() {
@@ -307,7 +312,7 @@
       if (!ta.value.trim() || !ids.length) { err(new Error('اكتب سؤالًا واختر مفوَّضًا واحدًا على الأقل')); return; }
       const files = atts.filter(a => a.status === 'ok').map(a => ({ path: a.path, name: a.name, to: a.to }));
       try {
-        const d = await req('council/send', { ids, text: ta.value, main, evaluate: true, attachments: files, parent: lastDoneId || '' });
+        const d = await req('council/send', { ids, text: ta.value, main, evaluate: true, attachments: files, parent: lastDoneId || '', limit: Number(limSel.value) });
         setFold(true); activeId = d.id; lastDoneId = ''; ta.value = ''; atts = []; renderAtts(); grow(); sync();
         try { window.ZajelTerminalUI?.showAgents?.(main && !ids.includes(main) ? [...ids, main] : ids); } catch (_) {}
         clearInterval(councilTimer); councilTimer = setInterval(poll, 1500); poll();
