@@ -386,6 +386,7 @@ def _on_text(chat, text):
 BATCH = {"msgs": [], "timer": None}
 BATCH_LOCK = threading.Lock()
 BATCH_WAIT = 4.0
+BATCH_WAIT_PART = 12.0      # رسالة قصيرة أو رابط وحده غالبًا جزء من طلب أطول؛ والتمرير بين الجهازين عبر المزامنة قد يفصل الرسائل بعدة ثوانٍ
 
 
 def _ask_batched(chat, q):
@@ -395,7 +396,8 @@ def _ask_batched(chat, q):
         BATCH["msgs"].append(q)
         if BATCH["timer"]:
             BATCH["timer"].cancel()
-        BATCH["timer"] = threading.Timer(BATCH_WAIT, _flush_batch, args=(chat,))
+        part = len(q.split()) <= 2 or bool(re.match(r"^\S*https?://\S+$", q.strip()))
+        BATCH["timer"] = threading.Timer(BATCH_WAIT_PART if part else BATCH_WAIT, _flush_batch, args=(chat,))
         BATCH["timer"].daemon = True
         BATCH["timer"].start()
 
