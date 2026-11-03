@@ -41,6 +41,11 @@
     };
 
     switch (iconName) {
+      case 'terminal':
+        appendPath('M4 5h16a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1z');
+        appendPath('M7 10l3 2-3 2');
+        appendPath('M12 15h5');
+        break;
       case 'queue': // طابور التعقيبات والمهام
         appendPath('M4 6h16');
         appendPath('M4 12h16');
@@ -8085,6 +8090,11 @@
       controlChipEl.onclick = () => { if (controlPanelEl) { controlPanelEl.hidden = !controlPanelEl.hidden; controlPanelEl.style.display = controlPanelEl.hidden ? 'none' : 'flex'; if (controlPanelEl.hidden) { stopAutomationsPolling(); stopAgentsPolling(); window.ZajelTerminalUI?.deactivate?.(); } } if (controlPanelEl && !controlPanelEl.hidden) switchControlTab(controlActiveTab); };
       controlChipEl.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); controlChipEl.click(); } };
       topBar.insertBefore(controlChipEl, vclean && vclean.parentNode === topBar ? vclean : null);
+      const termChipEl = el('span', '', 'chip', { id: 'zajel-terminal-chip', title: 'الطرفية', role: 'button', tabindex: '0', 'aria-label': 'الطرفية' });
+      termChipEl.append(createSvg('terminal', 15), document.createTextNode(' الطرفية'));
+      termChipEl.onclick = () => { if (controlPanelEl && !controlPanelEl.hidden && controlActiveTab === 'terminal') { controlChipEl.click(); return; } switchControlTab('terminal'); };
+      termChipEl.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); termChipEl.click(); } };
+      topBar.insertBefore(termChipEl, vclean && vclean.parentNode === topBar ? vclean : null);
     }
 
     // 2. النافذة الجانبية الكاملة
@@ -8838,3 +8848,22 @@
     tick();
     setInterval(tick, 60000);
   })();
+
+// اتجاه الكتابة التلقائي في كل حقول زاجل: السطر العربي يبدأ من اليمين والإنجليزي من اليسار
+(() => {
+  const SKIP = new Set(['checkbox', 'radio', 'range', 'color', 'file', 'button', 'submit', 'number', 'password', 'email', 'url']);
+  const fix = el => {
+    if (!el || el.dataset?.zDir || el.closest?.('.as-terminal-screen')) return;
+    if (el.tagName === 'INPUT' && SKIP.has((el.type || 'text').toLowerCase())) return;
+    el.dataset.zDir = '1';
+    if (!el.getAttribute('dir')) el.setAttribute('dir', 'auto');
+    el.style.unicodeBidi = 'plaintext';
+    el.style.textAlign = 'start';
+  };
+  const scan = root => (root.querySelectorAll ? root.querySelectorAll('textarea,input,[contenteditable="true"]') : []).forEach(fix);
+  const start = () => {
+    scan(document);
+    new MutationObserver(ms => ms.forEach(m => m.addedNodes.forEach(n => { if (n.nodeType === 1) { fix(n); scan(n); } }))).observe(document.body, { childList: true, subtree: true });
+  };
+  if (document.body) start(); else document.addEventListener('DOMContentLoaded', start);
+})();
