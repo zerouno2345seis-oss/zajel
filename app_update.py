@@ -161,6 +161,11 @@ def ensure_repo():
                          f"اقبل دعوة المشاركة في المستودع على هذا الجهاز، أو سجّل الدخول بحساب {owner}: gh auth login")
     repo = DATA / "sync_repo"
     full = f"{owner}/{DATA_REPO_NAME}"
+    if (repo / ".git").exists():
+        url = _run(["git", "remote", "get-url", "origin"], cwd=repo).stdout.strip()
+        if f"/{full}" not in url and f":{full}" not in url:      # نسخة من مستودع حساب آخر (قبل تثبيت المالك): تُنحّى ويُنسخ الصحيح
+            old = DATA / f"sync_repo.old.{int(time.time())}"
+            repo.rename(old)
     if not (repo / ".git").exists():
         if _run(["gh", "repo", "clone", full, str(repo)], timeout=90).returncode != 0:
             c = _run(["gh", "repo", "create", full, "--private", "--description", "إعدادات وذاكرة زاجل (خاص)"], timeout=60)
