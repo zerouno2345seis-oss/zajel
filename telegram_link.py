@@ -259,16 +259,28 @@ def _loop():
     except Exception:
         pass
     while not _stop.is_set() and tok:
+        other = _other_gateway()
+        if other:                                   # جهاز آخر يستقبل وحضوره حديث: لا ننازعه (كل طلب استقبال يقطع طلب الآخر)
+            if STATE["gateway"]:
+                STATE["gw_changed"] = True
+            STATE["gateway"], STATE["error"] = False, f"الجهاز {other} يستقبل رسائل البوت الآن؛ هذا الجهاز يجيب حين تختاره من «الأجهزة»، ويتولى الاستقبال تلقائيًا إن أُغلق ذاك."
+            _stop.wait(30)
+            continue
         try:
             c = _cfg()
             ups = _api(tok, "getUpdates", {"offset": c["offset"], "timeout": 25, "allowed_updates": ["message", "callback_query"]}, timeout=40)
+            if not STATE["gateway"]:
+                STATE["gw_changed"] = True          # صرنا المستقبِل: سجّل الحضور فورًا ليعرفه الجهاز الآخر
             STATE["gateway"], STATE["error"] = True, ""
             for u in ups:
                 _save_cfg({"offset": u["update_id"] + 1})
                 threading.Thread(target=_route, args=(u,), daemon=True).start()      # كل طلب في خيط: لا يحجب الاستماع
         except ConflictError:
-            STATE["gateway"], STATE["error"] = False, "هذا البوت يستمع إليه برنامج آخر الآن (جهاز آخر، أو برنامج استعملتَ مفتاحه نفسه مثل Hermes أو AutoClaw)، أو عليه رابط ويب قديم. استعمل بوتًا جديدًا لزاجل وحده من BotFather."
-            _stop.wait(20)
+            if STATE["gateway"]:
+                STATE["gw_changed"] = True
+            STATE["gateway"] = False
+            STATE["error"] = "هذا البوت يستمع إليه برنامج آخر الآن (جهاز آخر، أو برنامج استعملتَ مفتاحه نفسه مثل Hermes أو AutoClaw)."
+            _stop.wait(45 if HOST > min([HOST] + list(MAIL["presence"])) else 20)      # كسر التعادل: الاسم الأصغر يعود أسرع
         except ValueError as exc:
             STATE["gateway"], STATE["error"] = False, str(exc)
             _stop.wait(15)
@@ -277,6 +289,20 @@ def _loop():
             _stop.wait(15)
     STATE["running"] = False
     STATE["gateway"] = False
+
+
+GW_FRESH = 720      # حضور «المستقبِل» يُعدّ حيًّا ١٢ دقيقة (يُجدَّد كل ٥ دقائق)
+
+
+def _other_gateway():
+    """جهاز آخر يعلن أنه المستقبِل وحضوره حديث. عند التعادل (كلاهما يعلن) يبقى صاحب الاسم الأصغر."""
+    now = time.time()
+    for h, p in sorted(MAIL["presence"].items()):
+        if h != HOST and p.get("gateway") and now - p.get("ts", 0) < GW_FRESH:
+            if STATE["gateway"] and HOST < h:
+                continue
+            return h
+    return ""
 
 
 def _dispatch(u):
@@ -854,7 +880,7 @@ def _mail_tick():
             except ValueError:
                 pass
             f.unlink()
-        if time.time() - MAIL["last_presence"] > 600 or todo:
+        if time.time() - MAIL["last_presence"] > (300 if STATE["gateway"] else 600) or todo or STATE.pop("gw_changed", False):
             pd = MAIL["repo"] / "tg" / "presence"
             pd.mkdir(parents=True, exist_ok=True)
             (pd / f"{HOST}.json").write_text(json.dumps({"ts": time.time(), "version": _version(), "gateway": STATE["gateway"]}), encoding="utf-8")
