@@ -1,13 +1,16 @@
 """غرفة الوكلاء: جلسات طرفية دائمة داخل tmux، تعرضها واجهة زاجل وتقبل الكتابة.
 الجلسات تعيش في خادم tmux مستقل عن زاجل، فلا تموت بإغلاق النافذة أو تحديث التطبيق."""
+import copy
 import hashlib
 import json
 import os
+import random
 import re
 import secrets
 import shlex
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -46,6 +49,10 @@ def init(data_dir):
     except (OSError, ValueError):
         pass
     _load_council()
+    try:
+        _ca().init(str(DATA))
+    except Exception:
+        pass
     if not (_mon_thread and _mon_thread.is_alive()):
         _mon_thread = threading.Thread(target=_monitor, daemon=True)
         _mon_thread.start()
@@ -131,7 +138,7 @@ def listing():
     for a in AGENTS:
         st, lab, idle = state_of(a["id"], live) if ok else ("stopped", "متوقف", 0)
         rows.append({"id": a["id"], "name": a["name"], "cmd": a["cmd"], "state": st, "label": lab, "idle": idle,
-                     "installed": (not a["cmd"]) or bool(_which(a["cmd"]))})
+                     "installed": (not a["cmd"]) or bool(_which(a["cmd"])), "direct": bool(a["cmd"]) and can_direct(a["id"])})
     return {"available": ok, "agents": rows, "notify": CFG["notify"],
             "hint": "" if ok else "tmux غير مثبت على هذا الجهاز؛ ثبّته أولًا (brew install tmux)."}
 
@@ -274,7 +281,63 @@ COUNCIL_MAX = 12
 AGENT_LOCKS = {}
 ANSWER_TIMEOUT = 900          # أقصى انتظار لإجابة وكيل (ثوانٍ)
 MAX_Q = 8000
-MAX_ANS_IN_EVAL = 14000
+PREVIEW = 6000                # معاينة كل إجابة داخل تعليمة الحكم؛ الكامل في ملفه
+COUNCIL_LOCK = threading.RLock()
+EVAL_LOCKS = {}               # معرّف الجولة ← قفل: لا يعمل حكمان معًا
+RUNNING = set()               # الجولات التي ما زال خيطها يعمل
+LETTERS = ["أ", "ب", "ج", "د", "هـ", "و"]
+DEPTHS = ("fast", "bal", "deep")
+DEPTH_LIMIT = {"fast": 180, "bal": 300, "deep": 0}
+DEPTH_TIMEOUT = {"fast": 600, "bal": 900, "deep": 1800}
+VERDICT_HEADS = ["الخلاصة", "الاتفاق", "الاختلاف ومن الأصح", "خريطة الأقوال", "المصادر", "الترتيب", "الحكم النهائي"]
+ANSWER_TEMPLATE = ("\n\n[طريقة العمل] اعمل بكامل أدواتك (قراءة الملفات، البحث، الشاملة إن كانت متاحة) ولا تعدّل أي ملف ولا تنفّذ أمرًا يغيّر شيئًا.\n"
+                   "[قالب الإجابة] اكتب إجابتك بصيغة Markdown بهذه العناوين بالضبط وبهذا الترتيب:\n"
+                   "## الخلاصة\n## التفصيل\n## الأدلة والمصادر\n## درجة الثقة\n## ما لم أتحقق منه\n"
+                   "تحت «الأدلة والمصادر» اذكر موضع كل دليل (كتاب/جزء/صفحة أو رابط). وتحت «درجة الثقة»: عالية أو متوسطة أو منخفضة مع السبب.")
+
+
+def _ca():
+    import council_agents         # يُستورد عند الحاجة (وحدة مستقلة)
+    return council_agents
+
+
+def _snap(obj):
+    """نسخة عميقة آمنة: الخيوط تعدّل القواميس أثناء النسخ فنعيد المحاولة."""
+    with COUNCIL_LOCK:
+        for _ in range(5):
+            try:
+                return copy.deepcopy(obj)
+            except RuntimeError:
+                time.sleep(0.01)
+        return json.loads(json.dumps(obj, ensure_ascii=False, default=str))
+
+
+def _rdir(rid, make=False):
+    d = DATA / "council" / str(rid)
+    if make:
+        d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _write(path, text):
+    try:
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        Path(path).write_text(text or "", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _ans_file(rd, i, rev=False):
+    return _rdir(rd["id"]) / ((rd.get("letters") or {}).get(i, i) + (".rev.md" if rev else ".md"))
+
+
+def _section(text, title):
+    """نص قسم «## title» حتى العنوان التالي من المستوى نفسه أو أعلى، أو ""."""
+    m = re.search(r"^#{1,3}\s*\**%s\**[^\n]*\n" % re.escape(title), text or "", re.M)
+    if not m:
+        return ""
+    e = re.search(r"^#{1,2}\s+\S", text[m.end():], re.M)
+    return text[m.end():m.end() + e.start() if e else None].strip()
 
 
 def _plain(i, hist=5000):
@@ -328,16 +391,20 @@ def _wrap_question(text, tok):
 
 def _save_council():
     try:
-        rows = [COUNCIL[k] for k in COUNCIL_ORDER[-COUNCIL_MAX:] if k in COUNCIL]
-        (DATA / "terminal_council.json").write_text(json.dumps(rows, ensure_ascii=False), encoding="utf-8")
-    except OSError:
+        with COUNCIL_LOCK:
+            rows = _snap([COUNCIL[k] for k in COUNCIL_ORDER[-COUNCIL_MAX:] if k in COUNCIL])
+            f = DATA / "terminal_council.json"
+            tmp = f.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(rows, ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp, f)
+    except Exception:
         pass
 
 
 def _load_council():
     try:
         for r in json.loads((DATA / "terminal_council.json").read_text(encoding="utf-8")):
-            if r.get("phase") in ("asking", "evaluating"):
+            if r.get("phase") in ("asking", "evaluating", "review", "refining"):
                 r["phase"] = "stopped"
             COUNCIL[r["id"]] = r
             COUNCIL_ORDER.append(r["id"])
@@ -367,58 +434,89 @@ def _type_message(i, text):
     send(i, "", keys=["Enter"])
 
 
-HEADLESS = {"claude": ["claude", "-p", "--allowedTools=Read,Grep,Glob,WebSearch,WebFetch"], "codex": ["codex", "exec", "--skip-git-repo-check"], "hermes": ["hermes", "-z"],
-            "agy": ["agy", "--print-timeout", "10m", "-p"], "opencode": ["opencode", "run", "-m", "opencode/glm-5.3-flash-free"]}
+HEADLESS = {"claude": ["claude", "-p", "--allowedTools=Read,Grep,Glob,WebSearch,WebFetch", "--disallowedTools=Edit,Write,NotebookEdit"],
+            "codex": ["codex", "exec", "--skip-git-repo-check", "-s", "read-only"], "hermes": ["hermes", "-z"],
+            "agy": ["agy", "--mode", "plan", "--print-timeout", "10m", "-p"], "opencode": ["opencode", "run", "-m", "opencode/nemotron-3-ultra-free"]}
+
+
+def _direct(rd, i, entry, prompt, add_dirs=()):
+    """يسأل الوكيل عبر council_agents.run ويحدّث النص الحي والنشاط في entry. يعيد نتيجة run."""
+    def on_event(kind, data):
+        if kind == "text":
+            entry["live"] = str(data or "")[-3000:]
+        elif kind == "activity":
+            entry["activity"] = str(data or "")[:200]
+    try:
+        return _ca().run(i, prompt, depth=rd.get("depth", "bal"), add_dirs=[str(d) for d in add_dirs if d], on_event=on_event,
+                         should_stop=lambda: bool(rd.get("stop")), timeout=DEPTH_TIMEOUT.get(rd.get("depth"), ANSWER_TIMEOUT))
+    except Exception as exc:
+        return {"ok": False, "text": "", "error": str(exc)[:200]}
 
 
 def _headless(i, question, entry=None, rd=None, timeout=900):
-    """يسأل الوكيل بوضعه غير التفاعلي (بلا شاشة) ويعيد إجابته كاملة، أو None. يكتب في entry زمن العمل حيًّا."""
+    """احتياط وضع الطرفيات: سؤال الوكيل بلا شاشة. يعيد الإجابة كاملة أو None."""
+    try:
+        _ca()
+        r = _direct(rd or {}, i, entry if entry is not None else {}, question)
+        return r.get("text") if r.get("ok") and str(r.get("text") or "").strip() else None
+    except ImportError:
+        pass
     base = HEADLESS.get(i)
-    exe = base and shutil.which(base[0], path=EXTRA_PATH_STR())
+    exe = base and _which(base[0])
     if not exe:
         return None
-    try:
-        pr = subprocess.Popen([exe] + base[1:] + [question], cwd=str(Path.home()), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                              stderr=subprocess.PIPE, text=True, env={**os.environ, "PATH": EXTRA_PATH_STR()})
-    except OSError:
-        return None
-    t0 = time.time()
-    while pr.poll() is None:
-        if (rd and rd.get("stop")) or time.time() - t0 > timeout:
-            pr.kill()
+    # المخرج إلى ملفات مؤقتة (لا انسداد أنابيب مع الإجابات الطويلة) وبيئة نظيفة بلا أسرار زاجل
+    with tempfile.TemporaryFile() as fo, tempfile.TemporaryFile() as fe:
+        try:
+            pr = subprocess.Popen([exe] + base[1:] + [question], cwd=str(Path.home()), stdin=subprocess.DEVNULL, stdout=fo, stderr=fe,
+                                  env=_env(), start_new_session=True)
+        except OSError:
             return None
-        if entry is not None:
-            entry["live"] = f"يقرأ ويعمل بكامل أدواته في الخلفية… ({int(time.time() - t0)} ث)"
-        time.sleep(2)
-    out, _err = pr.communicate()
-    out = re.sub(r"\x1b\[[0-9;]*m", "", out or "").strip()
-    return out if pr.returncode == 0 and out and "Error:" not in out[:200] else None
+        t0 = time.time()
+        while pr.poll() is None:
+            if (rd and rd.get("stop")) or time.time() - t0 > timeout:
+                pr.kill()
+                pr.wait()
+                return None
+            if entry is not None:
+                entry["live"] = f"يقرأ ويعمل بكامل أدواته في الخلفية… ({int(time.time() - t0)} ث)"
+            time.sleep(1)
+        fo.seek(0)
+        out = re.sub(r"\x1b\[[0-9;]*m", "", fo.read().decode("utf-8", "replace")).strip()
+    return out if out and (pr.returncode == 0 or _meaningful(out) >= 20) else None
 
 
 def can_direct(i):
-    base = HEADLESS.get(i)
-    return bool(base and shutil.which(base[0], path=EXTRA_PATH_STR()))
+    try:
+        return bool(_ca().can_run(i))
+    except Exception:
+        base = HEADLESS.get(i)
+        return bool(base and _which(base[0]))
 
 
 def EXTRA_PATH_STR():
-    return os.pathsep.join([str(Path.home() / ".local" / "bin"), "/opt/homebrew/bin", "/usr/local/bin", str(Path.home() / ".opencode" / "bin"), os.environ.get("PATH", "")])
+    return os.pathsep.join(EXTRA_PATH)
 
 
-def _ask(rd, i, entry, question, tok):
-    """يرسل السؤال إلى وكيل ويلتقط إجابته من شاشته. يملأ entry ويعيد."""
+def _ask(rd, i, entry, question, tok, add_dirs=()):
+    """يرسل السؤال إلى وكيل (مباشرة أو عبر شاشته) ويملأ entry بالإجابة."""
     if rd.get("mode", "direct") == "direct" and can_direct(i):
         try:
-            entry.update(state="asking", sent_at=time.time(), via="direct")
-            ans = _headless(i, question, entry, rd)
-            if rd.get("stop"):
-                entry.update(state="stopped", finished_at=time.time())
-            elif ans:
-                entry.update(state="done", answer=ans, finished_at=time.time())
+            entry.update(state="asking", sent_at=time.time(), via="direct", live="", activity="", partial=False, error="")
+            r = _direct(rd, i, entry, question, add_dirs)
+            txt = str(r.get("text") or "").strip()
+            if rd.get("stop") or r.get("error") == "stopped":
+                entry.update(state="stopped", answer=txt if r.get("ok") else entry.get("answer", ""), finished_at=time.time())
+            elif r.get("ok") and txt:
+                entry.update(state="done", answer=txt, partial=bool(r.get("partial")), model=r.get("model") or "", finished_at=time.time())
             else:
-                entry.update(state="error", error="لم يُرجع الوكيل إجابة (تحقق من تسجيل دخوله أو مفتاحه، أو أن المهمة تجاوزت ١٥ دقيقة).", finished_at=time.time())
+                why = r.get("error") or "لم يُرجع الوكيل إجابة"
+                entry.update(state="timeout" if "timeout" in str(why).lower() else "error",
+                             error=f"{why} (تحقق من تسجيل دخوله أو مفتاحه، أو أن المهمة تجاوزت المهلة)."[:300], finished_at=time.time())
         except Exception as exc:
             entry.update(state="error", error=str(exc)[:200], finished_at=time.time())
         finally:
+            entry["live"] = ""
             _save_council()
         return
     lock = AGENT_LOCKS.setdefault(i, threading.Lock())
@@ -450,7 +548,7 @@ def _ask(rd, i, entry, question, tok):
                 if st == "working":
                     worked, quiet_since = True, None
                 elif not worked and time.time() - entry["sent_at"] > 90:   # لم يبدأ العمل أصلًا: نجرّب الوضع غير التفاعلي مرة واحدة
-                    hl = _headless(i, question)
+                    hl = _headless(i, question, rd=rd)
                     if hl:
                         entry.update(state="done", answer=hl, via="headless", finished_at=time.time())
                     else:
@@ -459,14 +557,14 @@ def _ask(rd, i, entry, question, tok):
                 elif worked:
                     quiet_since = quiet_since or time.time()
                     if time.time() - quiet_since > 40:        # انتهى العمل بلا علامات: نعرض آخر الشاشة خامًا
-                        hl = _headless(i, question)
+                        hl = _headless(i, question, rd=rd)
                         if hl:
                             entry.update(state="done", answer=hl, via="headless", finished_at=time.time())
                             return
                         tail = "\n".join(_clean_body(txt).splitlines()[-60:])
                         entry.update(state="done_raw", answer=tail, finished_at=time.time())
                         return
-            hl = _headless(i, question)
+            hl = _headless(i, question, rd=rd)
             if hl:
                 entry.update(state="done", answer=hl, via="headless", finished_at=time.time())
             else:
@@ -532,8 +630,33 @@ def paths_in(text):
 
 
 def _prev_note(rd):
+    """المتابعة: السؤال السابق كاملًا + مسار ملف حكمه + «الحكم النهائي» منه (حتى ٣٠٠٠ حرف)."""
     pr = COUNCIL.get(rd.get("parent") or "")
-    return f"\n\n(هذه متابعة لسؤال سابق في المجلس: «{pr['question'][:300]}»)" if pr else ""
+    if not pr:
+        return ""
+    ans = (pr.get("eval") or {}).get("answer") or ""
+    fin = (_section(ans, "الحكم النهائي") or ans).strip()[:3000]
+    vp = _rdir(pr["id"]) / "verdict.md"
+    out = f"\n\n[متابعة] هذا سؤال متابعة لجولة سابقة في المجلس.\nالسؤال السابق كاملًا:\n«{pr['question']}»"
+    if vp.is_file():
+        out += f"\nحكم المجلس السابق كاملًا محفوظ في الملف: {vp}"
+    if fin:
+        out += f"\n«الحكم النهائي» السابق:\n{fin}"
+    return out
+
+
+def _delegate_q(rd, i):
+    return rd["question"] + _prev_note(rd) + _files_note(rd, i) + ANSWER_TEMPLATE
+
+
+def _dirs(rd):
+    """المجلدات المسموح للوكيل بقراءتها: مجلد الجولة والجولة السابقة ومجلدات المرفقات."""
+    out = [str(_rdir(rd["id"], True))]
+    if rd.get("parent"):
+        out.append(str(_rdir(rd["parent"])))
+    for a in rd.get("attachments", []):
+        out += [str(Path(p).parent) for p in (a.get("path"), a.get("text")) if p]
+    return list(dict.fromkeys(d for d in out if os.path.isdir(d)))
 
 
 def _files_note(rd, who):
@@ -552,48 +675,97 @@ def _files_note(rd, who):
     return ("\n\nملفات مرفقة — اقرأها كاملة قبل الإجابة (النص المستخرج ملف نصي عادي يُقرأ مباشرة):\n" + "\n".join(lines))
 
 
+def _order(rd):
+    lt = rd.get("letters") or {}
+    return sorted(rd["delegates"], key=lambda i: LETTERS.index(lt[i]) if lt.get(i) in LETTERS else 99)
+
+
 def _eval_prompt(rd):
-    parts = [f"أنت الوكيل الرئيسي (الحَكَم) في «مجلس الوكلاء» داخل برنامج زاجل. سُئل عدّة وكلاء السؤال التالي:\n\n«{rd['question']}»{_prev_note(rd)}{_files_note(rd, 'main')}\n\nهذه إجاباتهم:"]
-    for i in rd["delegates"]:
-        e = rd["agents"][i]
-        tag = f"{BY_ID[i]['name']} (المعرّف: {i}" + (f"، أعاد زاجل تشغيله {e['retries']} مرة" if e.get("retries") else "") + ")"
+    blind, lt = rd.get("blind", True), rd.get("letters") or {}
+    order = _order(rd)
+    parts = [f"أنت الوكيل الرئيسي (الحَكَم) في «مجلس الوكلاء» داخل برنامج زاجل. سُئل عدّة وكلاء السؤال التالي:\n\n«{rd['question']}»{_prev_note(rd)}{_files_note(rd, 'main')}\n\n"
+             "كل إجابة محفوظة كاملة في ملف: اقرأ كل ملف كاملًا بأداة القراءة قبل أن تحكم. المعاينة تحت كل إجابة للتعريف فقط وقد تكون مقتطعة."]
+    if blind:
+        parts.append(" الإجابات مُعمّاة: لا تعرف أصحابها، فاحكم على المضمون وحده وسمِّها بحروفها.")
+    parts.append("\n\nالإجابات:")
+    for i in order:
+        e, L = rd["agents"][i], lt.get(i, i)
+        tag = f"الإجابة {L}" if blind else f"إجابة {BY_ID[i]['name']} (المعرّف: {i}، الحرف: {L}" + (f"، أعاد زاجل تشغيله {e['retries']} مرة" if e.get("retries") else "") + ")"
         if _real(e):
-            parts.append(f"\n===== إجابة {tag} =====\n{e['answer'][:MAX_ANS_IN_EVAL]}")
+            rev = bool(e.get("revised"))
+            txt, f = (e["revised"] if rev else e["answer"]), _ans_file(rd, i, rev)
+            head = (f"\n===== {tag}" + (" (منقّحة بعد النقد المتبادل)" if rev else "") + (" (جزئية: انقطع صاحبها قبل أن يكمل)" if e.get("partial") else "")
+                    + f" — النص الكامل في الملف: {f} ({len(txt)} حرف) =====\n")
+            body = txt[:PREVIEW]
+            if len(txt) > PREVIEW:
+                body += f"\n[… انتهت المعاينة عند {PREVIEW} حرف من {len(txt)}؛ بقية النص في الملف {f} — اقرأه كاملًا قبل الحكم]"
+            parts.append(head + body)
         elif e.get("answer"):
-            parts.append(f"\n===== {tag}: لم تُلتقط إجابته نظيفة، هذا آخر ما على شاشته (قد يكون ضجيجًا) =====\n{e['answer'][:1500]}")
+            parts.append(f"\n===== {tag}: لم تُلتقط نظيفة، هذا آخر ما على شاشة صاحبها (قد يكون ضجيجًا) =====\n{e['answer'][:1500]}")
         else:
             parts.append(f"\n===== {tag}: لم تصل إجابة ({e.get('state')}) =====")
-    parts.append("\n\nأنت الحكم. احكم على المضمون فقط، وابنِ حكمك على الإجابات الحقيقية، واقرأ المرفقات بنفسك إن احتجت. "
-                 "اكتب حكمك بصيغة Markdown بهذه العناوين بالترتيب: ## الاتفاق ، ## الاختلاف (ومن الأصح ولماذا) ، ## الأخطاء والمبالغات ، "
-                 "## الترتيب (من الأفضل مع سبب مختصر) ، ## الحكم النهائي (إجابة موحّدة مرجَّحة كاملة). لا تنقل إجاباتهم كاملة (ستُرفق تلقائيًا). "
-                 "إن رأيت أن وكيلًا لم يعمل أو جاءت إجابته ناقصة أو غير منطقية، فاكتب في آخر حكمك سطرًا مستقلًا بالصيغة: "
-                 "RETRY: معرّف1, معرّف2 — فيعيد زاجل تشغيله ويسأله من جديد ثم يعرض عليك إجابته لتحدّث حكمك. لا تنفّذ أوامر تعدّل الملفات.")
+    cols = " | ".join(lt.get(i, i) for i in order)
+    parts.append("\n\nأنت الحكم. احكم على المضمون فقط، وابنِ حكمك على الإجابات الحقيقية، واقرأ المرفقات بنفسك إن احتجت.\n"
+                 "اكتب حكمك بصيغة Markdown بهذه العناوين بالضبط وبهذا الترتيب:\n" + "\n".join("## " + h for h in VERDICT_HEADS) + "\n"
+                 "- «الخلاصة»: سطرها الأول بالضبط واحد من: «الثقة: عالية» أو «الثقة: متوسطة» أو «الثقة: منخفضة»، ثم سطران أو ثلاثة.\n"
+                 "- «الاتفاق»: ما اتفقت عليه الإجابات.\n"
+                 "- «الاختلاف ومن الأصح»: مواضع الخلاف ومن الأصح ولماذا، مع الأخطاء والمبالغات.\n"
+                 f"- «خريطة الأقوال»: جدول Markdown رأسه | الادعاء | {cols} | التحقق | وقيم خاناته ✓ أو ✗ أو —.\n"
+                 "- «المصادر»: المصادر المعتمدة مع مواضعها.\n"
+                 "- «الترتيب»: الإجابات من الأفضل مع سبب مختصر.\n"
+                 "- «الحكم النهائي»: الإجابة الموحّدة المرجَّحة كاملة.\n"
+                 "لا تنقل الإجابات كاملة (ستُرفق تلقائيًا).")
+    if rd.get("verify", True):
+        parts.append("\n[التحقق] تحقّق بأدواتك من الإحالات والأرقام والنقول الحاسمة (بالشاملة للمسائل الشرعية إن كانت متاحة)، "
+                     "وضع بجانب كل واحدة «✓ تحقق» أو «لم يُتحقق»، واملأ عمود التحقق في الجدول.")
+    parts.append("\nإن رأيت أن إجابة لم تعمل أو جاءت ناقصة أو غير منطقية فاكتب في آخر حكمك سطرًا مستقلًا بالصيغة: "
+                 f"RETRY: {'أ, ب' if blind else 'معرّف1, معرّف2'} — فيعيد زاجل سؤال صاحبها ثم يعرض عليك إجابته لتحدّث حكمك. لا تنفّذ أوامر تعدّل الملفات.")
     return "".join(parts)
 
 
 RETRY_RE = re.compile(r"^\s*\**RETRY\**\s*[:：]\s*(.+)$", re.M | re.I)
 
 
+def _retry_ids(rd, s):
+    """«RETRY: أ, ب» (أو بالمعرّفات) ← معرّفات الوكلاء."""
+    inv = {v: k for k, v in (rd.get("letters") or {}).items()}
+    out = []
+    for x in re.split(r"[,،;\s]+", s or ""):
+        x = x.strip(" .:()[]«»*`'\"")
+        i = inv.get(x) or (x if x in rd["agents"] else None)
+        if i and i not in out:
+            out.append(i)
+    return out
+
+
+def _eval_lock(rd):
+    with COUNCIL_LOCK:
+        return EVAL_LOCKS.setdefault(rd["id"], threading.Lock())
+
+
 def _run_eval(rd):
-    """يسأل الحَكَم؛ يعيد قائمة الوكلاء الذين طلب إعادتهم."""
+    """يسأل الحَكَم (حكم واحد في كل لحظة لكل جولة)؛ يعيد قائمة الوكلاء الذين طلب إعادتهم."""
     main = rd["main"]
     if not main:
         return []
-    if not any(_real(e) for e in rd["agents"].values()):
-        rd["eval"].update(state="error", error="لم تصل أي إجابة حقيقية؛ لم يُطلب الحكم.", answer="")
-        return []
-    rd["phase"] = "evaluating"
-    ev = rd["eval"]
-    ev.update(tok=secrets.token_hex(3), state="queued", answer="", live="", version=ev.get("version", 0) + 1)
-    _save_council()
-    _ask(rd, main, ev, _eval_prompt(rd), ev["tok"])
-    want = []
-    m = RETRY_RE.search(ev.get("answer") or "")
-    if m:
-        want = [x for x in re.split(r"[,،\s]+", m.group(1)) if x in rd["agents"]]
-        ev["answer"] = RETRY_RE.sub("", ev["answer"]).strip()
-    _save_council()
-    return want
+    with _eval_lock(rd):
+        if not any(_real(e) for e in rd["agents"].values()):
+            rd["eval"].update(state="error", error="لم تصل أي إجابة حقيقية؛ لم يُطلب الحكم.", answer="")
+            return []
+        rd["phase"] = "evaluating"
+        ev = rd["eval"]
+        ev.update(tok=secrets.token_hex(3), state="queued", answer="", live="", activity="", error="", version=ev.get("version", 0) + 1)
+        _save_council()
+        _ask(rd, main, ev, _eval_prompt(rd), ev["tok"], add_dirs=_dirs(rd))
+        want = []
+        m = RETRY_RE.search(ev.get("answer") or "")
+        if m:
+            want = _retry_ids(rd, m.group(1))
+            ev["answer"] = RETRY_RE.sub("", ev["answer"]).strip()
+        if ev.get("answer"):
+            _write(_rdir(rd["id"], True) / "verdict.md", ev["answer"])
+        _save_council()
+        return want
 
 
 FINAL = ("done", "done_raw", "error", "timeout", "stopped")
@@ -618,23 +790,95 @@ def _weak(e):
     return e.get("state") in ("done_raw", "error", "timeout") or (e.get("state") == "done" and not _real(e))
 
 
+def _ask_delegate(rd, i):
+    e = rd["agents"][i]
+    _ask(rd, i, e, _delegate_q(rd, i), rd["tok"], add_dirs=_dirs(rd))
+    if e.get("answer"):
+        _write(_ans_file(rd, i), e["answer"])
+
+
 def _retry(rd, i, why):
     """يعيد تشغيل جلسة الوكيل نظيفة ويسأله من جديد (بالعلامات ثم بالوضع الهادئ احتياطًا)."""
     e = rd["agents"][i]
-    e.update(state="restarting", answer="", live="", error="", retries=e.get("retries", 0) + 1, note=why)
+    e.update(state="restarting", answer="", revised="", live="", activity="", error="", retries=e.get("retries", 0) + 1, note=why)
     _save_council()
     if not (rd.get("mode", "direct") == "direct" and can_direct(i)):
         try:
             restart(i)
         except Exception:
             pass
-    _ask(rd, i, e, rd["question"] + _files_note(rd, i), rd["tok"])
+    _ask_delegate(rd, i)
+
+
+def _review_prompt(rd, i, real):
+    lt = rd["letters"]
+    others = [j for j in _order(rd) if j != i and j in real]
+    lines = "\n".join(f"- الإجابة {lt[j]}: {_ans_file(rd, j)}" for j in others)
+    return (f"[جولة النقد المتبادل] سُئلت أنت ووكلاء آخرون هذا السؤال:\n«{rd['question']}»{_prev_note(rd)}{_files_note(rd, i)}\n\n"
+            f"إجابتك أنت (الإجابة {lt[i]}) محفوظة في: {_ans_file(rd, i)}\nوهذه إجابات الآخرين — اقرأ كل ملف كاملًا:\n{lines}\n\n"
+            "اكتب أولًا قسم «## النقد»: ما أصابوا فيه وما أخطؤوا فيه (سمِّ الإجابات بحروفها)، ثم إجابتك المنقّحة كاملة بالقالب نفسه."
+            + ANSWER_TEMPLATE)
+
+
+def _review_one(rd, i, prompt):
+    e = rd["agents"][i]
+    e.update(state="reviewing", live="", activity="")
+    _save_council()
+    txt = ""
+    try:
+        if rd.get("mode", "direct") == "direct" and can_direct(i):
+            r = _direct(rd, i, e, prompt, _dirs(rd))
+            txt = str(r.get("text") or "").strip() if r.get("ok") else ""
+        else:
+            tmp = {"state": "queued", "answer": ""}
+            _ask(rd, i, tmp, prompt, secrets.token_hex(3))
+            txt = tmp.get("answer", "") if tmp.get("state") == "done" else ""
+    except Exception:
+        txt = ""
+    if txt and _meaningful(txt) >= 2 and not rd.get("stop"):
+        e["revised"] = txt
+        _write(_ans_file(rd, i, True), txt)
+    else:
+        e["note"] = "لم تصل إجابة منقّحة؛ يُعتمد الجواب الأول"
+    e.update(state="stopped" if rd.get("stop") else "done", live="", activity="")
+    _save_council()
+
+
+def _run_review(rd):
+    """جولة النقد: كل مفوَّض يقرأ إجابات الآخرين (بالحروف) ويكتب نقده وإجابته المنقّحة."""
+    real = [i for i in rd["delegates"] if _real(rd["agents"][i])]
+    if len(real) < 2 or rd["stop"]:
+        return
+    rd["phase"] = "review"
+    _save_council()
+    # التعليمات تُبنى قبل البدء: حالة كل وكيل تصير «reviewing» فلا يُعدّ جوابه حقيقيًا أثناءها
+    ts = [threading.Thread(target=_review_one, args=(rd, i, _review_prompt(rd, i, real)), daemon=True) for i in real]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
 
 
 def _run_round(rd):
+    """غلاف الجولة: يضمن مرحلة نهائية (done/error/stopped) مهما حدث."""
+    RUNNING.add(rd["id"])
+    try:
+        _round(rd)
+    except Exception as exc:
+        rd["error"] = f"تعطّل المجلس: {exc}"[:300]
+        rd["phase"] = "error"
+    finally:
+        RUNNING.discard(rd["id"])
+        if rd.get("phase") not in ("done", "error", "stopped"):
+            rd["phase"] = "stopped" if rd.get("stop") else "done"
+        _save_council()
+
+
+def _round(rd):
     threads = {}
+    tmax = max(ANSWER_TIMEOUT, DEPTH_TIMEOUT.get(rd.get("depth"), 0)) if rd.get("mode") == "direct" else ANSWER_TIMEOUT
     for i in rd["delegates"]:
-        t = threading.Thread(target=_ask, args=(rd, i, rd["agents"][i], rd["question"] + _files_note(rd, i), rd["tok"]), daemon=True)
+        t = threading.Thread(target=_ask_delegate, args=(rd, i), daemon=True)
         t.start()
         threads[i] = t
 
@@ -649,12 +893,12 @@ def _run_round(rd):
     def wait(until_cut):
         t0, limit = time.time(), rd.get("limit") or 0
         while any(t.is_alive() for t in threads.values()) and not rd["stop"]:
-            time.sleep(1)
+            time.sleep(0.5)
             supervise()
             if until_cut and limit and rd["main"] and time.time() - t0 > limit and any(_real(e) for e in rd["agents"].values()):
                 rd["cut"] = True       # انتهت المهلة: يحكم الحَكَم بما وصل ويكمل البطيء
                 return
-            if not until_cut and time.time() - t0 > ANSWER_TIMEOUT:
+            if not until_cut and time.time() - t0 > tmax:
                 return
         supervise()
         if any(t.is_alive() for t in threads.values()) and not rd["stop"]:
@@ -662,17 +906,22 @@ def _run_round(rd):
 
     wait(True)
     if rd["stop"]:
-        rd["phase"] = "stopped"; _save_council(); return
+        rd["phase"] = "stopped"; return
+    if rd.get("review"):
+        _run_review(rd)
+        if rd["stop"]:
+            rd["phase"] = "stopped"; return
     if not (rd["evaluate"] and rd["main"]):
-        rd["phase"] = "refining" if rd.get("cut") else "done"
+        rd["phase"] = "refining" if any(t.is_alive() for t in threads.values()) else rd["phase"]
+        _save_council()
         wait(False)
-        rd["phase"] = "stopped" if rd["stop"] else "done"; _save_council(); return
+        rd["phase"] = "stopped" if rd["stop"] else "done"; return
 
     seen = {i for i, e in rd["agents"].items() if _real(e)}
     want = _run_eval(rd)
     # الحَكَم طلب إعادة وكلاء، أو هناك بطيئون لم يصلوا بعد: ننتظرهم ثم نحدّث الحكم مرة واحدة
     for i in want:
-        if rd["agents"][i].get("retries", 0) < MAX_RETRY + 1 and not (threads[i].is_alive()):
+        if rd["agents"][i].get("retries", 0) < MAX_RETRY + 1 and not threads[i].is_alive():
             threads[i] = threading.Thread(target=_retry, args=(rd, i, "أعاده الحَكَم: إجابته ناقصة أو غير منطقية"), daemon=True)
             threads[i].start()
     if any(t.is_alive() for t in threads.values()) and not rd["stop"]:
@@ -683,7 +932,6 @@ def _run_round(rd):
             rd["eval"]["note"] = "حكم محدَّث بعد وصول إجابات جديدة"
             _run_eval(rd)
     rd["phase"] = "stopped" if rd["stop"] else "done"
-    _save_council()
 
 
 def warm(ids):
@@ -706,21 +954,25 @@ def warm(ids):
     return {"ok": True, "warming": ids}
 
 
-def council_start(ids, text, main="", evaluate=True, attachments=None, parent="", limit=300, mode="direct"):
+def council_start(ids, text, main="", evaluate=True, attachments=None, parent="", limit=None, mode="direct",
+                  depth="bal", blind=True, review=False, verify=True):
     text = str(text or "").strip()
     if not text or len(text) > MAX_Q:
         raise ValueError(f"اكتب سؤالًا (حتى {MAX_Q} حرف).")
-    ids = [i for i in dict.fromkeys(ids or []) if i in BY_ID and BY_ID[i]["cmd"]]
+    ids = [i for i in dict.fromkeys(ids or []) if i in BY_ID and BY_ID[i]["cmd"]][:len(LETTERS)]
     if not ids:
         raise ValueError("اختر وكيلًا مفوَّضًا واحدًا على الأقل.")
     if main and (main not in BY_ID or not BY_ID[main]["cmd"]):
         raise ValueError("الوكيل الرئيسي غير معروف.")
-    if not available():
+    mode = mode if mode in ("direct", "terminal") else "direct"
+    depth = depth if depth in DEPTHS else "bal"
+    if not available() and (mode == "terminal" or not all(can_direct(i) for i in ids + ([main] if main else []))):
         raise ValueError("tmux غير مثبت على هذا الجهاز.")
     for k in COUNCIL_ORDER:
         r = COUNCIL.get(k)
-        if r and r["phase"] in ("asking", "evaluating") and not r["stop"]:
+        if r and r["phase"] in ("asking", "review", "evaluating") and not r["stop"]:
             raise ValueError("يعمل مجلس الآن؛ أوقفه أو انتظر نهايته.")
+    limit = DEPTH_LIMIT[depth] if limit is None or limit == "" else max(0, min(int(limit or 0), 3600))
     rid = secrets.token_hex(4)
     atts = []
     for a in (attachments or [])[:12]:
@@ -730,12 +982,19 @@ def council_start(ids, text, main="", evaluate=True, attachments=None, parent=""
     for p in paths_in(text):
         if not any(a["path"] == p for a in atts):
             atts.append(_att(p))
-    rd = {"id": rid, "mode": mode if mode in ("direct", "terminal") else "direct", "limit": max(0, min(int(limit or 0), 3600)), "cut": False, "attachments": atts, "parent": parent if parent in COUNCIL else "", "tok": secrets.token_hex(3), "question": text, "main": main or "", "delegates": ids, "evaluate": bool(evaluate and main),
+    pool = LETTERS[:len(ids)]
+    if blind:
+        random.SystemRandom().shuffle(pool)      # التعمية: لا يُستدلّ على صاحب الإجابة من ترتيبها
+    rd = {"id": rid, "mode": mode, "depth": depth, "blind": bool(blind), "review": bool(review), "verify": bool(verify),
+          "limit": limit, "cut": False, "attachments": atts, "parent": parent if parent in COUNCIL else "", "tok": secrets.token_hex(3),
+          "question": text, "main": main or "", "delegates": ids, "letters": dict(zip(ids, pool)), "evaluate": bool(evaluate and main),
           "created": time.time(), "phase": "asking", "stop": False,
-          "agents": {i: {"name": BY_ID[i]["name"], "state": "queued", "answer": ""} for i in ids},
+          "agents": {i: {"name": BY_ID[i]["name"], "state": "queued", "answer": "", "revised": "", "live": "", "activity": ""} for i in ids},
           "eval": {"name": BY_ID[main]["name"] if main else "", "state": "queued", "answer": ""}}
-    COUNCIL[rid] = rd
-    COUNCIL_ORDER.append(rid)
+    with COUNCIL_LOCK:
+        COUNCIL[rid] = rd
+        COUNCIL_ORDER.append(rid)
+    _rdir(rid, True)
     threading.Thread(target=_run_round, args=(rd,), daemon=True).start()
     _save_council()
     return {"ok": True, "id": rid}
@@ -746,8 +1005,9 @@ def council_view(rid=""):
     rd = COUNCIL.get(rid)
     if not rd:
         return {"round": None}
-    pending = sum(1 for e in rd["agents"].values() if e.get("state") not in FINAL)
-    return {"round": {k: v for k, v in rd.items() if k != "stop"} | {"stopped": rd["stop"], "pending": pending}}
+    r = _snap(rd)
+    pending = sum(1 for e in r["agents"].values() if e.get("state") not in FINAL)
+    return {"round": {k: v for k, v in r.items() if k != "stop"} | {"stopped": r["stop"], "pending": pending}}
 
 
 def council_history():
@@ -764,7 +1024,7 @@ def council_stop(rid=""):
 
 
 def council_evaluate(rid=""):
-    """تقييم يدوي بما وصل حتى الآن (دون انتظار الباقين)."""
+    """تقييم يدوي بما وصل حتى الآن (دون انتظار الباقين). إن كان حكم يعمل ينتظره ثم يحدّث."""
     rd = COUNCIL.get(rid or (COUNCIL_ORDER[-1] if COUNCIL_ORDER else ""))
     if not rd or not rd["main"]:
         raise ValueError("عيّن وكيلًا رئيسيًا أولًا.")
@@ -773,9 +1033,15 @@ def council_evaluate(rid=""):
     rd["stop"] = False
 
     def run():
-        _run_eval(rd)
-        rd["phase"] = "done"
-        _save_council()
+        try:
+            _run_eval(rd)
+        finally:
+            if rd["id"] in RUNNING:          # الجولة ما زالت تعمل: نعيد مرحلتها بدل إعلان النهاية
+                busy = any(e.get("state") not in FINAL for e in rd["agents"].values())
+                rd["phase"] = ("refining" if rd["eval"].get("answer") else "asking") if busy else rd["phase"]
+            else:
+                rd["phase"] = "done"
+            _save_council()
     threading.Thread(target=run, daemon=True).start()
     return {"ok": True}
 
@@ -788,6 +1054,37 @@ def council_export(rid, fmt):
         raise ValueError("لا مجلس.")
     if not any(e.get("answer") for e in rd["agents"].values()):
         raise ValueError("لا توجد إجابات للتصدير بعد.")
-    path = CE.export(rd, {k: v["name"] for k, v in BY_ID.items()}, fmt)
+    path = CE.export(_snap(rd), {k: v["name"] for k, v in BY_ID.items()}, fmt)
     subprocess.run(["open", "-R", path], capture_output=True, timeout=10)
     return {"ok": True, "path": path}
+
+
+def _ids(ids):
+    if isinstance(ids, str):
+        ids = ids.split(",")
+    return [i for i in dict.fromkeys(str(x).strip() for x in (ids or [])) if i in BY_ID and BY_ID[i]["cmd"]]
+
+
+def council_agents():
+    return {"agents": [{"id": a["id"], "name": a["name"], "direct": can_direct(a["id"])} for a in AGENTS if a["cmd"]]}
+
+
+def council_check(ids, force=False):
+    """جاهزية الوكلاء: {id: {state, note, secs}}."""
+    ids = _ids(ids) or [a["id"] for a in AGENTS if a["cmd"]]
+    try:
+        return {"agents": _ca().check(ids, bool(force))}
+    except ImportError:
+        return {"agents": {i: {"state": "ready" if can_direct(i) else "off", "note": "" if can_direct(i) else "الأداة غير مثبتة", "secs": 0} for i in ids}}
+
+
+def council_profiles():
+    return {"profiles": _ca().profiles()}
+
+
+def council_set_profile(i, patch):
+    if not _ids([i]):
+        raise ValueError("وكيل غير معروف.")
+    if not isinstance(patch, dict):
+        raise ValueError("التعديل غير صالح.")
+    return {"profile": _ca().set_profile(i, patch)}

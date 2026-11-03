@@ -6,10 +6,15 @@
   const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const req = async (path, body) => {
     const url = '/api/term/' + path;
-    if (typeof window.api === 'function') return window.api(url, body);
-    const response = await fetch(url, body ? { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) } : {});
-    if (!response.ok) throw new Error('HTTP ' + response.status);
-    return response.json();
+    try {
+      if (typeof window.api === 'function') return await window.api(url, body);
+      const response = await fetch(url, body ? { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) } : {});
+      if (!response.ok) throw new Error('HTTP ' + response.status);
+      return await response.json();
+    } catch (e) {
+      if (/failed to fetch|networkerror|load failed/i.test(String(e && e.message))) throw new Error('انقطع الاتصال بزاجل؛ يعيد المحاولة عند عودته.');
+      throw e;
+    }
   };
   const cssColor = (r,g,b) => `rgb(${r},${g},${b})`;
   const palette = ['#000000','#aa0000','#00aa00','#aa5500','#0000aa','#aa00aa','#00aaaa','#aaaaaa','#555555','#ff5555','#55ff55','#ffff55','#5555ff','#ff55ff','#55ffff','#ffffff'];
@@ -72,90 +77,324 @@
   function syncSelects(){slots.forEach((slot,i)=>{if(!slot.select)return;if(!slot.id&&agents[i])slot.id=agents[i].id||agents[0]?.id||'';if(!slot.id&&agents[0])slot.id=agents[0].id;const sel=slot.select;sel.replaceChildren();agents.forEach(a=>{const o=document.createElement('option');o.value=a.id;o.textContent=a.name+' · '+a.label;sel.appendChild(o);});if(slot.id)sel.value=slot.id;});}
   async function refreshList(){if(!root||listBusy)return;listBusy=true;try{const data=await req('list');agents=Array.isArray(data.agents)?data.agents:[];notify=!!data.notify;const hint=root.querySelector('.as-memory-hint'),app=root.querySelector('.as-terminal');if(data.available===false){hint.hidden=false;hint.textContent=data.hint||'الطرفية غير متاحة';app.hidden=true;}else{hint.hidden=true;app.hidden=false;if(builtLayout!==layout){build();builtLayout=layout;}else renderAgents();syncSelects();}}catch(e){const hint=root.querySelector('.as-memory-hint');hint.hidden=false;hint.textContent='تعذر تحميل قائمة الطرفيات: '+e.message;}finally{listBusy=false;}}
   async function refreshScreens(force){if(!root||root.hidden)return;for(const slot of slots){if(!slot.id||!slot.pre)continue;try{const d=await req('screen?id='+encodeURIComponent(slot.id)+'&since='+encodeURIComponent(force?'':slot.hash)+'&hist='+hist);if(d.hash)slot.hash=d.hash;if(!d.unchanged&&typeof d.text==='string'){const pre=slot.pre,stick=pre.scrollHeight-pre.scrollTop-pre.clientHeight<40||!pre.dataset.init;pre.innerHTML=ansiHtml(d.text);pre.dataset.init='1';if(stick)pre.scrollTop=pre.scrollHeight;}if(d.alive===false)slot.pre.dataset.dead='true';}catch(_){}}}
-  const councilStateText={restarting:'يُعاد تشغيله',queued:'في الانتظار',starting:'يبدأ',asking:'يجيب',done:'انتهى',done_raw:'انتهى بلا علامات',timeout:'انتهت المهلة',error:'خطأ',stopped:'متوقف'};
-  const councilStateColor={restarting:'#a855f7',queued:'#a3a3a3',starting:'#eab308',asking:'#3b82f6',done:'#22c55e',done_raw:'#16a34a',timeout:'#f97316',error:'#ef4444',stopped:'#737373'};
-  function councilButton(label,action,primary){const b=document.createElement('button');b.type='button';b.className='btn'+(primary?' pri':'');b.textContent=label;b.onclick=action;return b;}
-  const agentColors = { claude: '#d97757', codex: '#10a37f', agy: '#4285f4', hermes: '#a855f7', opencode: '#14b8a6', pi: '#ec4899' };
+  const councilStateText = { restarting: 'يُعاد تشغيله', queued: 'في الانتظار', starting: 'يبدأ', asking: 'يجيب', reviewing: 'يراجع وينقد', done: 'انتهى', done_raw: 'انتهى بلا علامات', timeout: 'انتهت المهلة', error: 'خطأ', stopped: 'متوقف' };
+  const councilStateColor = { restarting: '#a855f7', queued: '#a3a3a3', starting: '#eab308', asking: '#3b82f6', reviewing: '#8b5cf6', done: '#22c55e', done_raw: '#16a34a', timeout: '#f97316', error: '#ef4444', stopped: '#737373' };
+  function councilButton(label, action, primary) { const b = document.createElement('button'); b.type = 'button'; b.className = 'btn' + (primary ? ' pri' : ''); b.textContent = label; b.onclick = action; return b; }
+  const agentColors = { claude: '#d97757', codex: '#10a37f', agy: '#3b82f6', hermes: '#8b5cf6', opencode: '#64748b', pi: '#ec4899' };
   const colorOf = id => agentColors[id] || '#64748b';
+  const agentSpeed = { claude: 1.0, codex: 1.2, hermes: 0.9, agy: 2.4, opencode: 1.0, pi: 1.0 };
+
+  function formatClaimsTable(text) {
+    if (!text) return null;
+    const lines = text.split('\n').map(l => l.trim()).filter(l => l.startsWith('|'));
+    if (lines.length < 2) return null;
+    const parseRow = ln => ln.split('|').slice(1, -1).map(c => c.trim());
+    const headerCells = parseRow(lines[0]);
+    if (!headerCells.length) return null;
+    const table = document.createElement('table');
+    table.className = 'claims';
+    const thead = document.createElement('thead');
+    const trh = document.createElement('tr');
+    headerCells.forEach((c, idx) => {
+      const th = document.createElement('th');
+      th.textContent = c;
+      if (idx > 0 && idx < headerCells.length - 1) th.className = 'c';
+      trh.appendChild(th);
+    });
+    thead.appendChild(trh);
+    table.appendChild(thead);
+
+    const tbody = document.createElement('tbody');
+    const dataLines = lines.slice(1).filter(l => !/^[|\s-:]+$/.test(l));
+    dataLines.forEach(ln => {
+      const rowCells = parseRow(ln);
+      const tr = document.createElement('tr');
+      rowCells.forEach((c, idx) => {
+        const td = document.createElement('td');
+        if (idx > 0 && idx < rowCells.length - 1) {
+          td.className = 'c';
+          if (c.includes('✓')) td.innerHTML = '<span class="yes">✓</span>';
+          else if (c.includes('✗')) td.innerHTML = '<span class="no">✗</span>';
+          else if (c === '—' || c === '-' || !c) td.innerHTML = '<span class="na">—</span>';
+          else td.textContent = c;
+        } else if (idx === rowCells.length - 1) {
+          if (c.includes('✓')) td.innerHTML = `<span class="yes">${esc(c)}</span>`;
+          else if (c.includes('✗')) td.innerHTML = `<span class="no">${esc(c)}</span>`;
+          else td.textContent = c;
+        } else {
+          td.textContent = c;
+        }
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    return table;
+  }
+
+  function parseVerdict(text) {
+    if (!text || typeof text !== 'string') return null;
+    const re = /^##\s+(.+)$/gm;
+    const sections = {};
+    const matches = [];
+    let m;
+    while ((m = re.exec(text)) !== null) {
+      matches.push({ title: m[1].trim(), index: m.index, headerLen: m[0].length });
+    }
+    if (!matches.length) return null;
+    for (let i = 0; i < matches.length; i++) {
+      const cur = matches[i];
+      const start = cur.index + cur.headerLen;
+      const end = (i + 1 < matches.length) ? matches[i + 1].index : text.length;
+      sections[cur.title] = text.slice(start, end).trim();
+    }
+    const findSec = (...keys) => {
+      for (const k of Object.keys(sections)) {
+        for (const key of keys) {
+          if (k.includes(key)) return sections[k];
+        }
+      }
+      return '';
+    };
+
+    let confidence = '';
+    let summary = '';
+    const rawSum = findSec('الخلاصة');
+    if (rawSum) {
+      const lines = rawSum.split('\n').map(l => l.trim()).filter(Boolean);
+      for (const l of lines) {
+        const cm = l.match(/الثقة\s*:\s*([^\n]+)/);
+        if (cm) {
+          confidence = cm[1].replace(/[*_#]/g, '').trim();
+        } else if (!summary) {
+          summary = l.replace(/^[-*•]\s*/, '').trim();
+        }
+      }
+      if (!summary && lines.length) summary = lines[0];
+    }
+    if (!confidence) {
+      const cm = text.match(/الثقة\s*:\s*([^\n]+)/);
+      if (cm) confidence = cm[1].replace(/[*_#]/g, '').trim();
+    }
+
+    const finalVerdict = findSec('الحكم النهائي') || text;
+    const agreement = findSec('الاتفاق');
+    const difference = findSec('الاختلاف', 'الخلاف');
+    const claimsMap = findSec('خريطة الأقوال');
+    const sources = findSec('المصادر');
+    const ranking = findSec('الترتيب');
+
+    return {
+      confidence,
+      summary,
+      finalVerdict,
+      panes: {
+        agree: agreement,
+        diff: difference,
+        map: claimsMap,
+        src: sources,
+        rank: ranking
+      }
+    };
+  }
+
   const mdBox = text => {
     const box = document.createElement('div'); box.className = 'cn-md'; box.dir = 'auto'; let ul = null;
     const fill = (el, t) => t.split(/(\*\*[^*]+\*\*)/).forEach(part => {
       if (/^\*\*[^*]+\*\*$/.test(part)) { const b = document.createElement('b'); b.textContent = part.slice(2, -2); el.appendChild(b); } else el.appendChild(document.createTextNode(part));
     });
-    String(text || '').split('\n').forEach(ln => {
+    const lines = String(text || '').split('\n');
+    let tblLines = [];
+    const flushTable = () => {
+      if (!tblLines.length) return;
+      const tbl = formatClaimsTable(tblLines.join('\n'));
+      if (tbl) box.appendChild(tbl);
+      else tblLines.forEach(ln => { const p = document.createElement('p'); fill(p, ln); box.appendChild(p); });
+      tblLines = [];
+    };
+    lines.forEach(ln => {
+      if (ln.trim().startsWith('|')) {
+        ul = null;
+        tblLines.push(ln);
+        return;
+      }
+      flushTable();
       const h = ln.match(/^(#{1,4})\s+(.*)/), b = ln.match(/^\s*(?:[-*•]|\d+[.)])\s+(.*)/);
       if (!b) ul = null;
       if (h) { const e = document.createElement('h4'); fill(e, h[2]); box.appendChild(e); }
       else if (b) { if (!ul) { ul = document.createElement('ul'); box.appendChild(ul); } const li = document.createElement('li'); fill(li, b[1]); ul.appendChild(li); }
       else if (ln.trim()) { const p = document.createElement('p'); fill(p, ln); box.appendChild(p); }
     });
+    flushTable();
     return box;
   };
+
   const CN_CSS = `
-.cn{--gold:#d4a017;display:flex;flex-direction:column;gap:10px;min-width:0;width:100%;min-height:0;flex:1;height:100%;color:var(--fg);font-size:13.5px}
+.cn{
+  /* ألوان زاجل نفسها (لا يُعرَّف متغير بنفسه: المتصفح يُسقط التعريف الدائري فتختفي الألوان) */
+  --acc-soft:var(--accp,#e6eeff);
+  --card:var(--panel,#ffffff);
+  --txt:var(--ink,#1b1f27);
+  --gold:#c08a00;
+  --gold-soft:#fff5d6;
+  --ok:#16a34a;
+  --ok-soft:#e3f6e9;
+  --bad:var(--err,#dc2626);
+  --bad-soft:#fde8e8;
+  --warn:#d97706;
+  --warn-soft:var(--warnp,#fff1dc);
+  --c-claude:#d97757;
+  --c-codex:#10a37f;
+  --c-hermes:#8b5cf6;
+  --c-agy:#3b82f6;
+  --c-opencode:#64748b;
+  --c-pi:#ec4899;
+  display:flex;flex-direction:column;gap:10px;min-width:0;width:100%;min-height:0;flex:1;height:100%;color:var(--txt);background:var(--bg);font-size:13.5px;direction:rtl;
+}
+@media (prefers-color-scheme:dark){
+  .cn{--gold:#f0b429;--gold-soft:#3a2f12;--ok:#4ade80;--ok-soft:#143221;--bad-soft:#3b1717;--warn:#fbbf24;}
+}
 .cn *{box-sizing:border-box}
 .cn-top{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-.cn-top h3{margin:0;font-size:15px;flex:1}
-.cn-roster{display:flex;flex-wrap:wrap;gap:8px}
-.cn-chip{display:flex;align-items:center;gap:7px;padding:5px 6px 5px 11px;border:1.5px solid var(--line);border-radius:99px;background:var(--bg);cursor:pointer;transition:all .15s;user-select:none}
-.cn-chip:hover{border-color:var(--c)}
-.cn-chip.on{border-color:var(--c);background:color-mix(in srgb,var(--c) 11%,var(--bg))}
-.cn-chip.judge{box-shadow:0 0 0 2px var(--gold)}
-.cn-av{width:24px;height:24px;border-radius:50%;background:var(--c);color:#fff;display:inline-flex;align-items:center;justify-content:center;font-weight:700;font-size:12px;flex:none}
-.cn-crown{border:0;background:transparent;cursor:pointer;font-size:15px;opacity:.35;padding:0 3px;filter:grayscale(1)}
-.cn-chip.judge .cn-crown,.cn-crown:hover{opacity:1;filter:none}
-.cn-sub{color:var(--mut);font-size:12px}
-.cn-composer{border:1.5px solid var(--line);border-radius:14px;background:var(--bg);padding:8px;display:flex;flex-direction:column;gap:6px;transition:border-color .15s}
-.cn-composer:focus-within{border-color:var(--acc);box-shadow:0 0 0 2px color-mix(in srgb,var(--acc) 20%,transparent)}
-.cn-composer textarea{border:0;background:transparent;color:inherit;resize:none;min-height:34px;max-height:200px;padding:5px 7px;font:inherit;line-height:1.7;outline:none;direction:auto;width:100%}
-.cn-row{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
-.cn-row .sp{flex:1}
-.cn-ibtn{border:0;background:transparent;cursor:pointer;border-radius:9px;padding:6px 9px;color:var(--mut);font-size:15px}
-.cn-ibtn:hover{background:var(--accp);color:var(--acc)}
-.cn-send{border:0;border-radius:10px;padding:8px 20px;background:var(--acc);color:#fff;font-weight:700;cursor:pointer}
-.cn-send:disabled{opacity:.45;cursor:default}
-.cn-send.stop{background:#ef4444}
+.cn-top h3{margin:0;font-size:16px;font-weight:700}
+.cn-top .sp{flex:1}
+/* صفّان من خانات مربّعة متلاصقة بلا فراغات، بانحناء خفيف جدًا */
+.mbar{display:flex;flex-direction:column;gap:6px}
+.brow{display:flex;min-width:0}
+.roster,.tiles{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(0,1fr);gap:0;width:100%;min-width:0}
+.brow.cfg{display:grid;grid-template-columns:3fr 4fr;gap:6px}
+.msel{display:none}
+.chip,.tile{position:relative;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;min-height:58px;padding:6px 4px;
+  border:1px solid var(--line);margin-inline-start:-1px;border-radius:0;background:var(--card);color:var(--txt);cursor:pointer;user-select:none;
+  font:inherit;font-size:12px;line-height:1.25;text-align:center;transition:background .15s,box-shadow .15s;min-width:0}
+.roster>:first-child,.tiles>:first-child,.tiles>:first-child .tile{border-start-start-radius:4px;border-end-start-radius:4px;margin-inline-start:0}
+.roster>:last-child,.tiles>:last-child,.tiles>:last-child .tile{border-start-end-radius:4px;border-end-end-radius:4px}
+.chip:hover,.tile:hover{background:var(--side)}
+.chip.on{background:color-mix(in srgb,var(--c,var(--acc)) 14%,var(--card));box-shadow:inset 0 -3px 0 var(--c,var(--acc));z-index:1}
+.chip.judge{box-shadow:inset 0 -3px 0 var(--c,var(--acc)),inset 0 0 0 2px var(--gold);z-index:2}
+.chip.off{opacity:.5}
+.chip .av{width:24px;height:24px;border-radius:4px;display:grid;place-items:center;color:#fff;font-size:12px;font-weight:700;background:var(--c,#64748b)}
+.chip .nm{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600}
+.chip .dot{position:absolute;top:6px;inset-inline-start:6px;width:7px;height:7px;border-radius:50%}
+.dot.ready{background:var(--ok)}
+.dot.slow{background:var(--warn)}
+.dot.off{background:var(--bad)}
+.chip .crown{position:absolute;top:2px;inset-inline-end:3px;border:0;background:none;cursor:pointer;opacity:.25;font-size:12px;padding:0;filter:grayscale(1)}
+.chip.judge .crown,.chip .crown:hover{opacity:1;filter:none}
+.tile .ic{font-size:16px;line-height:1}
+.tile .tl{font-weight:600}
+.tile .tm{font-size:10.5px;color:var(--mut)}
+.tile.on,.opt input:checked+.tile{background:var(--acc-soft);color:var(--acc);box-shadow:inset 0 -3px 0 var(--acc);z-index:1}
+.tile.on .tm{color:var(--acc)}
+.opt{display:flex;min-width:0;cursor:pointer}
+.opt .tile{flex:1}
+.opt input{display:none}
+.opt.locked .tile{opacity:.4;cursor:not-allowed}
+.opts{animation:slide .3s}
+@keyframes slide{from{opacity:0;transform:translateY(-6px)}to{opacity:1}}
+@media(max-width:520px){.brow.cfg{grid-template-columns:1fr}}
+
+/* مضغوط: خانات بسطر واحد، ومربع كتابة بإطار واضح يُكبَّر بالسحب */
+.chip,.tile{flex-direction:row;min-height:28px;padding:2px 5px;gap:4px;font-size:11.5px}
+.chip .nm,.tile .tl{font-weight:500}
+.mbar{gap:4px}
+.brow.cfg{gap:4px}
+.chip .av{width:16px;height:16px;font-size:10px;border-radius:3px}
+.tile .tm{display:none}
+.tile .ic{font-size:12px}
+.chip .dot{top:3px;inset-inline-start:3px}
+.chip .crown{top:1px}
+.composer{border:1.5px solid color-mix(in srgb,var(--mut) 55%,transparent)!important;background:var(--card)!important;border-radius:8px!important}
+.composer textarea{resize:vertical!important;min-height:64px!important;max-height:none!important;border:1px solid var(--line)!important;border-radius:6px;background:var(--bg)!important}
+.cn-top:not(:has(*)){display:none}
+.composer{border:1.5px solid var(--line);border-radius:14px;background:var(--bg);padding:8px 10px;display:flex;flex-direction:column;gap:6px;transition:border-color .15s}
+.composer:focus-within{border-color:var(--acc);box-shadow:0 0 0 2px color-mix(in srgb,var(--acc) 20%,transparent)}
+.composer textarea{border:0;background:transparent;color:inherit;resize:none;min-height:36px;max-height:200px;padding:4px 6px;font:inherit;line-height:1.7;outline:none;direction:auto;width:100%}
+.composer .row{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.composer .row .sp{flex:1}
+.est{font-size:12px;color:var(--mut)}
 .cn-atts{display:flex;flex-wrap:wrap;gap:6px}
 .cn-att{display:flex;align-items:center;gap:5px;border:1px solid var(--line);border-radius:9px;padding:3px 4px 3px 8px;background:var(--side);font-size:12px}
 .cn-att select{border:0;background:transparent;color:inherit;font-size:12px;max-width:110px}
 .cn-att button{border:0;background:transparent;cursor:pointer;color:var(--mut)}
-.cn-thread{display:flex;flex-direction:column;gap:18px;flex:1;min-height:0;overflow-y:auto;padding-bottom:8px}.cn-team{display:flex;flex-direction:column;gap:8px}.cn-team.fold{display:none}.cn-teambar{display:none;align-items:center;gap:8px;border:1px solid var(--line);border-radius:10px;padding:5px 10px;background:var(--bg);cursor:pointer;font-size:12.5px}.cn-teambar.show{display:flex}.cn-teambar:hover{border-color:var(--acc)}.cn-body{max-height:34vh;overflow-y:auto;padding-inline-end:4px;scrollbar-width:thin}.cn-card.wide .cn-body{max-height:62vh}
+.cn-ibtn{border:0;background:transparent;cursor:pointer;border-radius:9px;padding:5px 8px;color:var(--mut);font-size:15px}
+.cn-ibtn:hover{background:var(--acc-soft);color:var(--acc)}
+.cn-send{border:0;border-radius:10px;padding:7px 18px;background:var(--acc);color:#fff;font-weight:700;cursor:pointer;font-size:13.5px}
+.cn-send:disabled{opacity:.45;cursor:default}
+.cn-send.stop{background:var(--bad)}
+.cn-thread{display:flex;flex-direction:column;gap:14px;flex:1;min-height:0;overflow-y:auto;padding-bottom:12px}
 .cn-round{display:flex;flex-direction:column;gap:10px;animation:cnin .25s ease}
 @keyframes cnin{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
-.cn-q{align-self:flex-start;max-width:92%;background:var(--accp);border-radius:14px 14px 4px 14px;padding:9px 13px;white-space:pre-wrap;overflow-wrap:anywhere}
+.cn-q{align-self:flex-start;max-width:92%;background:var(--acc-soft);border-radius:14px 14px 4px 14px;padding:9px 13px;white-space:pre-wrap;overflow-wrap:anywhere}
 .cn-qfiles{font-size:11.5px;color:var(--mut);margin-top:4px}
-.cn-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,290px),1fr));gap:10px}
-.cn-card{border:1px solid var(--line);border-top:4px solid var(--c);border-radius:12px;background:var(--bg);padding:10px 12px;min-width:0;display:flex;flex-direction:column;gap:7px}
-.cn-card.judge{--c:var(--gold);background:color-mix(in srgb,var(--gold) 8%,var(--bg))}
-.cn-ch{display:flex;align-items:center;gap:8px}
-.cn-ch strong{flex:1}
-.cn-badge{border-radius:99px;padding:2px 9px;font-size:11px;color:#fff;display:inline-flex;align-items:center;gap:5px}
-.cn-badge.run::before{content:'';width:7px;height:7px;border-radius:50%;background:#fff;animation:cnp 1s infinite}
-@keyframes cnp{50%{opacity:.25}}
-.cn-live{margin:0;padding:8px;max-height:180px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font:12px ui-monospace,monospace;background:var(--side);border-radius:8px;color:var(--mut);direction:auto}
-.cn-md{overflow-wrap:anywhere;line-height:1.85}
-.cn-md h4{margin:12px 0 4px;color:var(--c,var(--acc));font-size:13.5px}
-.cn-md p{margin:3px 0}.cn-md ul{margin:3px 0;padding-inline-start:20px}
-.cn-foot{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
-.cn-btn{border:1px solid var(--line);background:var(--bg);color:inherit;border-radius:9px;padding:5px 11px;cursor:pointer;font-size:12.5px}
-.cn-btn:hover{border-color:var(--acc);color:var(--acc)}
-.cn-err{color:#ef4444;font-size:12.5px}
-.cn-prog{height:5px;border-radius:9px;background:var(--line);overflow:hidden}.cn-prog i{display:block;height:100%;background:linear-gradient(90deg,var(--acc),var(--gold));transition:width .5s}
-.cn-prog-t{font-size:12px;color:var(--mut);display:flex;justify-content:space-between}
-.cn-skel{height:54px;border-radius:8px;background:linear-gradient(100deg,var(--side) 30%,color-mix(in srgb,var(--side) 55%,var(--bg)) 50%,var(--side) 70%);background-size:200% 100%;animation:cnsk 1.3s linear infinite}
-@keyframes cnsk{to{background-position:-200% 0}}
-.cn-verdict{border-radius:10px;padding:11px 14px;background:color-mix(in srgb,var(--gold) 16%,var(--bg));border:1px solid color-mix(in srgb,var(--gold) 55%,var(--line));font-size:14.5px}
-.cn-verdict .lab{font-size:11px;font-weight:700;color:var(--gold);letter-spacing:.3px;margin-bottom:3px}
-.cn-more{border:0;background:transparent;color:var(--acc);cursor:pointer;font-size:12px;padding:2px 0;align-self:flex-start}
-.cn-clamp{max-height:230px;overflow:hidden;-webkit-mask-image:linear-gradient(#000 78%,transparent);mask-image:linear-gradient(#000 78%,transparent)}
-.cn-card.wide{grid-column:1/-1}
+.stages{display:flex;gap:4px;align-items:center;flex-wrap:wrap;font-size:12px;margin:2px 0}
+.stages span{padding:2px 9px;border-radius:99px;background:var(--side);color:var(--mut)}
+.stages span.done{background:var(--ok-soft);color:var(--ok)}
+.stages span.cur{background:var(--acc);color:#fff}
+.stages-sep{background:none!important;padding:0!important;color:var(--mut)}
+.verdict{border:2px solid var(--gold);background:var(--gold-soft);border-radius:14px;padding:12px 14px;color:var(--txt)}
+.verdict .vh{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.verdict .vh b{font-size:15px}
+.verdict .conf{font-size:12px;border-radius:99px;padding:1px 9px;background:var(--card);border:1px solid var(--gold);color:var(--gold);font-weight:600}
+.verdict .vbody{margin-top:8px;font-size:14px;line-height:1.8}
+.verdict .vsum{display:none;font-size:13px;color:var(--mut);margin-top:4px}
+.verdict.collapsed .vbody,.verdict.collapsed .vtabs,.verdict.collapsed .vpane{display:none}
+.verdict.collapsed .vsum{display:block}
+.vtabs{display:flex;gap:4px;margin-top:10px;flex-wrap:wrap}
+.vtabs button{border:1px solid var(--line);background:var(--card);color:var(--txt);border-radius:8px;padding:3px 10px;cursor:pointer;font:inherit;font-size:12.5px;transition:.15s}
+.vtabs button:hover{border-color:var(--gold)}
+.vtabs button.on{border-color:var(--gold);background:var(--gold);color:#fff;font-weight:700}
+.vpane{margin-top:8px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px;font-size:13.5px;line-height:1.75;overflow-x:auto}
+table.claims{width:100%;border-collapse:collapse;font-size:13px}
+table.claims th,table.claims td{border-bottom:1px solid var(--line);padding:6px 8px;text-align:start;vertical-align:top}
+table.claims td.c,table.claims th.c{text-align:center;width:52px}
+.yes{color:var(--ok);font-weight:700}.no{color:var(--bad);font-weight:700}.na{color:var(--mut)}
+.tbar{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--mut);margin:6px 0 2px}
+.tbar .sp{flex:1}
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:10px;align-items:start}
+.acard{border:1px solid var(--line);border-radius:12px;background:var(--card);border-top:3px solid var(--c,var(--line));display:flex;flex-direction:column;min-height:150px;min-width:0;transition:box-shadow .15s}
+.acard:hover{box-shadow:0 2px 8px rgba(0,0,0,.06)}
+.acard.wide{grid-column:1/-1}
+.acard .h{display:flex;align-items:center;gap:6px;padding:8px 10px;border-bottom:1px solid var(--line);font-size:13.5px}
+.acard .h .letter{font-size:11px;color:var(--mut)}
+.acard .h .bd{margin-inline-start:auto;font-size:11px;border-radius:99px;padding:1px 8px;color:#fff}
+.acard .act{font-size:12px;color:var(--mut);padding:6px 10px;border-bottom:1px dashed var(--line);min-height:28px;display:flex;align-items:center;gap:5px;flex-wrap:wrap}
+.acard .act .tool{display:inline-block;background:var(--side);border-radius:6px;padding:1px 6px;margin:1px 0;font-size:11.5px}
+.acard .tx{padding:8px 10px;font-size:13px;max-height:220px;overflow-y:auto;white-space:pre-wrap;scrollbar-width:thin}
+.acard.wide .tx{max-height:60vh}
+.acard .peek{display:none;font-size:12px;color:var(--mut);padding:8px 10px}
+.acard.collapsed{min-height:0}
+.acard.collapsed .act,.acard.collapsed .tx{display:none}
+.acard.collapsed .peek{display:block}
+.acard .ft{display:flex;gap:6px;padding:6px 10px;border-top:1px solid var(--line);margin-top:auto;font-size:12px;color:var(--mut);align-items:center;flex-wrap:wrap}
+.fold-h{cursor:pointer;user-select:none}
+.chev2{display:inline-block;margin-inline-start:auto;color:var(--mut);transition:transform .2s;font-size:13px}
+.collapsed .chev2{transform:rotate(90deg)}
+.mbtn{border:1px solid var(--line);background:var(--card);color:var(--txt);border-radius:9px;padding:4px 11px;cursor:pointer;font:inherit;font-size:12.5px;transition:.15s}
+.mbtn:hover{border-color:var(--acc);color:var(--acc)}
+.mbtn.pri{background:var(--acc);border-color:var(--acc);color:#fff}
+.mbtn.pri:hover{opacity:.9}
+.mbtn.gold{background:var(--gold-soft);border-color:var(--gold);color:var(--gold)}
+.mbtn.gold:hover{background:var(--gold);color:#fff}
+.cn [hidden]{display:none!important}
+.pill{display:inline-block;font-size:11px;border-radius:99px;padding:1px 7px;font-weight:600}
+.p-warn{background:var(--warn-soft);color:var(--warn)}
+.p-crit{background:var(--bad-soft);color:var(--bad)}
+.p-ok{background:var(--ok-soft);color:var(--ok)}
+.skel{height:12px;border-radius:6px;background:linear-gradient(90deg,var(--side),var(--line),var(--side));background-size:200% 100%;animation:sh 1.2s infinite;margin:6px 0}
+@keyframes sh{to{background-position:-200% 0}}
+.foot-actions{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:6px}
+.cn-md{overflow-wrap:anywhere;line-height:1.8}
+.cn-md h4{margin:10px 0 4px;color:var(--c,var(--acc));font-size:13.5px}
+.cn-md p{margin:3px 0}
+.cn-md ul{margin:3px 0;padding-inline-start:20px}
+.cn-err{color:var(--bad);font-size:12.5px;padding:4px 0}
+.cn-sub{color:var(--mut);font-size:12px}
 .cn-time{font-size:11px;color:var(--mut)}
-.cn-presets{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
-.cn-pre{border:1px dashed var(--line);background:transparent;color:inherit;border-radius:99px;padding:3px 11px;font-size:12px;cursor:pointer}
-.cn-pre:hover{border-color:var(--acc);color:var(--acc)}
-.cn-details>summary{cursor:pointer;color:var(--acc);font-size:12.5px;margin:6px 0}
 .cn-empty{border:1.5px dashed var(--line);border-radius:12px;padding:22px;text-align:center;color:var(--mut)}
+.cn-live{margin:0;padding:8px;max-height:180px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font:12px ui-monospace,monospace;background:var(--side);border-radius:8px;color:var(--mut);direction:auto}
 `;
+
   function mountCouncil(container, opts) {
     if (!container) return;
     opts = opts || {};
@@ -164,168 +403,985 @@
     const style = document.createElement('style'); style.textContent = CN_CSS; host.appendChild(style);
     const mk = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
 
-    // ===== الرأس والفريق =====
-    const top = mk('div', 'cn-top'); top.appendChild(mk('h3', '', '⚖ مجلس الوكلاء'));
-    const histSel = mk('select', 'cn-btn'); histSel.title = 'مجالس سابقة'; top.appendChild(histSel);
-    if (opts.onExit) { const x = mk('button', 'cn-btn', 'العودة للمحادثة'); x.type = 'button'; x.onclick = opts.onExit; top.appendChild(x); }
-    const roster = mk('div', 'cn-roster'); const summary = mk('div', 'cn-sub');
-    const presetBar = mk('div', 'cn-presets');
-    const team = mk('div', 'cn-team'); team.append(roster, summary, presetBar);
-    const teamBar = mk('div', 'cn-teambar'); teamBar.title = 'اضغط لإظهار الفريق'; teamBar.onclick = () => setFold(false);
-    const setFold = f => { team.classList.toggle('fold', f); teamBar.classList.toggle('show', f); };
-    host.append(top, teamBar, team);
+    // ===== الرأس =====
+    const top = mk('div', 'cn-top');
+    const checkBtn = mk('button', 'mbtn', 'فحص الجاهزية');
+    checkBtn.type = 'button';
+    const histSel = mk('select', 'mbtn');
+    histSel.title = 'مجالس سابقة';
+    top.append(checkBtn, histSel);
+    const tabBar = host.closest('#zajel-term-window')?.querySelector('.tw-tabs');
+    if (tabBar) {
+      tabBar.querySelectorAll('.cn-tabtools').forEach(x => x.remove());
+      const tools = mk('span', 'cn-tabtools'); tools.style.cssText = 'margin-inline-start:auto;display:inline-flex;gap:6px';
+      tools.append(checkBtn, histSel); tabBar.appendChild(tools);
+    }
+    if (opts.onExit) {
+      const exitBtn = mk('button', 'mbtn', 'العودة للمحادثة');
+      exitBtn.type = 'button';
+      exitBtn.onclick = opts.onExit;
+      top.appendChild(exitBtn);
+    }
+    host.appendChild(top);
+
+    // ===== الصفّان (الفريق ثم العمق وخيارات الحكم) =====
+    const mbar = mk('div', 'mbar');
+
+    // الصف ١: الفريق
+    const browTeam = mk('div', 'brow team');
+    const roster = mk('div', 'roster');
+    roster.title = 'اضغط على الوكيل ليشارك · 👑 لتجعله الحكم';
+    browTeam.append(roster);
+
+    // الصف ٢: العمق وخيارات الحكم
+    const browCfg = mk('div', 'brow cfg');
+    const depthSel = mk('select', 'msel');   // لا يُعرض: الأزرار الثلاثة تضبطه
+    depthSel.title = 'العمق يحدد طريقة التفكير والبحث والأدوات';
+    [
+      ['fast', '⚡ سريع · ١–٣ د'],
+      ['bal', '⚖ متوازن · ٣–٨ د'],
+      ['deep', '🔬 عميق · ١٠–٢٥ د']
+    ].forEach(([v, t]) => {
+      const o = mk('option', '', t); o.value = v; depthSel.appendChild(o);
+    });
+
+    // العمق: ثلاث خانات بدل القائمة المنسدلة
+    const DEPTH_TILES = [['fast', '⚡', 'سريع', '١–٣ د', 'سريع: تفكير عادي، للأسئلة القصيرة'],
+      ['bal', '⚖', 'متوازن', '٣–٨ د', 'متوازن: أقوى نموذج وتفكير عالٍ (الافتراضي)'],
+      ['deep', '🔬', 'عميق', '١٠–٢٥ د', 'عميق: أقصى تفكير ونقد متبادل، للدراسات والرسائل']];
+    const depthBtns = {};
+    const depthGroup = mk('div', 'tiles depth');
+    DEPTH_TILES.forEach(([v, ic, t, tm, tip]) => {
+      const b = mk('button', 'tile'); b.type = 'button'; b.title = tip;
+      b.append(mk('span', 'ic', ic), mk('span', 'tl', t), mk('span', 'tm', tm));
+      b.onclick = () => applyDepth(v);
+      depthBtns[v] = b; depthGroup.appendChild(b);
+    });
+    const syncDepthTiles = () => Object.entries(depthBtns).forEach(([v, b]) => b.classList.toggle('on', v === depthSel.value));
+    const optsSpan = mk('div', 'tiles opts');
+
+    const makeOpt = (id, label, tip) => {
+      const lbl = mk('label', 'opt');
+      lbl.title = tip;
+      lbl.dataset.tip = tip;
+      const inp = mk('input'); inp.type = 'checkbox'; inp.id = id;
+      const [ic, ...rest] = label.split(' ');
+      const sp = mk('span', 'tile');
+      sp.append(mk('span', 'ic', ic), mk('span', 'tl', rest.join(' ')));
+      lbl.append(inp, sp);
+      return { lbl, inp };
+    };
+
+    const optBlind = makeOpt('cnOptBlind', '🙈 مُعمّى', 'حكم مُعمّى: لا يعرف الحكم أسماء أصحاب الإجابات');
+    const optReview = makeOpt('cnOptReview', '💬 نقد', 'جولة نقد متبادل: يراجع كل وكيل إجابات الآخرين قبل الحكم');
+    const optVerify = makeOpt('cnOptVerify', '🔎 تحقق', 'تحقق: يراجع الحكم الإحالات في الشاملة');
+    const optLive = makeOpt('cnOptLive', '📺 حي', 'وضع حي: تشاهد الوكيل وهو يكتب عبر الطرفية');
+
+    optsSpan.append(optBlind.lbl, optReview.lbl, optVerify.lbl, optLive.lbl);
+    browCfg.append(depthGroup, optsSpan);
+
+    mbar.append(browTeam, browCfg);
+    host.appendChild(mbar);
 
     // ===== مربع الكتابة والمرفقات =====
-    const composer = mk('div', 'cn-composer'); const attBar = mk('div', 'cn-atts'); attBar.hidden = true;
-    const ta = mk('textarea'); ta.rows = 1; ta.dir = 'auto'; ta.placeholder = 'اسأل المجلس… أرفق ملفًا أو اكتب مساره على الكمبيوتر (Markdown أو Word أو PDF) · ⌘↩ للإرسال';
-    const row = mk('div', 'cn-row'); const attachBtn = mk('button', 'cn-ibtn', '📎'); attachBtn.type = 'button'; attachBtn.title = 'إرفاق ملفات لوكيل أو للحكم';
+    const composer = mk('div', 'composer');
+    const attBar = mk('div', 'cn-atts'); attBar.hidden = true;
+    const ta = mk('textarea');
+    ta.rows = 1;
+    ta.dir = 'auto';
+    ta.placeholder = 'اسأل المجلس… أرفق ملفًا أو اكتب مساره على الكمبيوتر (Markdown أو Word أو PDF) · ⌘↩ للإرسال';
+
+    const compRow = mk('div', 'row');
+    const attachBtn = mk('button', 'cn-ibtn', '📎');
+    attachBtn.type = 'button';
+    attachBtn.title = 'إرفاق ملفات لوكيل أو للحكم';
     const fileIn = mk('input'); fileIn.type = 'file'; fileIn.multiple = true; fileIn.hidden = true;
-    const limSel = mk('select', 'cn-btn'); limSel.title = 'بعد هذه المدة يحكم الرئيسي بما وصل ويكمل البطيء'; [[180, 'مهلة الحكم: ٣ د'], [300, 'مهلة الحكم: ٥ د'], [600, 'مهلة الحكم: ١٠ د'], [0, 'بلا مهلة']].forEach(([v, t]) => { const o = mk('option', '', t); o.value = v; limSel.appendChild(o); }); limSel.value = (() => { try { return localStorage.getItem('zajel_council_limit') || '300'; } catch (_) { return '300'; } })(); limSel.onchange = () => { try { localStorage.setItem('zajel_council_limit', limSel.value); } catch (_) {} };
-    const modeSel = mk('select', 'cn-btn'); modeSel.title = 'مباشر: إجابات كاملة موثوقة للنصوص الكبيرة · عبر الطرفيات: تشاهد الوكيل وهو يكتب'; [['direct', 'مباشر (موثوق)'], ['terminal', 'عبر الطرفيات (حي)']].forEach(([v, t]) => { const o = mk('option', '', t); o.value = v; modeSel.appendChild(o); }); modeSel.value = (() => { try { return localStorage.getItem('zajel_council_mode') || 'direct'; } catch (_) { return 'direct'; } })(); modeSel.onchange = () => { try { localStorage.setItem('zajel_council_mode', modeSel.value); } catch (_) {} };
-    const ctx = mk('span', 'cn-sub'); const newBtn = mk('button', 'cn-btn', 'سؤال جديد'); newBtn.type = 'button'; newBtn.hidden = true;
-    const sendBtn = mk('button', 'cn-send', 'أرسل'); sendBtn.type = 'button';
-    row.append(attachBtn, fileIn, modeSel, limSel, ctx, newBtn, mk('span', 'sp'), sendBtn);
-    composer.append(attBar, ta, row); host.appendChild(composer);
-    const thread = mk('div', 'cn-thread'); host.appendChild(thread);
-    const empty = mk('div', 'cn-empty', 'اختر الوكلاء بالضغط على أسمائهم، وعيّن الحكم بالتاج، ثم اطرح سؤالك.'); thread.appendChild(empty);
+    const estSpan = mk('span', 'est');
+    const sp = mk('span', 'sp');
+    const newBtn = mk('button', 'mbtn', 'سؤال جديد'); newBtn.type = 'button'; newBtn.hidden = true;
+    const sendBtn = mk('button', 'cn-send', 'أرسل ⌘↩'); sendBtn.type = 'button';
+
+    compRow.append(attachBtn, fileIn, estSpan, sp, newBtn, sendBtn);
+    composer.append(attBar, ta, compRow);
+    host.appendChild(composer);
+
+    const thread = mk('div', 'cn-thread');
+    const empty = mk('div', 'cn-empty', 'اختر الوكلاء بالضغط على أسمائهم، وعيّن الحكم بالتاج، ثم اطرح سؤالك.');
+    thread.appendChild(empty);
+    host.appendChild(thread);
 
     // ===== الحالة =====
-    let available = [], selected = new Set(), main = '', atts = [], activeId = '', lastDoneId = '', parentId = '', boxes = {};
-    try { const sv = JSON.parse(localStorage.getItem('zajel_council_sel') || '{}'); selected = new Set(Array.isArray(sv.ids) ? sv.ids : []); main = typeof sv.main === 'string' ? sv.main : ''; } catch (_) {}
-    const persist = () => { try { localStorage.setItem('zajel_council_sel', JSON.stringify({ ids: [...selected], main })); } catch (_) {} };
-    const loadPresets = () => { try { return JSON.parse(localStorage.getItem('zajel_council_presets') || '[]'); } catch (_) { return []; } };
-    const savePresets = a => { try { localStorage.setItem('zajel_council_presets', JSON.stringify(a)); } catch (_) {} };
-    const renderPresets = () => {
-      presetBar.replaceChildren(); const list = loadPresets();
-      list.forEach((p, i) => { const b = mk('button', 'cn-pre', '★ ' + p.name); b.type = 'button'; b.title = 'اضغط لتحميل الفريق (⇧+نقر للحذف)'; b.onclick = ev => { if (ev.shiftKey) { list.splice(i, 1); savePresets(list); renderPresets(); return; } selected = new Set(p.ids.filter(id => available.some(a => a.id === id))); main = available.some(a => a.id === p.main) ? p.main : ''; persist(); renderRoster(); renderAtts(); }; presetBar.appendChild(b); });
-      const add = mk('button', 'cn-pre', '＋ احفظ هذا الفريق'); add.type = 'button'; add.onclick = () => { if (!selected.size) return; const name = prompt('اسم الفريق؟', 'فريقي'); if (!name) return; list.push({ name: name.slice(0, 24), ids: [...selected], main }); savePresets(list); renderPresets(); }; presetBar.appendChild(add);
+    let available = [], selected = new Set(), main = '', checkStates = {}, atts = [];
+    let activeId = '', lastDoneId = '', parentId = '', boxes = {};
+
+    // قراءة التفضيلات المحفوظة
+    try {
+      const sv = JSON.parse(localStorage.getItem('zajel_council_sel') || '{}');
+      selected = new Set(Array.isArray(sv.ids) ? sv.ids : []);
+      main = typeof sv.main === 'string' ? sv.main : '';
+    } catch (_) {}
+
+    let depth = (() => { try { return localStorage.getItem('zajel_council_depth') || 'bal'; } catch (_) { return 'bal'; } })();
+    if (!['fast', 'bal', 'deep'].includes(depth)) depth = 'bal';
+    depthSel.value = depth;
+
+    let blind = (() => { try { const v = localStorage.getItem('zajel_council_blind'); return v == null ? true : v === 'true'; } catch (_) { return true; } })();
+    let review = (() => { try { return localStorage.getItem('zajel_council_review') === 'true'; } catch (_) { return false; } })();
+    let verify = (() => { try { const v = localStorage.getItem('zajel_council_verify'); return v == null ? true : v === 'true'; } catch (_) { return true; } })();
+    let liveMode = (() => { try { return localStorage.getItem('zajel_council_live') === 'true'; } catch (_) { return false; } })();
+
+    optBlind.inp.checked = blind;
+    optReview.inp.checked = review;
+    optVerify.inp.checked = verify;
+    optLive.inp.checked = liveMode;
+
+    const persist = () => {
+      try {
+        localStorage.setItem('zajel_council_sel', JSON.stringify({ ids: [...selected], main }));
+        localStorage.setItem('zajel_council_depth', depth);
+        localStorage.setItem('zajel_council_blind', String(optBlind.inp.checked));
+        localStorage.setItem('zajel_council_review', String(optReview.inp.checked));
+        localStorage.setItem('zajel_council_verify', String(optVerify.inp.checked));
+        localStorage.setItem('zajel_council_live', String(optLive.inp.checked));
+      } catch (_) {}
     };
+
     const nameOf = id => available.find(a => a.id === id)?.name || id;
-    const err = e => { const p = mk('div', 'cn-err', e?.message || 'تعذّر تنفيذ الطلب'); composer.after(p); setTimeout(() => p.remove(), 6000); };
-    const grow = () => { ta.style.height = 'auto'; ta.style.height = Math.min(200, ta.scrollHeight) + 'px'; };
+    const err = e => {
+      const p = mk('div', 'cn-err', e?.message || 'تعذّر تنفيذ الطلب');
+      composer.after(p);
+      setTimeout(() => p.remove(), 6000);
+    };
+
+    const grow = () => {
+      ta.style.height = 'auto';
+      ta.style.height = Math.min(200, ta.scrollHeight) + 'px';
+    };
     ta.addEventListener('input', grow);
 
-    let warmTimer = null;
-    const warmUp = () => { clearTimeout(warmTimer); warmTimer = setTimeout(() => { const ids = [...new Set([...selected, ...(main ? [main] : [])])].filter(id => available.some(a => a.id === id)); if (ids.length && modeSel.value === 'terminal' && (!activeId || lastDoneId === activeId)) req('council/warm', { ids }).catch(() => {}); }, 1200); };
+    // تطبيق ضبط العمق على حبوب الخيارات
+    const applyDepth = mode => {
+      depth = mode;
+      depthSel.value = depth;
+      syncDepthTiles();
+      if (mode === 'fast') {
+        optBlind.inp.checked = true;
+        optBlind.inp.disabled = false;
+        optBlind.lbl.classList.remove('locked');
+        optBlind.lbl.title = optBlind.lbl.dataset.tip;
+
+        optReview.inp.checked = false;
+        optReview.inp.disabled = true;
+        optReview.lbl.classList.add('locked');
+        optReview.lbl.title = 'غير متاح في الوضع السريع — ' + optReview.lbl.dataset.tip;
+
+        optVerify.inp.checked = false;
+        optVerify.inp.disabled = false;
+        optVerify.lbl.classList.remove('locked');
+        optVerify.lbl.title = optVerify.lbl.dataset.tip;
+      } else if (mode === 'bal') {
+        optBlind.inp.checked = true;
+        optBlind.inp.disabled = false;
+        optBlind.lbl.classList.remove('locked');
+        optBlind.lbl.title = optBlind.lbl.dataset.tip;
+
+        optReview.inp.checked = false;
+        optReview.inp.disabled = false;
+        optReview.lbl.classList.remove('locked');
+        optReview.lbl.title = optReview.lbl.dataset.tip;
+
+        optVerify.inp.checked = true;
+        optVerify.inp.disabled = false;
+        optVerify.lbl.classList.remove('locked');
+        optVerify.lbl.title = optVerify.lbl.dataset.tip;
+      } else if (mode === 'deep') {
+        optBlind.inp.checked = true;
+        optBlind.inp.disabled = false;
+        optBlind.lbl.classList.remove('locked');
+        optBlind.lbl.title = optBlind.lbl.dataset.tip;
+
+        optReview.inp.checked = true;
+        optReview.inp.disabled = false;
+        optReview.lbl.classList.remove('locked');
+        optReview.lbl.title = optReview.lbl.dataset.tip;
+
+        optVerify.inp.checked = true;
+        optVerify.inp.disabled = false;
+        optVerify.lbl.classList.remove('locked');
+        optVerify.lbl.title = optVerify.lbl.dataset.tip;
+      }
+      persist();
+      updateEst();
+    };
+
+    depthSel.onchange = () => applyDepth(depthSel.value);
+    [optBlind.inp, optReview.inp, optVerify.inp, optLive.inp].forEach(inp => {
+      inp.onchange = () => { persist(); updateEst(); };
+    });
+
+    // سطر تقدير الوقت
+    const updateEst = () => {
+      const ids = [...selected].filter(id => available.some(a => a.id === id));
+      if (!ids.length) {
+        estSpan.textContent = 'اختر مفوَّضًا واحدًا على الأقل';
+        return;
+      }
+      const base = { fast: 2, bal: 5, deep: 11 }[depth] + (optReview.inp.checked ? 4 : 0);
+      const speeds = ids.map(id => {
+        const cs = checkStates[id];
+        if (cs && cs.secs && cs.secs > 5) return Math.min(3, cs.secs / 10);
+        return agentSpeed[id] || 1.0;
+      });
+      const maxSp = Math.max(...speeds);
+      const lo = Math.max(1, Math.round(base * maxSp));
+      const hi = Math.max(lo + 1, Math.round(base * maxSp * 1.5));
+      const sorted = ids.map(id => ({ id, name: nameOf(id), sp: agentSpeed[id] || 1.0 })).sort((a, b) => b.sp - a.sp);
+      const slowest = sorted[0];
+      const slowestText = slowest && slowest.sp > 1.5 ? ' · الأبطأ: ' + slowest.name : '';
+      const judgeText = main ? ' · الحكم: ' + nameOf(main) : ' · بلا حكم';
+      estSpan.textContent = `متوقّع: ${lo}–${hi} دقيقة · ${ids.length} مفوَّض${judgeText}${slowestText}`;
+    };
+
+    applyDepth(depth);   // بعد تعريف updateEst (كان يُستدعى قبله فيتوقف المجلس عند الفتح)
+
+    // فحص الجاهزية GET council/check
+    const runCheck = async force => {
+      checkBtn.textContent = 'يفحص…';
+      checkBtn.disabled = true;
+      const ids = available.map(a => a.id);
+      try {
+        const query = (ids.length ? 'ids=' + encodeURIComponent(ids.join(',')) + '&' : '') + 'force=' + (force ? '1' : '0');
+        const res = await req('council/check?' + query).catch(() => null);
+        if (res && res.agents) {
+          checkStates = res.agents;
+        }
+        let readyCount = 0, offCount = 0;
+        available.forEach(a => {
+          const st = (checkStates[a.id] || {}).state || 'ready';
+          if (st === 'off') {
+            offCount++;
+            if (selected.has(a.id)) selected.delete(a.id);
+            if (main === a.id) main = '';
+          } else {
+            readyCount++;
+          }
+        });
+        persist();
+        renderRoster();
+        checkBtn.textContent = `✓ ${readyCount} جاهز${offCount ? ' · ' + offCount + ' معطّل' : ''}`;
+        setTimeout(() => { checkBtn.textContent = 'فحص الجاهزية'; checkBtn.disabled = false; }, 3500);
+      } catch (_) {
+        checkBtn.textContent = 'فحص الجاهزية';
+        checkBtn.disabled = false;
+      }
+    };
+    checkBtn.onclick = () => runCheck(true);
+
+    const flashChip = (c, note) => {
+      c.animate([
+        { transform: 'translateX(0)' },
+        { transform: 'translateX(-5px)' },
+        { transform: 'translateX(5px)' },
+        { transform: 'translateX(-4px)' },
+        { transform: 'translateX(4px)' },
+        { transform: 'translateX(0)' }
+      ], { duration: 280 });
+      err(new Error(note || 'الوكيل غير جاهز، لا يمكن اختياره'));
+    };
+
+    // رسم الفريق في الرستر
     const renderRoster = () => {
       roster.replaceChildren();
       available.forEach(a => {
-        const chip = mk('div', 'cn-chip' + (selected.has(a.id) ? ' on' : '') + (main === a.id ? ' judge' : '')); chip.style.setProperty('--c', colorOf(a.id)); chip.title = 'اضغط لإضافته/إزالته من المفوَّضين';
-        const av = mk('span', 'cn-av', a.name.trim().charAt(0).toUpperCase()); const nm = mk('span', '', a.name);
-        const crown = mk('button', 'cn-crown', '👑'); crown.type = 'button'; crown.title = main === a.id ? 'هو الحكم (اضغط لإلغاء)' : 'اجعله الحكم';
-        crown.onclick = ev => { ev.stopPropagation(); main = main === a.id ? '' : a.id; persist(); renderRoster(); renderAttTargets(); };
-        chip.onclick = () => { selected.has(a.id) ? selected.delete(a.id) : selected.add(a.id); persist(); renderRoster(); renderAttTargets(); };
-        chip.append(av, nm, crown); roster.appendChild(chip);
+        const chk = checkStates[a.id] || { state: 'ready', note: 'جاهز' };
+        const isOff = chk.state === 'off';
+        const isSlow = chk.state === 'slow';
+        const dotCls = isOff ? 'off' : (isSlow ? 'slow' : 'ready');
+
+        const chip = mk('div', 'chip' + (selected.has(a.id) ? ' on' : '') + (main === a.id ? ' judge' : '') + (isOff ? ' off' : ''));
+        chip.style.setProperty('--c', colorOf(a.id));
+        chip.title = a.name + ': ' + (chk.note || (isOff ? 'معطّل' : isSlow ? 'بطيء' : 'جاهز'));
+
+        const av = mk('span', 'av', a.name.trim().charAt(0).toUpperCase());
+        const nm = mk('span', '', a.name);
+        const dot = mk('span', 'dot ' + dotCls);
+        const crown = mk('button', 'crown', '👑');
+        crown.type = 'button';
+        crown.title = main === a.id ? 'هو الحكم (اضغط للإلغاء)' : 'اجعله الحكم';
+
+        crown.onclick = ev => {
+          ev.stopPropagation();
+          if (isOff) { flashChip(chip, chk.note); return; }
+          main = (main === a.id) ? '' : a.id;
+          if (main && !selected.has(main)) selected.add(main);
+          persist();
+          renderRoster();
+          renderAtts();
+        };
+
+        chip.onclick = () => {
+          if (isOff) { flashChip(chip, chk.note); return; }
+          if (selected.has(a.id)) {
+            selected.delete(a.id);
+            if (main === a.id) main = '';
+          } else {
+            selected.add(a.id);
+          }
+          persist();
+          renderRoster();
+          renderAtts();
+        };
+
+        nm.className = 'nm';
+        chip.append(dot, crown, av, nm);
+        roster.appendChild(chip);
       });
-      warmUp();
-      const n = [...selected].filter(id => available.some(a => a.id === id)).length;
-      teamBar.textContent = '▾ الفريق: ' + ([...selected].filter(id => available.some(a => a.id === id)).map(nameOf).join('، ') || 'لا أحد') + (main ? ' · الحكم: ' + nameOf(main) : '');
-      summary.textContent = n ? `${n} مفوَّض يجيبون معًا` + (main ? ` · الحكم: ${nameOf(main)}` : ' · بلا حكم (إجابات فقط)') : 'لم تختر أي مفوَّض بعد';
+      updateEst();
+      sync();
     };
 
     // ===== المرفقات =====
-    const targets = () => [['*', 'للجميع'], ...(main ? [['main', 'للحكم فقط']] : []), ...[...selected].filter(id => available.some(a => a.id === id)).map(id => [id, 'لـ ' + nameOf(id)])];
-    function renderAttTargets() { renderAtts(); }
+    const targets = () => [
+      ['*', 'للجميع'],
+      ...(main ? [['main', 'للحكم فقط']] : []),
+      ...[...selected].filter(id => available.some(a => a.id === id)).map(id => [id, 'لـ ' + nameOf(id)])
+    ];
+
     function renderAtts() {
-      attBar.replaceChildren(); attBar.hidden = !atts.length;
+      attBar.replaceChildren();
+      attBar.hidden = !atts.length;
       atts.forEach((a, i) => {
-        const chip = mk('div', 'cn-att'); chip.appendChild(mk('span', '', (a.status === 'up' ? '⏳ ' : a.status === 'err' ? '⚠ ' : '📄 ') + a.name));
-        const sel = mk('select'); targets().forEach(([v, t]) => { const o = mk('option', '', t); o.value = v; sel.appendChild(o); });
-        if (!targets().some(([v]) => v === a.to)) a.to = '*'; sel.value = a.to; sel.onchange = () => { a.to = sel.value; };
-        const rm = mk('button', '', '✕'); rm.type = 'button'; rm.onclick = () => { atts.splice(i, 1); renderAtts(); };
-        chip.append(sel, rm); attBar.appendChild(chip);
+        const chip = mk('div', 'cn-att');
+        chip.appendChild(mk('span', '', (a.status === 'up' ? '⏳ ' : a.status === 'err' ? '⚠ ' : '📄 ') + a.name));
+        const sel = mk('select');
+        targets().forEach(([v, t]) => {
+          const o = mk('option', '', t); o.value = v; sel.appendChild(o);
+        });
+        if (!targets().some(([v]) => v === a.to)) a.to = '*';
+        sel.value = a.to;
+        sel.onchange = () => { a.to = sel.value; };
+        const rm = mk('button', '', '✕');
+        rm.type = 'button';
+        rm.onclick = () => { atts.splice(i, 1); renderAtts(); };
+        chip.append(sel, rm);
+        attBar.appendChild(chip);
       });
     }
+
     const upload = async file => {
-      const item = { name: file.name, status: 'up', path: '', to: '*' }; atts.push(item); renderAtts();
-      try { const r = await (await fetch('/api/assistant/upload?name=' + encodeURIComponent(file.name), { method: 'POST', body: file })).json(); if (r && r.ok) { item.path = r.path; item.status = 'ok'; } else { item.status = 'err'; err(new Error(r?.error || 'فشل رفع الملف')); } }
-      catch (e) { item.status = 'err'; err(e); }
-      renderAtts(); sync();
+      const item = { name: file.name, status: 'up', path: '', to: '*' };
+      atts.push(item);
+      renderAtts();
+      try {
+        const r = await (await fetch('/api/assistant/upload?name=' + encodeURIComponent(file.name), { method: 'POST', body: file })).json();
+        if (r && r.ok) {
+          item.path = r.path;
+          item.status = 'ok';
+        } else {
+          item.status = 'err';
+          err(new Error(r?.error || 'فشل رفع الملف'));
+        }
+      } catch (e) {
+        item.status = 'err';
+        err(e);
+      }
+      renderAtts();
+      sync();
     };
+
     attachBtn.onclick = () => fileIn.click();
     fileIn.onchange = () => { [...fileIn.files].forEach(upload); fileIn.value = ''; };
-    ta.addEventListener('paste', ev => { const fs = [...(ev.clipboardData?.files || [])]; if (fs.length) { ev.preventDefault(); fs.forEach(upload); } });
+    ta.addEventListener('paste', ev => {
+      const fs = [...(ev.clipboardData?.files || [])];
+      if (fs.length) { ev.preventDefault(); fs.forEach(upload); }
+    });
     host.addEventListener('dragover', ev => ev.preventDefault());
-    host.addEventListener('drop', ev => { if (ev.dataTransfer?.files?.length) { ev.preventDefault(); [...ev.dataTransfer.files].forEach(upload); } });
+    host.addEventListener('drop', ev => {
+      if (ev.dataTransfer?.files?.length) {
+        ev.preventDefault();
+        [...ev.dataTransfer.files].forEach(upload);
+      }
+    });
 
-    // ===== عرض الجولة =====
-    const badge = state => { const b = mk('span', 'cn-badge' + (['asking', 'starting', 'restarting'].includes(state) ? ' run' : ''), councilStateText[state] || 'في الانتظار'); b.style.background = councilStateColor[state] || '#737373'; return b; };
-    const secs = t => { const n = Math.round(t); return n < 60 ? n + ' ث' : Math.floor(n / 60) + ' د ' + (n % 60) + ' ث'; };
-    const card = (title, id, state, answer, live, judge, data) => {
-      const c = mk('section', 'cn-card' + (judge ? ' judge' : '')); if (!judge) c.style.setProperty('--c', colorOf(id));
-      const h = mk('div', 'cn-ch'); const av = mk('span', 'cn-av', judge ? '⚖' : String(title).trim().charAt(0).toUpperCase()); av.style.background = judge ? 'var(--gold)' : colorOf(id);
-      h.append(av, mk('strong', '', title));
-      if (data && data.sent_at) h.appendChild(mk('span', 'cn-time', secs(((data.finished_at || Date.now() / 1000) - data.sent_at))));
-      h.appendChild(badge(state)); c.appendChild(h);
-      if (data && data.note) c.appendChild(mk('div', 'cn-sub', '↻ ' + data.note));
-      if (answer) {
-        let body;
-        const m = judge ? answer.search(/^##\s*الحكم النهائي.*$/m) : -1;
-        if (m !== -1) {
-          const final = answer.slice(m).replace(/^##.*\n?/, '').trim(); const rest = answer.slice(0, m).trim();
-          const v = mk('div', 'cn-verdict'); v.appendChild(mk('div', 'lab', 'الحكم النهائي')); const fb = mdBox(final); fb.classList.add('cn-body'); v.appendChild(fb); c.appendChild(v);
-          if (rest) { const d = mk('details', 'cn-details'); d.appendChild(mk('summary', '', 'تفاصيل المقارنة: الاتفاق والاختلاف والترتيب')); const rb = mdBox(rest); rb.classList.add('cn-body'); d.appendChild(rb); c.appendChild(d); }
-        } else {
-          body = mdBox(answer); body.classList.add('cn-body'); c.appendChild(body);
-        }
-        const f = mk('div', 'cn-foot'); const cp = mk('button', 'cn-btn', 'نسخ'); cp.type = 'button'; cp.onclick = () => navigator.clipboard?.writeText(answer).then(() => { cp.textContent = 'تم النسخ ✓'; setTimeout(() => cp.textContent = 'نسخ', 1500); }).catch(() => {}); f.appendChild(cp);
-        if (!judge) { const wd = mk('button', 'cn-btn', 'توسيع'); wd.type = 'button'; wd.onclick = () => { const on = c.classList.toggle('wide'); wd.textContent = on ? 'تصغير' : 'توسيع'; }; f.appendChild(wd); }
-        c.appendChild(f);
-      } else if (live) { const lv = mk('pre', 'cn-live cn-body', live); c.appendChild(lv); lv.scrollTop = lv.scrollHeight; }
-      else if (['asking', 'starting', 'queued'].includes(state)) { c.appendChild(mk('div', 'cn-skel')); }
-      return c;
+    // ===== عرض الجولة وتحديثها الجزئي =====
+    const secs = t => {
+      const n = Math.max(0, Math.round(t));
+      return n < 60 ? n + ' ث' : Math.floor(n / 60) + ' د ' + (n % 60) + ' ث';
     };
-    const finished = r => ['done', 'stopped'].includes(r.phase);
+    const finished = r => ['done', 'stopped', 'error'].includes(r.phase);
+
     function renderRound(r) {
       let box = boxes[r.id];
-      if (!box) { setFold(true); empty.remove(); box = boxes[r.id] = mk('section', 'cn-round'); thread.appendChild(box); setTimeout(() => box.scrollIntoView({ behavior: 'smooth', block: 'start' }), 50); }
-      box.replaceChildren();
-      const q = mk('div', 'cn-q', r.question); if ((r.attachments || []).length) q.appendChild(mk('div', 'cn-qfiles', '📎 ' + r.attachments.map(a => (a.name || a.path.split('/').pop()) + (a.scanned ? ' (⚠ مصوَّر بلا نص)' : a.text ? ' (✓ استُخرج نصه)' : '')).join('، '))); box.appendChild(q);
-      const st = r.agents || {}; const ev = r.eval || {};
-      { const tot = (r.delegates || []).length, dn = (r.delegates || []).filter(id => ['done', 'done_raw', 'error', 'timeout', 'stopped'].includes((st[id] || {}).state)).length; const judged = !r.main || ['done', 'done_raw'].includes(ev.state); const all = tot + (r.main ? 1 : 0), cur = dn + (r.main && judged ? 1 : 0);
-        if (!finished(r)) { const pg = mk('div'); const t = mk('div', 'cn-prog-t'); t.append(mk('span', '', dn < tot ? `${dn} من ${tot} أجابوا` : (r.main ? 'الحكم يكتب تقييمه…' : 'اكتملت الإجابات')), mk('span', '', Math.round(cur / all * 100) + '%')); const bar = mk('div', 'cn-prog'); const i = mk('i'); i.style.width = Math.round(cur / all * 100) + '%'; bar.appendChild(i); pg.append(t, bar); box.appendChild(pg); } }
-      if (r.main) box.appendChild(card('حكم ' + (ev.name || nameOf(r.main)), r.main, ev.state, ev.answer || ev.error, ev.live, true, ev));
-      const grid = mk('div', 'cn-grid'); (r.delegates || []).forEach(id => { const d = st[id] || {}; grid.appendChild(card(d.name || nameOf(id), id, d.state, d.answer || d.error, d.live, false, d)); }); box.appendChild(grid);
-      const foot = mk('div', 'cn-foot');
-      const anyAns = Object.values(st).some(x => x.answer);
-      if (r.phase === 'refining') { foot.appendChild(mk('span', 'cn-sub', 'زاجل ينتظر ' + (r.pending || 'بعض') + ' وكيل ليحدّث الحكم بإجاباتهم…')); }
-      if (r.main && anyAns && ev.state !== 'done' && ev.state !== 'done_raw' && !finished(r)) { const b = mk('button', 'cn-btn', 'قيّم الآن بما وصل'); b.type = 'button'; b.onclick = async () => { try { await req('council/evaluate', { id: r.id }); poll(); } catch (e) { err(e); } }; foot.appendChild(b); }
-      if (finished(r) && anyAns) { foot.appendChild(mk('span', 'cn-sub', 'حفظ كامل الجلسة:')); [['Word', 'docx'], ['PDF', 'pdf'], ['Markdown', 'md']].forEach(([t, f]) => { const b = mk('button', 'cn-btn', t); b.type = 'button'; b.onclick = async () => { try { const x = await req('council/export', { id: r.id, fmt: f }); b.textContent = '✓ ' + t; foot.querySelector('.cn-sub').textContent = 'حُفظ في: ' + x.path; } catch (e) { err(e); } }; foot.appendChild(b); }); }
-      if (foot.childNodes.length) box.appendChild(foot);
+      if (!box) {
+        empty.remove();
+        box = boxes[r.id] = mk('section', 'cn-round');
+        box.dataset.roundId = r.id;
+        thread.appendChild(box);
+
+        const qEl = mk('div', 'cn-q');
+        box.appendChild(qEl);
+
+        const stagesEl = mk('div', 'stages');
+        box.appendChild(stagesEl);
+
+        const verdictEl = mk('div');
+        verdictEl.hidden = true;
+        box.appendChild(verdictEl);
+
+        const tbarEl = mk('div', 'tbar');
+        tbarEl.innerHTML = '<span>إجابات الوكلاء</span><span class="sp"></span>';
+        const foldAllBtn = mk('button', 'mbtn', 'طيّ الكل');
+        foldAllBtn.type = 'button';
+        foldAllBtn.onclick = () => {
+          const isFold = foldAllBtn.textContent === 'طيّ الكل';
+          box.querySelectorAll('.acard, .verdict').forEach(el => el.classList.toggle('collapsed', isFold));
+          foldAllBtn.textContent = isFold ? 'توسيع الكل' : 'طيّ الكل';
+        };
+        tbarEl.appendChild(foldAllBtn);
+        box.appendChild(tbarEl);
+
+        const cardsEl = mk('div', 'cards');
+        box.appendChild(cardsEl);
+
+        const refiningNoteEl = mk('div', 'cn-sub');
+        refiningNoteEl.style.margin = '4px 0';
+        box.appendChild(refiningNoteEl);
+
+        const footEl = mk('div', 'foot-actions');
+        box.appendChild(footEl);
+
+        box._ui = {
+          qEl,
+          stagesEl,
+          verdictEl,
+          tbarEl,
+          cardsEl,
+          refiningNoteEl,
+          footEl,
+          agentCards: {},
+          lastEvalText: '',
+          activeVerdictTab: 'agree',
+          isVerdictCollapsed: false
+        };
+
+        setTimeout(() => box.scrollIntoView({ behavior: 'smooth', block: 'start' }), 50);
+      }
+
+      const ui = box._ui;
+
+      // 1. السؤال والمرفقات
+      if (!ui.qEl.dataset.rendered) {
+        ui.qEl.textContent = r.question || '';
+        if ((r.attachments || []).length) {
+          const qf = mk('div', 'cn-qfiles', '📎 ' + r.attachments.map(a => (a.name || a.path.split('/').pop()) + (a.scanned ? ' (⚠ مصوَّر بلا نص)' : a.text ? ' (✓ استُخرج نصه)' : '')).join('، '));
+          ui.qEl.appendChild(qf);
+        }
+        ui.qEl.dataset.rendered = '1';
+      }
+
+      // 2. شريط المراحل
+      const hasReview = !!r.review || r.phase === 'review';
+      const hasJudge = !!r.main;
+      const hasVerify = r.verify !== false;
+      const stagesList = [
+        'التحضير',
+        'الإجابات',
+        ...(hasReview ? ['النقد المتبادل'] : []),
+        ...(hasJudge ? ['الحكم'] : []),
+        ...(hasVerify ? ['التحقق'] : []),
+        'الصادر'
+      ];
+
+      let curStage = 0;
+      if (r.phase === 'asking') curStage = 1;
+      else if (r.phase === 'review') curStage = stagesList.indexOf('النقد المتبادل');
+      else if (r.phase === 'evaluating' || r.phase === 'refining') {
+        const evIdx = stagesList.indexOf('الحكم');
+        curStage = evIdx !== -1 ? evIdx : 1;
+      } else if (finished(r)) {
+        curStage = stagesList.length - 1;
+      }
+
+      const stagesHtml = stagesList.map((st, i) => {
+        const isDone = i < curStage;
+        const isCur = i === curStage;
+        const cls = isDone ? 'done' : (isCur ? 'cur' : '');
+        const mark = isDone ? '✓ ' : '';
+        return `<span class="${cls}">${mark}${st}</span>`;
+      }).join('<span class="stages-sep">‹</span>');
+
+      if (ui.stagesEl.innerHTML !== stagesHtml) {
+        ui.stagesEl.innerHTML = stagesHtml;
+      }
+
+      // 3. صندوق الحكم الذهبي
+      const ev = r.eval || {};
+      if (r.main) {
+        ui.verdictEl.hidden = false;
+        const isDoneEval = ['done', 'done_raw'].includes(ev.state) || (ev.answer && finished(r));
+        if (!ev.answer && !isDoneEval) {
+          if (['asking', 'starting', 'evaluating', 'refining'].includes(r.phase) || ['asking', 'starting'].includes(ev.state)) {
+            const textThinking = r.blind ? ' (لا يعرف أسماء أصحاب الإجابات)' : '';
+            const waitHtml = `<div class="verdict"><div class="vh"><span class="av" style="background:var(--gold)">⚖</span><b>الحكم يكتب${textThinking}…</b></div><div class="skel"></div><div class="skel" style="width:60%"></div></div>`;
+            if (ui.verdictEl.dataset.state !== 'wait') {
+              ui.verdictEl.innerHTML = waitHtml;
+              ui.verdictEl.dataset.state = 'wait';
+            }
+          } else {
+            ui.verdictEl.hidden = true;
+          }
+        } else if (ev.answer) {
+          ui.verdictEl.dataset.state = 'ans';
+          if (ui.lastEvalText !== ev.answer) {
+            ui.lastEvalText = ev.answer;
+            const judgeName = ev.name || nameOf(r.main);
+            const parsed = parseVerdict(ev.answer);
+
+            if (parsed) {
+              const vcard = mk('div', 'verdict');
+              if (ui.isVerdictCollapsed) vcard.classList.add('collapsed');
+
+              const vh = mk('div', 'vh fold-h');
+              vh.title = 'اضغط للطيّ أو التوسيع';
+              vh.innerHTML = `<span class="av" style="background:var(--gold);color:#fff">⚖</span><b>الحكم النهائي — ${esc(judgeName)}</b>${parsed.confidence ? `<span class="conf">الثقة: ${esc(parsed.confidence)}</span>` : ''}<span class="chev2">▾</span>`;
+              vh.onclick = () => {
+                ui.isVerdictCollapsed = vcard.classList.toggle('collapsed');
+              };
+              vcard.appendChild(vh);
+
+              if (parsed.summary) {
+                const vsum = mk('div', 'vsum', parsed.summary);
+                vcard.appendChild(vsum);
+              }
+
+              const vbody = mk('div', 'vbody');
+              vbody.appendChild(mdBox(parsed.finalVerdict));
+              vcard.appendChild(vbody);
+
+              const tabDefs = [
+                ['agree', 'الاتفاق', parsed.panes.agree],
+                ['diff', 'الخلاف ومن الأصح', parsed.panes.diff],
+                ['map', 'خريطة الأقوال', parsed.panes.map],
+                ['src', 'المصادر', parsed.panes.src],
+                ['rank', 'الترتيب', parsed.panes.rank]
+              ].filter(t => Boolean(t[2]));
+
+              if (tabDefs.length) {
+                if (!tabDefs.some(t => t[0] === ui.activeVerdictTab)) {
+                  ui.activeVerdictTab = tabDefs[0][0];
+                }
+                const vtabs = mk('div', 'vtabs');
+                const vpane = mk('div', 'vpane');
+
+                const renderPane = tabKey => {
+                  const def = tabDefs.find(t => t[0] === tabKey);
+                  if (!def) return;
+                  vpane.replaceChildren();
+                  if (tabKey === 'map') {
+                    const tbl = formatClaimsTable(def[2]);
+                    if (tbl) vpane.appendChild(tbl);
+                    else vpane.appendChild(mdBox(def[2]));
+                  } else {
+                    vpane.appendChild(mdBox(def[2]));
+                  }
+                };
+
+                tabDefs.forEach(([k, label]) => {
+                  const btn = mk('button', k === ui.activeVerdictTab ? 'on' : '', label);
+                  btn.type = 'button';
+                  btn.dataset.k = k;
+                  btn.onclick = () => {
+                    ui.activeVerdictTab = k;
+                    vtabs.querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.k === k));
+                    renderPane(k);
+                  };
+                  vtabs.appendChild(btn);
+                });
+
+                renderPane(ui.activeVerdictTab);
+                vcard.append(vtabs, vpane);
+              }
+
+              ui.verdictEl.replaceChildren(vcard);
+            } else {
+              const vcard = mk('div', 'verdict');
+              if (ui.isVerdictCollapsed) vcard.classList.add('collapsed');
+              const vh = mk('div', 'vh fold-h');
+              vh.title = 'اضغط للطيّ أو التوسيع';
+              vh.innerHTML = `<span class="av" style="background:var(--gold);color:#fff">⚖</span><b>الحكم — ${esc(judgeName)}</b><span class="chev2">▾</span>`;
+              vh.onclick = () => {
+                ui.isVerdictCollapsed = vcard.classList.toggle('collapsed');
+              };
+              vcard.appendChild(vh);
+              const vbody = mk('div', 'vbody');
+              vbody.appendChild(mdBox(ev.answer));
+              vcard.appendChild(vbody);
+              ui.verdictEl.replaceChildren(vcard);
+            }
+          }
+        }
+      } else {
+        ui.verdictEl.hidden = true;
+      }
+
+      // 4. بطاقات الوكلاء
+      const delegates = r.delegates || [];
+      const letters = r.letters || {};
+      delegates.forEach(id => {
+        const d = (r.agents && r.agents[id]) || {};
+        let card = ui.agentCards[id];
+        if (!card) {
+          card = mk('div', 'acard');
+          card.dataset.agentId = id;
+          card.style.setProperty('--c', colorOf(id));
+
+          const h = mk('div', 'h fold-h');
+          h.title = 'اضغط للطيّ أو التوسيع';
+          const av = mk('span', 'av', (d.name || nameOf(id)).trim().charAt(0).toUpperCase());
+          const nm = mk('b', '', d.name || nameOf(id));
+          const letSpan = mk('span', 'letter');
+          const bd = mk('span', 'bd');
+          const partBadge = mk('span', 'pill p-warn', 'جزئية');
+          partBadge.hidden = true;
+          const chev = mk('span', 'chev2', '▾');
+          h.append(av, nm, letSpan, bd, partBadge, chev);
+          h.onclick = () => card.classList.toggle('collapsed');
+
+          const peek = mk('div', 'peek');
+          const act = mk('div', 'act');
+          const tx = mk('div', 'tx');
+
+          const ft = mk('div', 'ft');
+          const tm = mk('span', 'tm');
+          const toggleRevBtn = mk('button', 'mbtn', 'الأصلية');
+          toggleRevBtn.type = 'button';
+          toggleRevBtn.hidden = true;
+          const cpBtn = mk('button', 'mbtn', 'نسخ');
+          cpBtn.type = 'button';
+          const wideBtn = mk('button', 'mbtn', 'توسيع');
+          wideBtn.type = 'button';
+          ft.append(tm, toggleRevBtn, cpBtn, wideBtn);
+
+          card.append(h, peek, act, tx, ft);
+          ui.cardsEl.appendChild(card);
+
+          card._ui = {
+            h, av, nm, letSpan, bd, partBadge, peek, act, tx, ft, tm, toggleRevBtn, cpBtn, wideBtn,
+            showRevised: true,
+            lastRenderedText: '',
+            lastActivity: '',
+            lastState: ''
+          };
+
+          wideBtn.onclick = () => {
+            const isWide = card.classList.toggle('wide');
+            wideBtn.textContent = isWide ? 'تصغير' : 'توسيع';
+          };
+
+          cpBtn.onclick = () => {
+            const textToCopy = (card._ui.showRevised && d.revised) ? d.revised : (d.answer || d.live || '');
+            if (textToCopy && navigator.clipboard?.writeText) {
+              navigator.clipboard.writeText(textToCopy).then(() => {
+                cpBtn.textContent = 'تم النسخ ✓';
+                setTimeout(() => cpBtn.textContent = 'نسخ', 1500);
+              }).catch(() => {});
+            }
+          };
+
+          toggleRevBtn.onclick = () => {
+            card._ui.showRevised = !card._ui.showRevised;
+            toggleRevBtn.textContent = card._ui.showRevised ? 'الأصلية' : 'المنقّحة';
+            card._ui.lastRenderedText = '';
+            renderCardText();
+          };
+
+          ui.agentCards[id] = card;
+        }
+
+        const cui = card._ui;
+
+        // تحديث الرأس
+        const letter = letters[id] || '';
+        cui.letSpan.textContent = letter ? `(الإجابة ${letter})` : '';
+        if (cui.lastState !== d.state) {
+          cui.lastState = d.state;
+          cui.bd.textContent = councilStateText[d.state] || d.state || 'في الانتظار';
+          cui.bd.style.background = councilStateColor[d.state] || '#737373';
+        }
+        cui.partBadge.hidden = !d.partial;
+
+        // تحديث النشاط
+        if (d.activity && cui.lastActivity !== d.activity) {
+          cui.lastActivity = d.activity;
+          cui.act.innerHTML = '🔧 <span class="tool">' + esc(d.activity) + '</span>';
+        } else if (!d.activity && cui.lastActivity !== (d.state || '')) {
+          cui.lastActivity = d.state || '';
+          if (['done', 'done_raw'].includes(d.state)) {
+            cui.act.innerHTML = '<span class="small muted">✓ اكتملت الإجابة</span>';
+          } else if (d.error) {
+            cui.act.innerHTML = '<span class="cn-err">⚠ ' + esc(d.error) + '</span>';
+          } else if (['asking', 'starting', 'reviewing'].includes(d.state)) {
+            cui.act.innerHTML = '<span class="small muted">⏳ يعمل الآن…</span>';
+          } else {
+            cui.act.textContent = '';
+          }
+        }
+
+        // زر الأصلية / المنقّحة
+        cui.toggleRevBtn.hidden = !(d.answer && d.revised);
+
+        // وقت الاستغراق
+        if (d.sent_at) {
+          cui.tm.textContent = secs(((d.finished_at || Date.now() / 1000) - d.sent_at));
+        } else {
+          cui.tm.textContent = '';
+        }
+
+        // نص الإجابة (مع احترام التحديد النشط)
+        function renderCardText() {
+          const sel = window.getSelection();
+          const hasActiveSelection = sel && !sel.isCollapsed && card.contains(sel.anchorNode);
+          if (hasActiveSelection) return;
+
+          const activeAns = (cui.showRevised && d.revised) ? d.revised : (d.answer || '');
+          if (activeAns) {
+            if (cui.lastRenderedText !== activeAns) {
+              cui.lastRenderedText = activeAns;
+              const st = cui.tx.scrollTop;
+              cui.tx.replaceChildren(mdBox(activeAns));
+              cui.tx.scrollTop = st;
+              const firstLn = activeAns.split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#'))[0] || '';
+              cui.peek.textContent = firstLn.slice(0, 80) + (firstLn.length > 80 ? '…' : '');
+            }
+          } else if (d.live) {
+            if (cui.lastRenderedText !== d.live) {
+              cui.lastRenderedText = d.live;
+              cui.tx.replaceChildren();
+              const pre = mk('pre', 'cn-live', d.live);
+              cui.tx.appendChild(pre);
+              pre.scrollTop = pre.scrollHeight;
+              cui.peek.textContent = d.live.slice(0, 80) + '…';
+            }
+          } else if (['asking', 'starting', 'queued', 'reviewing'].includes(d.state)) {
+            if (cui.lastRenderedText !== '__skel__') {
+              cui.lastRenderedText = '__skel__';
+              cui.tx.innerHTML = '<div class="skel"></div><div class="skel" style="width:70%"></div>';
+            }
+          }
+        }
+        renderCardText();
+      });
+
+      // 5. الملاحظات والتذييل
+      if (r.phase === 'refining') {
+        ui.refiningNoteEl.textContent = 'زاجل ينتظر ' + (r.pending || 'بعض') + ' وكيل ليحدّث الحكم بإجاباتهم…';
+        ui.refiningNoteEl.hidden = false;
+      } else {
+        ui.refiningNoteEl.hidden = true;
+      }
+
+      // أزرار التصدير والتقييم
+      ui.footEl.replaceChildren();
+      const anyAns = Object.values(r.agents || {}).some(x => x.answer);
+      if (r.main && anyAns && !['done', 'done_raw'].includes(ev.state) && !finished(r)) {
+        const evalNowBtn = mk('button', 'mbtn', 'قيّم الآن بما وصل');
+        evalNowBtn.type = 'button';
+        evalNowBtn.onclick = async () => {
+          try {
+            await req('council/evaluate', { id: r.id });
+            poll();
+          } catch (e) {
+            err(e);
+          }
+        };
+        ui.footEl.appendChild(evalNowBtn);
+      }
+
+      if (finished(r) && anyAns) {
+        ui.footEl.appendChild(mk('span', 'small muted', 'حفظ كامل الجلسة:'));
+        [['Word', 'docx'], ['PDF', 'pdf'], ['Markdown', 'md']].forEach(([t, f]) => {
+          const b = mk('button', 'mbtn', t);
+          b.type = 'button';
+          b.onclick = async () => {
+            try {
+              const x = await req('council/export', { id: r.id, fmt: f });
+              b.textContent = '✓ ' + t;
+              if (x.path) {
+                ui.refiningNoteEl.textContent = 'حُفظ في: ' + x.path;
+                ui.refiningNoteEl.hidden = false;
+              }
+            } catch (e) {
+              err(e);
+            }
+          };
+          ui.footEl.appendChild(b);
+        });
+
+        [['إلى تيليجرام', 'telegram'], ['إلى الموقع', 'web']].forEach(([t, target]) => {
+          const b = mk('button', 'mbtn', t);
+          b.type = 'button';
+          b.title = target === 'web' ? 'يرسل النتيجة إلى الرابط الذي ضبطته بأمر cweb في تيليجرام' : 'يرسل الحكم إلى محادثتك في تيليجرام';
+          b.onclick = async () => {
+            try {
+              await req('council/deliver', { id: r.id, target });
+              b.textContent = '✓ ' + t;
+            } catch (e) {
+              err(e);
+            }
+          };
+          ui.footEl.appendChild(b);
+        });
+
+        const followBtn = mk('button', 'mbtn gold', '↳ متابعة على هذا الحكم');
+        followBtn.type = 'button';
+        followBtn.onclick = () => {
+          lastDoneId = r.id;
+          parentId = r.id;
+          sync();
+          ta.focus();
+          followBtn.textContent = '✓ سيُرفق الحكم السابق كاملًا';
+        };
+        ui.footEl.appendChild(followBtn);
+      }
     }
+
     // ===== الاستعلام الدوري =====
     async function poll() {
       if (councilRoot !== host || !host.isConnected || !activeId) return;
-      try { const d = await req('council/status?id=' + encodeURIComponent(activeId)); if (!d.round) return; renderRound(d.round); if (finished(d.round) && !(d.round.pending > 0)) { clearInterval(councilTimer); councilTimer = null; lastDoneId = d.round.id; sync(); } }
-      catch (e) { err(e); }
+      try {
+        const d = await req('council/status?id=' + encodeURIComponent(activeId));
+        if (!d.round) return;
+        renderRound(d.round);
+        if (finished(d.round) && !(d.round.pending > 0)) {
+          clearInterval(councilTimer);
+          councilTimer = null;
+          lastDoneId = d.round.id;
+          sync();
+        }
+      } catch (e) {
+        err(e);
+      }
     }
+
     function sync() {
       const busy = activeId && lastDoneId !== activeId;
-      sendBtn.textContent = busy ? 'إيقاف' : (lastDoneId ? 'متابعة' : 'أرسل'); sendBtn.classList.toggle('stop', !!busy);
+      sendBtn.textContent = busy ? '■ إيقاف' : (lastDoneId ? 'متابعة ⌘↩' : 'أرسل ⌘↩');
+      sendBtn.classList.toggle('stop', !!busy);
       sendBtn.disabled = !busy && (!ta.value.trim() || !selected.size || atts.some(a => a.status === 'up'));
-      newBtn.hidden = !lastDoneId || busy; ctx.textContent = lastDoneId && !busy ? 'متابعة على الجولة السابقة (الوكلاء يتذكرون الحديث)' : '';
+      newBtn.hidden = !lastDoneId || busy;
     }
     ta.addEventListener('input', sync);
-    ta.addEventListener('keydown', ev => { if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) { ev.preventDefault(); if (!sendBtn.disabled && sendBtn.textContent !== 'إيقاف') sendBtn.click(); } });
-    newBtn.onclick = () => { lastDoneId = ''; parentId = ''; sync(); ta.focus(); };
-    sendBtn.onclick = async () => {
-      if (activeId && lastDoneId !== activeId) { try { await req('council/stop', { id: activeId }); poll(); } catch (e) { err(e); } return; }
-      const ids = [...selected].filter(id => available.some(a => a.id === id));
-      if (!ta.value.trim() || !ids.length) { err(new Error('اكتب سؤالًا واختر مفوَّضًا واحدًا على الأقل')); return; }
-      const files = atts.filter(a => a.status === 'ok').map(a => ({ path: a.path, name: a.name, to: a.to }));
-      try {
-        const d = await req('council/send', { ids, text: ta.value, main, evaluate: true, attachments: files, parent: lastDoneId || '', limit: Number(limSel.value), mode: modeSel.value });
-        setFold(true); activeId = d.id; lastDoneId = ''; ta.value = ''; atts = []; renderAtts(); grow(); sync();
-        try { window.ZajelTerminalUI?.showAgents?.(main && !ids.includes(main) ? [...ids, main] : ids); } catch (_) {}
-        clearInterval(councilTimer); councilTimer = setInterval(poll, 1500); poll();
-      } catch (e) { err(e); }
+    ta.addEventListener('keydown', ev => {
+      if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) {
+        ev.preventDefault();
+        if (!sendBtn.disabled) sendBtn.click();
+      }
+    });
+
+    newBtn.onclick = () => {
+      lastDoneId = '';
+      parentId = '';
+      sync();
+      ta.focus();
     };
+
+    sendBtn.onclick = async () => {
+      if (activeId && lastDoneId !== activeId) {
+        try {
+          await req('council/stop', { id: activeId });
+          poll();
+        } catch (e) {
+          err(e);
+        }
+        return;
+      }
+      const ids = [...selected].filter(id => available.some(a => a.id === id));
+      if (!ta.value.trim() || !ids.length) {
+        err(new Error('اكتب سؤالًا واختر مفوَّضًا واحدًا على الأقل'));
+        return;
+      }
+      const files = atts.filter(a => a.status === 'ok').map(a => ({ path: a.path, name: a.name, to: a.to }));
+      const limit = depth === 'fast' ? 180 : (depth === 'bal' ? 300 : 0);
+      const mode = optLive.inp.checked ? 'terminal' : 'direct';
+
+      try {
+        const payload = {
+          ids,
+          text: ta.value,
+          main,
+          evaluate: true,
+          attachments: files,
+          parent: lastDoneId || parentId || '',
+          depth,
+          blind: optBlind.inp.checked,
+          review: optReview.inp.checked,
+          verify: optVerify.inp.checked,
+          mode,
+          limit
+        };
+        const d = await req('council/send', payload);
+        activeId = d.id;
+        lastDoneId = '';
+        ta.value = '';
+        atts = [];
+        renderAtts();
+        grow();
+        sync();
+
+        try {
+          window.ZajelTerminalUI?.showAgents?.(main && !ids.includes(main) ? [...ids, main] : ids);
+        } catch (_) {}
+
+        clearInterval(councilTimer);
+        councilTimer = setInterval(poll, 1500);
+        poll();
+      } catch (e) {
+        err(e);
+      }
+    };
+
     // ===== المجالس السابقة =====
     const loadHistory = async () => {
-      try { const d = await req('council/history'); histSel.replaceChildren(); const o0 = mk('option', '', 'مجالس سابقة…'); o0.value = ''; histSel.appendChild(o0); (d.rounds || []).forEach(r => { const o = mk('option', '', (r.question || 'مجلس').slice(0, 60)); o.value = r.id; histSel.appendChild(o); }); histSel.hidden = !(d.rounds || []).length; } catch (_) { histSel.hidden = true; }
+      try {
+        const d = await req('council/history');
+        histSel.replaceChildren();
+        const o0 = mk('option', '', 'مجالس سابقة ▾');
+        o0.value = '';
+        histSel.appendChild(o0);
+        (d.rounds || []).forEach(r => {
+          const o = mk('option', '', (r.question || 'مجلس').slice(0, 50));
+          o.value = r.id;
+          histSel.appendChild(o);
+        });
+        histSel.hidden = !(d.rounds || []).length;
+      } catch (_) {
+        histSel.hidden = true;
+      }
     };
-    histSel.onchange = async () => { if (!histSel.value) return; activeId = histSel.value; lastDoneId = ''; thread.replaceChildren(); boxes = {}; await poll(); histSel.value = ''; if (!councilTimer) councilTimer = setInterval(poll, 1500); };
-    req('list').then(d => { available = (d.agents || []).filter(a => a.cmd && a.installed === true); selected = new Set([...selected].filter(id => available.some(a => a.id === id))); if (main && !available.some(a => a.id === main)) main = ''; renderRoster(); renderPresets(); renderAtts(); loadHistory(); sync(); }).catch(err);
+
+    histSel.onchange = async () => {
+      if (!histSel.value) return;
+      activeId = histSel.value;
+      lastDoneId = '';
+      thread.replaceChildren();
+      boxes = {};
+      await poll();
+      histSel.value = '';
+      if (!councilTimer) councilTimer = setInterval(poll, 1500);
+    };
+
+    // تهيئة الوكلاء وفحص الجاهزية التلقائي
+    req('list').then(d => {
+      available = (d.agents || []).filter(a => a.cmd && a.installed === true);
+      selected = new Set([...selected].filter(id => available.some(a => a.id === id)));
+      if (main && !available.some(a => a.id === main)) main = '';
+      renderRoster();
+      renderAtts();
+      loadHistory();
+      sync();
+      runCheck(false);
+    }).catch(err);
+
     councilApi = { ask: t => { ta.value = t; sync(); return sendBtn.onclick(); } };
   }
   function unmountCouncil(container){if(councilRoot&&(!container||councilRoot===container||container.contains(councilRoot))){clearInterval(councilTimer);councilTimer=null;councilRoot=null;councilApi=null;councilRoundId='';}}

@@ -685,16 +685,33 @@ def handle(h, method):
         elif path == "/api/term/council/history":
             import terminal
             h.send_json({"rounds": terminal.council_history()})
+        elif path == "/api/term/council/check":
+            import terminal
+            h.send_json(terminal.council_check(query.get("ids", [""])[0], query.get("force", ["0"])[0] in ("1", "true")))
+        elif path == "/api/term/council/agents":
+            import terminal
+            h.send_json(terminal.council_agents())
+        elif path == "/api/term/council/profiles" and method == "GET":
+            import terminal
+            h.send_json(terminal.council_profiles())
         elif path.startswith("/api/term/council/") and method == "POST":
             import terminal
             b = _body(h)
             act = path.rsplit("/", 1)[1]
             if act == "send":
-                h.send_json(terminal.council_start(b.get("ids") or [], b.get("text", ""), str(b.get("main", "")), b.get("evaluate", True), b.get("attachments") or [], str(b.get("parent", "")), int(b.get("limit", 300) or 0), str(b.get("mode", "direct"))))
+                lim = b.get("limit")
+                h.send_json(terminal.council_start(b.get("ids") or [], b.get("text", ""), str(b.get("main", "")), b.get("evaluate", True), b.get("attachments") or [], str(b.get("parent", "")),
+                                                   None if lim is None or lim == "" else int(lim or 0), str(b.get("mode", "direct")), str(b.get("depth", "bal")),
+                                                   bool(b.get("blind", True)), bool(b.get("review", False)), bool(b.get("verify", True))))
+            elif act == "profiles":
+                h.send_json(terminal.council_set_profile(str(b.get("id", "")), b.get("patch") or {}))
             elif act == "stop":
                 h.send_json(terminal.council_stop(str(b.get("id", ""))))
             elif act == "evaluate":
                 h.send_json(terminal.council_evaluate(str(b.get("id", ""))))
+            elif act == "deliver":
+                import telegram_extras
+                h.send_json(telegram_extras.deliver(str(b.get("id", "")), str(b.get("target", "telegram"))))
             elif act == "warm":
                 h.send_json(terminal.warm(b.get("ids") or []))
             elif act == "export":

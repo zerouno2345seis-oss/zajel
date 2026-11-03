@@ -230,7 +230,7 @@ def notify_job(label, state, secs, error="", detail=""):
 
 
 # ================= الاستماع والتوجيه =================
-MAIN_KB = [["الرئيسية", "الأجهزة", "الوكلاء"], ["العمليات", "الأتمتة", "بحث"], ["الذاكرة", "الأوامر", "المساعدة"]]
+MAIN_KB = [["الرئيسية", "الأجهزة", "الوكلاء"], ["المجلس", "الطرفية", "واتساب"], ["العمليات", "الأتمتة", "بحث"], ["الذاكرة", "الأوامر", "المساعدة"], ["المزامنة", "التحديث"]]
 ONESHOT = {"host": ""}
 
 
@@ -252,11 +252,15 @@ def _host_by_button(text):
             return h
     return ""
 BTN = {"الرئيسية": "home", "الأجهزة": "pc", "الوكلاء": "agents", "العمليات": "ops", "الأتمتة": "auto", "بحث": "findhelp",
-       "الذاكرة": "mem", "الأوامر": "cmds", "المهام": "jobs", "المساعدة": "help"}
+       "الذاكرة": "mem", "الأوامر": "cmds", "المهام": "jobs", "المساعدة": "help",
+       "المجلس": "council", "الطرفية": "term", "واتساب": "wa", "المزامنة": "sync", "التحديث": "update"}
 COMMANDS = [("home", "الرئيسية: ملخص الجهاز الحالي"), ("pc", "الأجهزة: بدّل بين الكمبيوترين"), ("agents", "الوكلاء: الحال وتبديل المساعد"),
             ("ops", "العمليات الجارية: إيقاف مؤقت وإلغاء"), ("auto", "الأتمتة: عرض وتشغيل وإيقاف"), ("find", "بحث في كل الأجهزة: /find كلمة"),
             ("space", "المساحة الحرة"), ("jobs", "المهام والموافقات المعلّقة"), ("mem", "الذاكرة"), ("cmds", "الأوامر الجاهزة"),
-            ("new", "محادثة جديدة مع المساعد"), ("chats", "تابع محادثة من زاجل"), ("settings", "الإعدادات"), ("help", "المساعدة")]
+            ("new", "محادثة جديدة مع المساعد"), ("chats", "تابع محادثة من زاجل"), ("settings", "الإعدادات"), ("help", "المساعدة"),
+            ("council", "مجلس الوكلاء: اختيار الفريق وإرسال سؤال: /council سؤال"), ("cres", "نتيجة آخر مجلس"), ("cfollow", "متابعة على آخر حكم: /cfollow سؤال"),
+            ("cstop", "إيقاف المجلس"), ("cweb", "رابط موقع تُرسل إليه النتيجة: /cweb رابط"), ("term", "الطرفية: جلسات الوكلاء"),
+            ("tsend", "إرسال نص لطرفية وكيل: /tsend وكيل نص"), ("sync", "المزامنة بين الجهازين"), ("update", "فحص التحديث وتثبيته"), ("wa", "واتساب: الحال والملخص")]
 HOST = socket.gethostname().split(".")[0]
 FIND = {}
 OPTS = {}          # خيارات الأزرار المقترحة من المساعد: رقم ← نص
@@ -387,9 +391,20 @@ def _on_text(chat, text):
         except ValueError as e:
             send("لم يُنفَّذ: " + str(e), chat)
         return
+    import telegram_extras as X
+    if X.pending_text(chat, text):
+        return
     word = text.split()[0] if text.split() else ""
     name = BTN.get(text) or (word[1:].split("@")[0] if word.startswith("/") else "")
-    if name in ("home", "agents", "mem", "cmds", "jobs", "help", "chats", "settings", "ops", "auto", "space", "pc", "findhelp"):
+    if not name and word == "مجلس" and len(text.split()) > 1:
+        name = "council"
+    if name in ("cweb", "cstop", "cres", "cfollow", "tsend") and X.on_special(chat, name, text):
+        return
+    if name in X.NAMES and X.on_command(chat, name, text):
+        return
+    if name in X.NAMES:
+        _show(chat, name)
+    elif name in ("home", "agents", "mem", "cmds", "jobs", "help", "chats", "settings", "ops", "auto", "space", "pc", "findhelp"):
         _show(chat, name)
     elif name == "find":
         _find(chat, text.split(None, 1)[1] if len(text.split(None, 1)) > 1 else "")
@@ -582,6 +597,10 @@ def _pending_loop():
 def _on_callback(chat, mid, data):
     import agent_server
     kind, _, rest = data.partition(":")
+    if kind in ("cg", "cr", "tm", "sy", "up", "wa"):
+        import telegram_extras as X
+        X.on_callback(chat, mid, kind, rest)
+        return
     if kind == "ans":
         txt = OPTS.get(rest)
         if txt:
@@ -698,7 +717,8 @@ def _screen(name):
         pend = len(agent_server.pending_list())
         return (f"زاجل {_version()} على {HOST}\nالمساعد: {agent_runner.AGENTS[agent_runner.settings()['default_agent']]['name']}\nالوكلاء العاملون: {up} من {len(ag)}\nطلبات تنتظر موافقتك: {pend}\nالمحادثة: {_cfg()['conv']}",
                 [[_b("الأجهزة", "scr:pc"), _b("الوكلاء", "scr:agents")], [_b("العمليات", "scr:ops"), _b("الأتمتة", "scr:auto")], [_b("المساحة", "scr:space"), _b("الذاكرة", "scr:mem")],
-                 [_b("المهام", "scr:jobs"), _b("الأوامر", "scr:cmds")], [_b("المحادثات", "scr:chats"), _b("الإعدادات", "scr:settings")]])
+                 [_b("المهام", "scr:jobs"), _b("الأوامر", "scr:cmds")], [_b("المجلس", "scr:council"), _b("الطرفية", "scr:term")],
+                 [_b("واتساب", "scr:wa"), _b("التحديث", "scr:update")], [_b("المحادثات", "scr:chats"), _b("الإعدادات", "scr:settings")]])
     if name == "agents":
         names = {a["id"]: a["name"] for a in agent_runner.agents()}
         s = agent_metrics.stats(24, {a["id"]: a["installed"] for a in agent_runner.agents()}, list(names))
@@ -749,6 +769,10 @@ def _human(n):
 def _screen_more(name):
     """شاشات إضافية: الأجهزة، العمليات، الأتمتة، المساحة، تعليمات البحث."""
     import agent_server
+    import telegram_extras as X
+    extra = X.screen(name)
+    if extra:
+        return extra
     back = [[_b("رجوع", "scr:home")]]
     if name == "ops":
         ops = (agent_server.call("list_ops", {}, agent="telegram").get("result") or {}).get("ops", [])

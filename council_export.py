@@ -12,17 +12,73 @@ EXTRA_SCRIPTS = Path.home() / ".opencode" / "scripts"
 OUT_DIR = Path.home() / "Downloads"
 
 
+VERDICT_HEADS = ["الخلاصة", "الاتفاق", "الاختلاف ومن الأصح", "خريطة الأقوال", "المصادر", "الترتيب", "الحكم النهائي"]
+DEPTH_NAMES = {"fast": "سريع", "bal": "متوازن", "deep": "عميق"}
+
+
+def _demote(text, base):
+    """يخفض عناوين نص الوكيل حتى لا تتجاوز مستوى base (أعلى عنوان فيه يصير base)."""
+    levels = [len(m) for m in re.findall(r"^(#{1,6})\s", text or "", re.M)]
+    if not levels:
+        return (text or "").strip()
+    shift = max(0, base - min(levels))
+    return re.sub(r"^(#{1,6})(\s)", lambda m: "#" * min(6, len(m.group(1)) + shift) + m.group(2), text.strip(), flags=re.M)
+
+
+def _sections(text):
+    """أقسام الحكم بعناوينها المعتمدة (عنوان ← نص)، أو {} إن لم تُوجد أو بقي نص خارجها (فلا يضيع شيء)."""
+    out, cur, lost = {}, None, False
+    for ln in (text or "").splitlines():
+        m = re.match(r"^#{1,3}\s*\**(.+?)\**\s*$", ln)
+        h = m and next((x for x in VERDICT_HEADS if m.group(1).strip().startswith(x)), None)
+        if h:
+            cur = h
+            out[cur] = []
+        elif re.match(r"^#{1,2}\s", ln):
+            cur, lost = None, True
+        elif cur:
+            out[cur].append(ln)
+        elif ln.strip():
+            lost = True
+    return {} if lost else {k: "\n".join(v).strip() for k, v in out.items()}
+
+
 def to_markdown(rd, names):
-    """نص Markdown للجولة: السؤال ← حكم الرئيسي ← إجابة كل وكيل كاملة."""
+    """نص Markdown للجولة: السؤال والخيارات ← حكم الرئيسي بأقسامه ← إجابة كل وكيل كاملة (والمنقّحة)."""
     when = time.strftime("%Y-%m-%d %H:%M", time.localtime(rd.get("created") or time.time()))
-    out = ["# مجلس الوكلاء", "", f"**التاريخ:** {when}", "", "## السؤال", "", rd["question"].strip(), ""]
+    letters = rd.get("letters") or {}
+    yes = lambda k, d: "نعم" if rd.get(k, d) else "لا"
+    opts = (f"**العمق:** {DEPTH_NAMES.get(rd.get('depth'), rd.get('depth') or 'متوازن')} · **مُعمّى:** {yes('blind', True)} · "
+            f"**نقد متبادل:** {yes('review', False)} · **تحقق:** {yes('verify', True)} · "
+            f"**التنفيذ:** {'عبر الطرفيات' if rd.get('mode') == 'terminal' else 'مباشر'}")
+    out = ["# مجلس الوكلاء", "", f"**التاريخ:** {when}", "", opts, ""]
+    if letters:
+        out += ["**الحروف:** " + "، ".join(f"{letters[i]} = {names.get(i, i)}" for i in sorted(letters, key=lambda k: letters[k])), ""]
+    out += ["## السؤال", "", rd["question"].strip(), ""]
     ev = rd.get("eval") or {}
     if rd.get("main") and ev.get("answer"):
-        out += [f"## حكم الوكيل الرئيسي ({names.get(rd['main'], rd['main'])})", "", ev["answer"].strip(), ""]
+        out += [f"## حكم الوكيل الرئيسي ({names.get(rd['main'], rd['main'])})", ""]
+        if ev.get("note"):
+            out += [f"_{ev['note']}_", ""]
+        secs = _sections(ev["answer"])
+        if secs:
+            for h in VERDICT_HEADS:
+                if secs.get(h):
+                    out += [f"### {h}", "", secs[h], ""]
+        else:
+            out += [_demote(ev["answer"], 3), ""]
     out += ["## الإجابات كاملة", ""]
     for i in rd["delegates"]:
         e = rd["agents"].get(i, {})
-        out += [f"### {names.get(i, i)}", "", (e.get("answer") or "").strip() or f"_لم تصل إجابة ({e.get('state')})_", ""]
+        tag = (f"الإجابة {letters[i]} — " if i in letters else "") + names.get(i, i) + (f" ({e['model']})" if e.get("model") else "")
+        if e.get("partial"):
+            tag += " — جزئية"
+        out += [f"### {tag}", ""]
+        body = _demote(e.get("answer") or "", 5) or f"_لم تصل إجابة ({e.get('state')})_"
+        if e.get("revised"):
+            out += ["#### الإجابة المنقّحة بعد النقد المتبادل", "", _demote(e["revised"], 5), "", "#### الإجابة الأولى", "", body, ""]
+        else:
+            out += [body, ""]
     return "\n".join(out)
 
 
@@ -35,7 +91,7 @@ def _inline(s):
 def to_html(md):
     body, lst = [], False
     for ln in md.splitlines():
-        m = re.match(r"^(#{1,4})\s+(.*)", ln)
+        m = re.match(r"^(#{1,6})\s+(.*)", ln)
         b = re.match(r"^\s*[-*•]\s+(.*)", ln) or re.match(r"^\s*\d+[.)]\s+(.*)", ln)
         if lst and not b:
             body.append("</ul>"); lst = False
