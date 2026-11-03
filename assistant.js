@@ -6359,10 +6359,20 @@
       [['counts', 'الإحصاء في العنوان (عدد الرسائل والمحادثات)'], ['top', 'أهم الرسائل'], ['pending', 'من ينتظر ردّك'], ['busiest', 'أنشط المحادثات'], ['media', 'ما وصلك من صوتيات وصور']].forEach(([k, label]) => {
         waBody.appendChild(waCheck(label, sec[k], (v) => waSave({ sections: { [k]: v } })));
       });
+      waBody.appendChild(h('التلخيص الذكي (اختياري)'));
+      waBody.appendChild(waCheck('لخّص التقرير بالذكاء الاصطناعي: أهم ما وصلك وسبب أهميته واقتراح ردود', waState.ai, (v) => waSave({ ai: v })));
+      const aiWarn = el('div', 'تنبيه: مقتطفات أهم الرسائل (بعد استبعاد ما تحدده أدناه وإخفاء الأرقام الطويلة) تُرسل إلى النموذج الذي تختاره. الحالات والقنوات لا تُرسل أبدًا، ولا يملك النموذج أي أداة. وإن فشل التلخيص يصلك التقرير العادي.');
+      aiWarn.style.cssText = 'font-size:.88em;opacity:.85';
+      waBody.appendChild(aiWarn);
+      waBody.appendChild(waRow('المصدر', waSelect(waState.ai_agent || 'agy', [['agy', 'Antigravity (حساب Google)'], ['claude', 'Claude Haiku']], (v) => waSave({ ai_agent: v }))));
+      waBody.appendChild(el('div', 'لا يُرسل عنهم أو عنها شيء إلى النموذج (أسماء أو كلمات):'));
+      waBody.appendChild(waText((waState.ai_exclude || []).join('، '), 'مثل: العائلة، البنك', (v) => waSave({ ai_exclude: v })));
+      waBody.appendChild(waRow('أقصى عدد رسائل تُلخَّص', waNumber(waState.ai_max ?? 20, 5, 40, (v) => waSave({ ai_max: v }))));
+      waBody.appendChild(waCheck('اقترح ردودًا (لا تُرسل أبدًا إلا بموافقتك)', waState.ai_reply, (v) => waSave({ ai_reply: v })));
       const preview = el('pre', '');
       preview.style.cssText = 'white-space:pre-wrap;margin:0;padding:8px;border:1px dashed var(--line);border-radius:7px;display:none;max-height:240px;overflow:auto';
       waBody.appendChild(telegramButton('معاينة التقرير الآن', async () => {
-        waCard.status.textContent = 'جارٍ بناء المعاينة…';
+        waCard.status.textContent = waState.ai ? 'جارٍ التلخيص الذكي… قد يستغرق دقيقة أو أكثر.' : 'جارٍ بناء المعاينة…';
         const r = await api('/api/assistant/whatsapp/preview', {});
         preview.textContent = r.text || ''; preview.style.display = 'block';
         waCard.status.textContent = 'هذه معاينة ولم تُرسل.';

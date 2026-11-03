@@ -818,7 +818,7 @@ def organize(cid="", force=False):
             model = settings()["models"].get("agy") or AGENTS["agy"]["default_model"]
             work_dir = DATA / "assistant_work" / "learn"
             work_dir.mkdir(parents=True, exist_ok=True)
-            deny = {"permissions": {"deny": ["command(*)", "write_file(*)", f"read_file({DATA})"]}}
+            deny = {"permissions": {"deny": ["command(*)", "write_file(*)", f"read_file({DATA})"] + (["mcp(zajel/*)", f"view_file({DATA})"] if locked else [])}}
             env = {"PATH": _env_path(), "HOME": str(Path.home()), "LANG": "en_US.UTF-8", "USER": os.environ.get("USER", ""), "TMPDIR": os.environ.get("TMPDIR", "/tmp")}
             r = subprocess.run([agy, "-p", _learn_prompt(cid), "--model", model, "--mode", "plan", "--print-timeout", "3m",
                                 "--settings", json.dumps(deny)], cwd=str(work_dir), env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=200)
@@ -1013,7 +1013,8 @@ def improve_start(text):
 AGENT_LABEL = {"claude": "Claude Haiku", "agy": "Antigravity"}
 
 
-def _oneshot(agent, prompt, sub):
+def _oneshot(agent, prompt, sub, locked=False):
+    """locked=True: بلا أي أداة ولا خادم MCP (لنصوص غير موثوقة مثل رسائل واردة)."""
     work_dir = DATA / "assistant_work" / sub
     work_dir.mkdir(parents=True, exist_ok=True)
     env = {"PATH": _env_path(), "HOME": str(Path.home()), "LANG": "en_US.UTF-8", "USER": os.environ.get("USER", ""), "TMPDIR": os.environ.get("TMPDIR", "/tmp")}
@@ -1023,6 +1024,8 @@ def _oneshot(agent, prompt, sub):
         cmd = [_which("agy"), "-p", prompt, "--model", model, "--mode", "plan", "--print-timeout", "4m", "--settings", json.dumps(deny)]
     else:
         cmd = [_which("claude"), "-p", prompt, "--model", "haiku", "--tools", ""]
+        if locked:
+            cmd += ["--mcp-config", '{"mcpServers":{}}', "--strict-mcp-config"]
     r = subprocess.run(cmd, cwd=str(work_dir), env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=270)
     return r.stdout, r.stderr
 

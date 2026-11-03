@@ -1340,7 +1340,9 @@ def t_whatsapp_watch_status(a, H):
        "quiet_from": N("بداية ساعات الهدوء (٠–٢٣)"), "quiet_to": N("نهايتها"), "digest": B("التقرير الصباحي"), "digest_hour": N("ساعة التقرير (٠–٢٣)"),
        "digest_minute": N("دقيقة التقرير (٠–٥٩)"), "digest_days": S("all كل يوم أو weekdays أيام العمل"), "window_hours": N("الفترة بالساعات"),
        "format": S("detailed أو compact أو names"), "max_top": N("عدد أهم الرسائل"), "body_chars": N("طول مقتطف الرسالة"), "title": S("عنوان التقرير"),
-       "sections": {"type": "object", "description": "مثل {\"media\": true, \"busiest\": false}"}}, [], YELLOW)
+       "sections": {"type": "object", "description": "مثل {\"media\": true, \"busiest\": false}"},
+       "ai": B("التلخيص الذكي للتقرير (يرسل مقتطفات إلى نموذج؛ مغلق افتراضيًا ولا تفعّله إلا بطلب المستخدم الصريح)"), "ai_agent": S("agy أو claude"),
+       "ai_exclude": L("أسماء أو كلمات لا يُرسل عنها شيء إلى النموذج"), "ai_max": N("أقصى عدد رسائل تُلخَّص"), "ai_reply": B("اقتراح ردود (لا تُرسل)")}, [], YELLOW)
 def t_whatsapp_watch_config(a, H):
     import whatsapp_watch
     return whatsapp_watch.configure(a)
