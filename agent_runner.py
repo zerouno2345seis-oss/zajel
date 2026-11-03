@@ -31,7 +31,7 @@ EFFORTS = ("low", "medium", "high", "xhigh", "max")
 AGENTS = {
     "agy": {"name": "Antigravity", "bin": "agy", "default": True, "default_model": "gemini-3.8-flash-low",
             "billing": "حساب Google المسجّل في Antigravity", "note": "الأساسي: سريع (نحو ١٥ ثانية للطلب)"},
-    "codex": {"name": "Codex", "bin": "codex", "default_model": "gpt-6.1-terra", "efforts": True,
+    "codex": {"name": "Codex", "bin": "codex", "default_model": "", "efforts": True,
               "billing": "اشتراك ChatGPT المسجّل في Codex", "note": "قد يتوقف عند نفاد حصة الاشتراك"},
     "claude": {"name": "Claude", "bin": "claude", "default_model": "haiku", "efforts": True,
                "billing": "حساب Claude المسجّل في الطرفية", "note": "يحتاج تسجيل دخول مرة واحدة في الطرفية"},
@@ -85,8 +85,30 @@ def init(data_dir, port):
     telegram_link.init(data_dir)
 
 
+_LOGIN_PATH = None
+
+
+def _login_path():
+    """مسارات الطرفية نفسها (zsh بإعداداته): ما يعمل في Terminal يعمل في زاجل. تُقرأ مرة وتُحفظ؛ تُستبعد مسارات fnm المؤقتة."""
+    global _LOGIN_PATH
+    if _LOGIN_PATH is None:
+        try:
+            out = subprocess.run(["/bin/zsh", "-lic", "print -r -- $PATH"], capture_output=True, text=True, timeout=8, stdin=subprocess.DEVNULL).stdout.strip().splitlines()
+            _LOGIN_PATH = [p for p in (out[-1] if out else "").split(":") if p and "fnm_multishells" not in p]
+        except Exception:
+            _LOGIN_PATH = []
+    return _LOGIN_PATH
+
+
 def _env_path():
-    return os.pathsep.join(EXTRA_PATH + [p for p in os.environ.get("PATH", "").split(os.pathsep) if p])
+    home = Path.home()
+    extra = [str(home / ".local/share/fnm/aliases/default/bin"), str(home / "Library/Application Support/fnm/aliases/default/bin"),
+             str(home / ".hermes/node/bin"), str(home / ".npm-global/bin"), str(home / ".bun/bin"), str(home / ".volta/bin")]
+    seen = []
+    for p in EXTRA_PATH + extra + _login_path() + [p for p in os.environ.get("PATH", "").split(os.pathsep) if p]:
+        if p not in seen:
+            seen.append(p)
+    return os.pathsep.join(seen)
 
 
 def _which(name):
@@ -313,10 +335,11 @@ def _codex_cmd(prompt, conv, work, model, effort):
            "-c", "mcp_servers.zajel.env=" + '{PB_DATA=%s,ZAJEL_AGENT="codex"}' % json.dumps(str(DATA))]
     if effort:
         cfg += ["-c", "model_reasoning_effort=" + json.dumps(effort)]
+    mdl = ["-m", model] if model else []          # بلا نموذج: يختار Codex نموذج الحساب (بعض النماذج لا تعمل مع حساب ChatGPT)
     if conv.get("session"):
-        cmd = [_which("codex"), "exec", "resume", conv["session"], "--json", "-m", model, "--skip-git-repo-check"] + cfg + [prompt]
+        cmd = [_which("codex"), "exec", "resume", conv["session"], "--json"] + mdl + ["--skip-git-repo-check"] + cfg + [prompt]
     else:
-        cmd = [_which("codex"), "exec", "--json", "-m", model, "-s", "read-only", "--skip-git-repo-check", "-C", str(work)] + cfg + [prompt]
+        cmd = [_which("codex"), "exec", "--json"] + mdl + ["-s", "read-only", "--skip-git-repo-check", "-C", str(work)] + cfg + [prompt]
     return cmd, {}, "codex"
 
 
@@ -394,6 +417,8 @@ def friendly(msg):
         return "نفدت حصة هذا المصدر مؤقتًا؛ اختر مصدرًا آخر من القائمة أو انتظر تجدّدها."
     if "not logged in" in m or "/login" in m or "unauthorized" in m or "401" in m:
         return "هذا المصدر غير مسجَّل الدخول على جهازك. افتح تطبيق «الطرفية» واكتب اسمه (مثل claude) ثم أمر الدخول /login مرة واحدة، أو اختر مصدرًا آخر من الإعدادات."
+    if "model_not_found" in m or ("model" in m and "not supported" in m) or "unknown model" in m:
+        return "النموذج المختار لهذا الوكيل غير متاح لحسابك. اختر نموذجًا آخر له من إعدادات المساعد، أو امسح اسم النموذج ليستعمل الافتراضي."
     if "expired" in m:
         return "مفتاح هذا المصدر منتهٍ؛ أنشئ مفتاحًا جديدًا من حسابك."
     if "no output produced" in m and "permission" in m:
@@ -573,7 +598,7 @@ def start_chat(agent_id, text, context, conv_id, model="", _auto=False, attachme
         raise ValueError("هذا الوكيل غير مثبّت على الجهاز.")
     s = settings()
     model = (model or s["models"].get(agent_id) or spec["default_model"]).strip()
-    if not MODEL_RE.match(model):
+    if model and not MODEL_RE.match(model):
         raise ValueError("معرّف النموذج غير صالح.")
     effort = s["efforts"].get(agent_id, "") if spec.get("efforts") else ""
     import assistant_store
@@ -699,7 +724,7 @@ def _run(job, conv, cmd, env, work, parser):
                 if job.get("agent_error"):
                     job["text"] = ""
                 tail = " ".join(l.strip() for l in err)[-300:]
-                job["error"] = job.get("agent_error") or friendly(("الوكيل لم يعد بردّ. " if p.returncode == 0 else f"انتهى الوكيل بخطأ ({p.returncode}). ") + tail)
+                job["error"] = friendly(job["agent_error"]) if job.get("agent_error") else friendly(("الوكيل لم يعد بردّ. " if p.returncode == 0 else f"انتهى الوكيل بخطأ ({p.returncode}). ") + tail)
     except Exception as exc:
         job["state"] = "error"
         job["error"] = str(exc)
