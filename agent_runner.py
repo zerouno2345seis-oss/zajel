@@ -86,6 +86,8 @@ def init(data_dir, port):
     telegram_link.init(data_dir)
     import whatsapp_watch
     whatsapp_watch.init(data_dir)
+    import terminal
+    terminal.init(data_dir)
 
 
 _LOGIN_PATH = None

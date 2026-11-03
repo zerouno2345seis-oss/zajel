@@ -679,6 +679,30 @@ def handle(h, method):
             b = _body(h); S.chat_rename(str(b.get("id", "")), b.get("title")); h.send_json({"chats": S.chats_list()})
         elif path == "/api/assistant/chat/delete" and method == "POST":
             S.chat_delete(str(_body(h).get("id", ""))); h.send_json({"chats": S.chats_list()})
+        elif path == "/api/term/list":
+            import terminal
+            h.send_json(terminal.listing())
+        elif path == "/api/term/screen":
+            import terminal
+            h.send_json(terminal.screen(query.get("id", [""])[0], query.get("since", [""])[0], int(query.get("hist", ["0"])[0] or 0)))
+        elif path.startswith("/api/term/") and method == "POST":
+            import terminal
+            b = _body(h)
+            i, act = str(b.get("id", "")), path.rsplit("/", 1)[1]
+            if act == "start":
+                h.send_json(terminal.start(i, str(b.get("cwd", ""))))
+            elif act == "stop":
+                h.send_json(terminal.stop(i))
+            elif act == "restart":
+                h.send_json(terminal.restart(i))
+            elif act == "send":
+                h.send_json(terminal.send(i, str(b.get("text", "")), b.get("keys") or [], bool(b.get("paste"))))
+            elif act == "resize":
+                h.send_json(terminal.resize(i, b.get("cols", 100), b.get("rows", 30)))
+            elif act == "notify":
+                h.send_json(terminal.set_notify(b.get("on")))
+            else:
+                h.send_json({"error": "غير موجود."}, 404)
         elif path == "/api/assistant/whatsapp/status":
             import whatsapp_watch
             h.send_json(whatsapp_watch.status())
