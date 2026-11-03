@@ -136,8 +136,8 @@ def _git_time(repo, rel):
         return 0.0
 
 
-def sync_run():
-    import assistant_store as S
+def ensure_repo():
+    """يجهّز النسخة المحلية من مستودع المزامنة الخاص (ينشئه إن لم يوجد) ويعيد مساره."""
     if not sync_status()["gh_ready"]:
         raise ValueError("سجّل الدخول إلى GitHub في الطرفية أولًا: gh auth login")
     owner = _run(["gh", "api", "user", "-q", ".login"], timeout=20).stdout.strip()
@@ -152,6 +152,12 @@ def sync_run():
                 raise ValueError("تعذّر إنشاء مستودع المزامنة الخاص: " + c.stderr.strip()[:120])
             if _run(["gh", "repo", "clone", full, str(repo)], timeout=90).returncode != 0:
                 raise ValueError("تعذّر نسخ مستودع المزامنة.")
+    return repo
+
+
+def sync_run():
+    import assistant_store as S
+    repo = ensure_repo()
     _run(["git", "pull", "--rebase", "--quiet"], cwd=repo, timeout=60)
     # الذاكرة: دمج بحسب الأحدث تحديثًا
     rm = repo / "assistant_memory.md"
