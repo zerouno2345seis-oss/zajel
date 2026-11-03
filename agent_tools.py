@@ -1165,3 +1165,69 @@ def t_send_to_telegram(a, H):
     if not p.is_file():
         raise ValueError("ليس ملفًا أو غير موجود.")
     return telegram_link.send_file(p, a.get("caption") or "")
+
+
+# ---------- واتساب (جسر MCP محلي): القراءة خضراء، والإرسال أحمر بموافقتك ----------
+def _wa_clamp(a, key, default, top):
+    try:
+        return max(1, min(int(a.get(key) or default), top))
+    except (TypeError, ValueError):
+        return default
+
+
+@tool("whatsapp_status", "هل جسر واتساب متصل بحسابك؟ وما الحساب المقترن.", {}, [], GREEN)
+def t_whatsapp_status(a, H):
+    import whatsapp_link
+    return {"result": whatsapp_link.call("get_status")}
+
+
+@tool("whatsapp_list_chats", "قائمة محادثات واتساب المحفوظة (بحث بالاسم أو الرقم اختياري، الأحدث أولًا).",
+      {"query": S("اسم أو رقم للبحث (اختياري)"), "limit": N("العدد (الأقصى 30)")}, [], GREEN)
+def t_whatsapp_list_chats(a, H):
+    import whatsapp_link
+    args = {"limit": _wa_clamp(a, "limit", 15, 30), "include_last_message": True}
+    if a.get("query"):
+        args["query"] = str(a["query"])
+    return {"result": whatsapp_link.call("list_chats", args)}
+
+
+@tool("whatsapp_list_messages", "رسائل محادثة واتساب أو بحث في الرسائل بنص. حدّد chat_jid من whatsapp_list_chats للمحادثة المعيّنة.",
+      {"chat_jid": S("معرّف المحادثة من whatsapp_list_chats (اختياري)"), "query": S("نص للبحث داخل الرسائل (اختياري)"),
+       "after": S("من تاريخ ISO مثل 2026-11-01 (اختياري)"), "before": S("حتى تاريخ ISO (اختياري)"), "limit": N("العدد (الأقصى 50)")}, [], GREEN)
+def t_whatsapp_list_messages(a, H):
+    import whatsapp_link
+    args = {"limit": _wa_clamp(a, "limit", 20, 50)}
+    for k in ("chat_jid", "query", "after", "before"):
+        if a.get(k):
+            args[k] = str(a[k])
+    return {"result": whatsapp_link.call("list_messages", args)}
+
+
+@tool("whatsapp_search_contacts", "ابحث عن جهة اتصال في واتساب بالاسم أو الرقم.", {"query": S("الاسم أو الرقم")}, ["query"], GREEN)
+def t_whatsapp_search_contacts(a, H):
+    import whatsapp_link
+    return {"result": whatsapp_link.call("search_contacts", {"query": str(a["query"])})}
+
+
+@tool("whatsapp_list_groups", "قائمة مجموعات واتساب التي أنت عضو فيها.", {}, [], GREEN)
+def t_whatsapp_list_groups(a, H):
+    import whatsapp_link
+    return {"result": whatsapp_link.call("list_groups")}
+
+
+@tool("whatsapp_send_message", "أرسل رسالة نصية في واتساب إلى شخص أو مجموعة. تنتظر موافقة المستخدم من نافذة زاجل ولا تُرسل قبلها.",
+      {"recipient": S("رقم الهاتف بصيغة دولية بلا + (مثل 5491123151983) أو معرّف المحادثة"), "message": S("نص الرسالة")}, ["recipient", "message"], RED)
+def t_whatsapp_send_message(a, H):
+    import whatsapp_link
+    return {"result": whatsapp_link.call("send_message", {"recipient": str(a["recipient"]), "message": str(a["message"])})}
+
+
+@tool("whatsapp_send_reply", "ردّ في واتساب على رسالة بعينها مع اقتباسها. تنتظر موافقة المستخدم من نافذة زاجل.",
+      {"chat_jid": S("معرّف المحادثة"), "target_message_id": S("معرّف الرسالة المردود عليها من whatsapp_list_messages"), "body": S("نص الردّ"),
+       "target_sender_jid": S("معرّف مرسل الرسالة (اختياري)")}, ["chat_jid", "target_message_id", "body"], RED)
+def t_whatsapp_send_reply(a, H):
+    import whatsapp_link
+    args = {k: str(a[k]) for k in ("chat_jid", "target_message_id", "body") if a.get(k)}
+    if a.get("target_sender_jid"):
+        args["target_sender_jid"] = str(a["target_sender_jid"])
+    return {"result": whatsapp_link.call("send_reply", args)}
