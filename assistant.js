@@ -6230,19 +6230,16 @@
         return;
       }
       if (!telegramStatus.paired) {
-        telegramCard.status.textContent = 'حُفظ المفتاح. يلزم إقران هذا الجهاز.';
-        const pair = telegramButton('ولّد رمز الاقتران', async () => {
-          const next = await api('/api/assistant/telegram/pair', {});
-          renderTelegram(next);
-        }, 'btn pri');
-        telegramBody.appendChild(pair);
-        if (telegramStatus.pair_code) {
-          const code = el('code', String(telegramStatus.pair_code));
-          code.style.cssText = 'display:block;padding:12px;text-align:center;font-size:1.5em;border-radius:8px;background:var(--side);color:var(--ink);user-select:all;cursor:pointer';
-          code.title = 'اضغط لنسخ الرمز';
-          code.onclick = async () => { try { await navigator.clipboard.writeText(String(telegramStatus.pair_code)); } catch (_) {} };
-          telegramBody.append(code, el('div', 'أرسل للبوت: /start ' + String(telegramStatus.pair_code)));
+        telegramCard.status.textContent = 'حُفظ المفتاح. بقيت ضغطة واحدة في Telegram.';
+        telegramBody.appendChild(el('div', 'اضغط الزر أدناه، فيفتح Telegram على بوتك. اضغط فيه «Start» (أو «ابدأ») وسيرتبط هذا الجهاز تلقائيًا.'));
+        if (telegramStatus.pair_link) {
+          const open = el('a', 'افتح Telegram واضغط Start', 'btn pri');
+          open.href = telegramStatus.pair_link; open.target = '_blank'; open.rel = 'noopener';
+          open.style.cssText = 'display:block;text-align:center;text-decoration:none;margin:8px 0';
+          telegramBody.appendChild(open);
+          telegramBody.appendChild(el('div', 'أو أرسل للبوت يدويًا: /start ' + String(telegramStatus.pair_code)));
         }
+        telegramBody.appendChild(telegramButton('رمز اقتران جديد', async () => renderTelegram(await api('/api/assistant/telegram/pair', {}))));
         if (!telegramPoll) telegramPoll = setInterval(async () => {
           try { renderTelegram(await api('/api/assistant/telegram/status')); }
           catch (err) { telegramError(err); }

@@ -57,7 +57,9 @@ def set_token(tok):
     me = _api(tok, "getMe", {}, timeout=15)           # تحقق قبل الحفظ
     subprocess.run(["security", "add-generic-password", "-a", "zajel", "-s", SERVICE, "-w", tok, "-U"], capture_output=True, stdin=subprocess.DEVNULL, check=True)
     STATE["bot"] = me.get("username", "")
-    _save_cfg({"bot": STATE["bot"]})
+    _save_cfg({"bot": STATE["bot"], "enabled": True, "chat_id": 0})
+    new_pair_code()                       # الاقتران تلقائي: رابط واحد يضغطه المستخدم في تيليجرام
+    start()
     return STATE["bot"]
 
 
@@ -90,9 +92,12 @@ class ConflictError(Exception):
 
 def status():
     c = _cfg()
-    return {"has_token": bool(_token()) if DATA else False, "enabled": c["enabled"], "bot": c.get("bot", ""), "paired": bool(c["chat_id"]), "machine": socket.gethostname().split(".")[0],
+    if DATA and c["enabled"] and not c["chat_id"] and STATE["pair_until"] <= time.time() and _token():
+        new_pair_code(); start()          # مفتاح محفوظ بلا اقتران (مثلًا بعد إعادة التشغيل): نجهّز رمزًا جديدًا
+    live = STATE["pair_until"] > time.time()
+    return {"pair_link": f"https://t.me/{c.get('bot')}?start={STATE['pair_code']}" if live and c.get("bot") else "", **{"has_token": bool(_token()) if DATA else False, "enabled": c["enabled"], "bot": c.get("bot", ""), "paired": bool(c["chat_id"]), "machine": socket.gethostname().split(".")[0],
             "gateway": STATE["gateway"], "running": STATE["running"], "error": STATE["error"],
-            "pair_code": STATE["pair_code"] if STATE["pair_until"] > time.time() else "", "notify_error": c["notify_error"], "notify_long": c["notify_long"], "notify_update": c["notify_update"]}
+            "pair_code": STATE["pair_code"] if live else "", "notify_error": c["notify_error"], "notify_long": c["notify_long"], "notify_update": c["notify_update"]}}
 
 
 def configure(b):
