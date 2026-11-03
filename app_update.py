@@ -43,14 +43,27 @@ def local_version():
 
 
 def check():
+    latest, errs = "", []
+    # بالترتيب: gh المسجَّل (بلا حدّ زيارات)، ثم واجهة GitHub العامة، ثم الرابط الخام (قد يتأخر ٥ دقائق)
     try:
-        # واجهة GitHub لا الرابط الخام: الخام يُخزَّن مؤقتًا نحو ٥ دقائق فيتأخر ظهور التحديث
-        req = urllib.request.Request(f"https://api.github.com/repos/{REPO}/contents/VERSION?ref={BRANCH}",
-                                     headers={"User-Agent": "zajel", "Accept": "application/vnd.github.raw"})
-        with urllib.request.urlopen(req, timeout=15) as r:
-            latest = r.read().decode("utf-8").strip()
+        r = _run(["gh", "api", f"repos/{REPO}/contents/VERSION?ref={BRANCH}", "-H", "Accept: application/vnd.github.raw"], timeout=20)
+        if r.returncode == 0 and r.stdout.strip():
+            latest = r.stdout.strip()
+        else:
+            errs.append("gh: " + r.stderr.strip()[:60])
     except Exception as exc:
-        return {"current": local_version(), "latest": "", "available": False, "error": "تعذّر الوصول إلى GitHub: " + str(exc)[:80]}
+        errs.append("gh: " + str(exc)[:60])
+    for url, hdr in ((f"https://api.github.com/repos/{REPO}/contents/VERSION?ref={BRANCH}", {"Accept": "application/vnd.github.raw"}),
+                     (f"https://raw.githubusercontent.com/{REPO}/{BRANCH}/VERSION", {})):
+        if latest:
+            break
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "zajel", **hdr}), timeout=15) as resp:
+                latest = resp.read().decode("utf-8").strip()
+        except Exception as exc:
+            errs.append(str(exc)[:80])
+    if not latest:
+        return {"current": local_version(), "latest": "", "available": False, "error": "تعذّر الوصول إلى GitHub: " + " | ".join(errs)}
     return {"current": local_version(), "latest": latest, "available": _ver(latest) > _ver(local_version())}
 
 
