@@ -176,6 +176,24 @@ def sync_run():
     out = list(merged.values())
     rp.write_text(json.dumps(out, ensure_ascii=False, indent=1), encoding="utf-8")
     lp.write_text(json.dumps(out, ensure_ascii=False, indent=1), encoding="utf-8")
+    # الأتمتة: تصل قواعد الجهاز الآخر إلى هنا موقوفة (مجلداته قد لا توجد هنا)، فتشغّلها أنت إن أردت
+    import automation
+    ra = repo / "automations.json"
+    remote_rules = _j(ra, [])
+    with automation.LOCK:
+        local_rules = automation.rules_list()
+        have = {r["id"] for r in local_rules}
+        auto_new = 0
+        for r in remote_rules:
+            if isinstance(r, dict) and r.get("id") and r["id"] not in have:
+                local_rules.append(dict(r, enabled=False, last_note="وصلت من جهاز آخر وهي موقوفة؛ شغّلها إن كانت مجلداتها موجودة هنا."))
+                auto_new += 1
+        if auto_new:
+            automation._save("automations.json", local_rules)
+    merged_rules = {r["id"]: r for r in remote_rules if isinstance(r, dict) and r.get("id")}
+    for r in local_rules:
+        merged_rules.setdefault(r["id"], dict(r, enabled=False))
+    ra.write_text(json.dumps(list(merged_rules.values()), ensure_ascii=False, indent=1), encoding="utf-8")
     # الإعدادات: الأحدث يفوز كاملةً
     rs, ls = repo / "assistant_settings.json", DATA / "assistant_settings.json"
     settings = "same"
@@ -194,6 +212,6 @@ def sync_run():
         p = _run(["git", "push", "--quiet"], cwd=repo, timeout=90)
         if p.returncode != 0:
             raise ValueError("تعذّر رفع المزامنة: " + p.stderr.strip()[:120])
-    msg = f"أُضيف {a} وتحدّث {u} وحُذف {d} في الذاكرة"
+    msg = f"أُضيف {a} وتحدّث {u} وحُذف {d} في الذاكرة" + (f"، ووصلت {auto_new} قاعدة أتمتة (موقوفة)" if auto_new else "")
     _state_file().write_text(json.dumps({"last": time.time(), "msg": msg, "repo": DATA_REPO_NAME}), encoding="utf-8")
     return {"ok": True, "memory_added": a, "memory_updated": u, "memory_removed": d, "settings": settings, "msg": msg}

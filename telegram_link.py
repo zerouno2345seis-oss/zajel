@@ -216,6 +216,26 @@ def notify(kind, text):
 
 # ================= الاستماع والتوجيه =================
 MAIN_KB = [["الرئيسية", "الأجهزة", "الوكلاء"], ["العمليات", "الأتمتة", "بحث"], ["الذاكرة", "الأوامر", "المساعدة"]]
+ONESHOT = {"host": ""}
+
+
+def _alias(h):
+    return h.split("-")[0] or h
+
+
+def _kb():
+    """لوحة المفاتيح الدائمة: صف أول بزر لكل جهاز (▶ الحالي)، ثم الأقسام."""
+    hs = sorted(_presence())
+    row = [("▶ " if h == _target() else "") + "💻 " + _alias(h) for h in hs] if len(hs) > 1 else []
+    return ([row] if row else []) + MAIN_KB
+
+
+def _host_by_button(text):
+    t = text.replace("▶", "").replace("💻", "").strip().lower()
+    for h in _presence():
+        if t in (h.lower(), _alias(h).lower()):
+            return h
+    return ""
 BTN = {"الرئيسية": "home", "الأجهزة": "pc", "الوكلاء": "agents", "العمليات": "ops", "الأتمتة": "auto", "بحث": "findhelp",
        "الذاكرة": "mem", "الأوامر": "cmds", "المهام": "jobs", "المساعدة": "help"}
 COMMANDS = [("home", "الرئيسية: ملخص الجهاز الحالي"), ("pc", "الأجهزة: بدّل بين الكمبيوترين"), ("agents", "الوكلاء: الحال وتبديل المساعد"),
@@ -294,7 +314,7 @@ def _on_text(chat, text):
         if m and STATE["pair_code"] == m.group(1) and STATE["pair_until"] > time.time():
             _save_cfg({"chat_id": chat})
             STATE["pair_code"] = ""
-            send("تم الربط بزاجل على " + socket.gethostname().split(".")[0] + ".\nاكتب لي أو سجّل رسالة صوتية كما تكلّم المساعد في زاجل تمامًا. الأزرار أدناه للتنقّل السريع.", chat, reply_kb=MAIN_KB)
+            send("تم الربط بزاجل على " + socket.gethostname().split(".")[0] + ".\nاكتب لي أو سجّل رسالة صوتية كما تكلّم المساعد في زاجل تمامًا. الأزرار أدناه للتنقّل السريع.", chat, reply_kb=_kb())
         return
     if chat != c["chat_id"]:
         return
@@ -509,6 +529,10 @@ def _on_callback(chat, mid, data):
     elif kind == "pc":
         _set_target(rest)
         _show(chat, "pc", mid)
+        send(f"صار الجهاز الحالي: {rest}.", chat, reply_kb=_kb())
+    elif kind == "one":
+        ONESHOT["host"] = rest
+        edit(chat, mid, f"اكتب سؤالك الآن (أو سجّله صوتًا)، وسيجيب عنه {rest} وحده، ثم نعود إلى {_target()}.", [])
     elif kind == "tg" and rest in ("notify_error", "notify_long", "notify_update"):     # اعتماد الحمراء يُفتح من زاجل وحده، لا من القناة نفسها
         _save_cfg({rest: not _cfg()[rest]}); _show(chat, "settings", mid)
 
@@ -518,7 +542,7 @@ def _show(chat, name, mid=None):
     if mid:
         edit(chat, mid, text, kb)
     else:
-        send(text, chat, kb=kb, reply_kb=MAIN_KB if name in ("help", "home") else None)
+        send(text, chat, kb=kb, reply_kb=_kb() if name in ("help", "home", "pc") else None)
 
 
 def _b(t, d):
@@ -535,7 +559,7 @@ def _screen(name):
         ag = agent_metrics.stats(24, {a["id"]: a["installed"] for a in agent_runner.agents()}, [a["id"] for a in agent_runner.agents()])["agents"]
         up = sum(1 for a in ag if a["status"] in ("ok", "slow"))
         pend = len(agent_server.pending_list())
-        return (f"زاجل على {HOST}\nالمساعد: {agent_runner.AGENTS[agent_runner.settings()['default_agent']]['name']}\nالوكلاء العاملون: {up} من {len(ag)}\nطلبات تنتظر موافقتك: {pend}\nالمحادثة: {_cfg()['conv']}",
+        return (f"زاجل {_version()} على {HOST}\nالمساعد: {agent_runner.AGENTS[agent_runner.settings()['default_agent']]['name']}\nالوكلاء العاملون: {up} من {len(ag)}\nطلبات تنتظر موافقتك: {pend}\nالمحادثة: {_cfg()['conv']}",
                 [[_b("الأجهزة", "scr:pc"), _b("الوكلاء", "scr:agents")], [_b("العمليات", "scr:ops"), _b("الأتمتة", "scr:auto")], [_b("المساحة", "scr:space"), _b("الذاكرة", "scr:mem")],
                  [_b("المهام", "scr:jobs"), _b("الأوامر", "scr:cmds")], [_b("المحادثات", "scr:chats"), _b("الإعدادات", "scr:settings")]])
     if name == "agents":
@@ -624,8 +648,11 @@ def _screen_more(name):
             st = "متصل" if age < 1500 else f"غير متصل منذ {int(age // 3600)} ساعة" if age > 3600 else f"غير متصل منذ {int(age // 60)} دقيقة"
             rows.append(("▶ " if h == tgt else "• ") + f"{h} — {st}" + (" · الإصدار " + p.get("version", "") if p.get("version") else ""))
             if h != tgt:
-                kb.append([_b("اجعله الحالي: " + h[:30], "pc:" + h)])
-        return "الأجهزة (▶ هو الذي يجيبك الآن):\n" + "\n".join(rows) + "\n\nلتسأل جهازًا لمرة واحدة اكتب أول اسمه ثم طلبك، مثل: «" + " ".join(sorted({h.split('-')[0] for h in _presence()})[:1]) + " ما المساحة الحرة؟». أو اضغط زرًّا ليصير هو الحالي.", kb + [[_b("تحديث", "scr:pc")]] + back
+                kb.append([_b("اجعله الحالي: " + _alias(h), "pc:" + h), _b("سؤال واحد له", "one:" + h)])
+        warn = "" if MAIL["repo"] else "\n\nتنبيه: هذا الجهاز لا يصل إلى المستودع الخاص، فلا يرى الجهاز الآخر. سجّل الدخول عليه مرة: gh auth login ثم «زامن الآن» في زاجل."
+        if len(rows) < 2 and not warn:
+            warn = "\n\nلا يظهر الجهاز الآخر بعد: حدّثه إلى آخر إصدار واضغط فيه «زامن الآن» مرة."
+        return "الأجهزة (▶ هو الذي يجيبك الآن):\n" + "\n".join(rows) + warn + "\n\nلتسأل جهازًا لمرة واحدة اكتب أول اسمه ثم طلبك، مثل: «" + " ".join(sorted({h.split('-')[0] for h in _presence()})[:1]) + " ما المساحة الحرة؟». أو اضغط زرًّا ليصير هو الحالي.", kb + [[_b("تحديث", "scr:pc")]] + back
     return None
 
 
@@ -780,8 +807,19 @@ def _route(u):
     m = u.get("message") or {}
     cb = u.get("callback_query") or {}
     text = (m.get("text") or "").strip()
-    local = text.startswith("/start") or text.startswith("/pc") or text == "الأجهزة" or (cb.get("data") or "").startswith(("pc:", "scr:pc"))
+    local = text.startswith("/start") or text.startswith("/pc") or text == "الأجهزة" or (cb.get("data") or "").startswith(("pc:", "scr:pc", "one:"))
+    chat = (m.get("chat") or (cb.get("message") or {}).get("chat") or {}).get("id")
+    hb = _host_by_button(text) if text else ""
+    if hb and _authorized(chat):                # زر جهاز في لوحة المفاتيح: يصير هو الحالي فورًا
+        try:
+            _set_target(hb)
+            send(f"صار الجهاز الحالي: {hb}. كل رسائلك تذهب إليه الآن.", chat, reply_kb=_kb())
+        except ValueError as e:
+            send(str(e), chat)
+        return
     tgt = _target()
+    if ONESHOT["host"] and (text or m.get("voice") or m.get("audio")) and not text.startswith("/") and not local:
+        tgt, ONESHOT["host"] = ONESHOT["host"], ""
     for h in sorted(_presence(), key=len, reverse=True):     # «اسم الجهاز (أو أوله مثل iMac) ثم الطلب» لمرة واحدة
         for alias in (h, h.split("-")[0]):
             if alias and text.lower().startswith(alias.lower() + " "):
