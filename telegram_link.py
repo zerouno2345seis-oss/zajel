@@ -99,8 +99,15 @@ def status():
             new_pair_code()
         start()                                   # يعيد التشغيل إن كان الاستماع متوقفًا
     live = STATE["pair_until"] > time.time()
+    err = STATE["error"]
+    if err.startswith("هذا البوت يستمع إليه"):
+        gw = [h for h, p in MAIL["presence"].items() if h != HOST and p.get("gateway")]
+        if gw or not c["chat_id"]:
+            err = (f"الجهاز {gw[0]} يستقبل رسائل البوت الآن، وهذا طبيعي ما دام المفتاح نفسه على الجهازين. " if gw else
+                   "جهاز آخر يستقبل رسائل البوت الآن (إن كان مفتاحك على الـiMac أيضًا فهذا طبيعي). ") + \
+                  ("هذا الجهاز ينضم تلقائيًا بعد «زامن الآن» على الجهازين، ولا يلزمه اقتران." if not c["chat_id"] else "يجيب هذا الجهاز عندما تختاره من «الأجهزة».")
     return {"pair_link": f"https://t.me/{c.get('bot')}?start={STATE['pair_code']}" if live and c.get("bot") else "", **{"has_token": bool(_token()) if DATA else False, "enabled": c["enabled"], "bot": c.get("bot", ""), "paired": bool(c["chat_id"]), "machine": socket.gethostname().split(".")[0],
-            "gateway": STATE["gateway"], "running": STATE["running"], "error": STATE["error"],
+            "gateway": STATE["gateway"], "running": STATE["running"], "error": err,
             "pair_code": STATE["pair_code"] if live else "", "notify_error": c["notify_error"], "notify_long": c["notify_long"], "notify_update": c["notify_update"], "approve_red": c["approve_red"]}}
 
 

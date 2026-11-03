@@ -195,5 +195,5 @@ def sync_run():
         if p.returncode != 0:
             raise ValueError("تعذّر رفع المزامنة: " + p.stderr.strip()[:120])
     msg = f"أُضيف {a} وتحدّث {u} وحُذف {d} في الذاكرة"
-    _state_file().write_text(json.dumps({"last": time.time(), "msg": msg, "repo": full}), encoding="utf-8")
+    _state_file().write_text(json.dumps({"last": time.time(), "msg": msg, "repo": DATA_REPO_NAME}), encoding="utf-8")
     return {"ok": True, "memory_added": a, "memory_updated": u, "memory_removed": d, "settings": settings, "msg": msg}
