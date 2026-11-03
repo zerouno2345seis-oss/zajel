@@ -20,7 +20,7 @@ SERVICE = "zajel-telegram-bot"
 STATE = {"gateway": False, "running": False, "error": "", "bot": "", "pair_code": "", "pair_until": 0}
 _thread = None
 _stop = threading.Event()
-DEFAULTS = {"enabled": False, "chat_id": 0, "notify_error": True, "notify_long": True, "notify_update": True, "notify_done": True, "long_secs": 60, "offset": 0, "conv": "telegram", "approve_red": False}
+DEFAULTS = {"enabled": False, "chat_id": 0, "notify_error": True, "notify_long": True, "notify_update": True, "notify_done": True, "long_secs": 60, "offset": 0, "conv": "telegram", "approve_red": True}
 
 
 def init(data_dir):
@@ -147,6 +147,10 @@ def start():
         if not (_mail_thread and _mail_thread.is_alive()):
             _mail_thread = threading.Thread(target=_mail_loop, daemon=True)
             _mail_thread.start()
+        global _pusher
+        if not (_pusher and _pusher.is_alive()):
+            _pusher = threading.Thread(target=_pending_loop, daemon=True)
+            _pusher.start()
 
 
 def stop():
@@ -374,6 +378,15 @@ def _on_text(chat, text):
         return
     if chat != c["chat_id"]:
         return
+    if chat in WAITWORD:
+        import agent_server
+        pid = WAITWORD.pop(chat)
+        try:
+            agent_server.approve(pid, text)
+            send("✅ تم تنفيذ الطلب.", chat)
+        except ValueError as e:
+            send("لم يُنفَّذ: " + str(e), chat)
+        return
     word = text.split()[0] if text.split() else ""
     name = BTN.get(text) or (word[1:].split("@")[0] if word.startswith("/") else "")
     if name in ("home", "agents", "mem", "cmds", "jobs", "help", "chats", "settings", "ops", "auto", "space", "pc", "findhelp"):
@@ -527,19 +540,43 @@ def _desc_pending(p):
     return "\n".join(lines)
 
 
-def _check_pending(chat, jid):
+ICONS = {"whatsapp_send_message": "📤", "whatsapp_send_reply": "📤", "whatsapp_send_file": "📎", "whatsapp_send_template": "📤", "phone_delete": "🗑"}
+WAITWORD = {}     # محادثة ← رقم طلب ينتظر كلمة تأكيد مكتوبة
+_pusher = None
+
+
+def _push_pending(chat, p):
+    """يعرض طلب موافقة في تيليجرام بأزرار، أيًّا كان مصدره (نافذة زاجل أو تيليجرام أو أتمتة أو وكيل)."""
+    ic = ICONS.get(p["tool"], "⚠️")
+    host = f"\n💻 {HOST}" if len(_presence()) > 1 else ""
+    body = f"{ic} طلب يحتاج موافقتك\n" + _desc_pending(p) + host + "\n⏳ ينتهي خلال %d دقيقة." % max(1, p["expires_in"] // 60)
+    if not _cfg()["approve_red"]:
+        send(body + "\n\nاعتماد العمليات من تيليجرام مغلق؛ وافق عليها داخل زاجل.", chat)
+    elif p.get("needs_word"):
+        send(body + "\n\nعملية حساسة: بعد الضغط على «اعتمد» اكتب كلمة التأكيد.", chat,
+             kb=[[{"text": "✅ اعتمد", "callback_data": "word:" + p["id"]}, {"text": "❌ ارفض", "callback_data": "no:" + p["id"]}]])
+    else:
+        send(body, chat, kb=[[{"text": "✅ راجعتُ، تابع", "callback_data": "ok1:" + p["id"]}, {"text": "❌ ارفض", "callback_data": "no:" + p["id"]}]])
+
+
+def _check_pending(chat, jid=None):
     import agent_server
     for p in agent_server.pending_list():
-        if p.get("job") != jid or p["id"] in SEEN_PENDING:
+        if p["id"] in SEEN_PENDING:
             continue
         SEEN_PENDING.add(p["id"])
-        if not _cfg()["approve_red"]:
-            send("طلب يحتاج موافقتك: " + _desc_pending(p) + "\n\nاعتماد العمليات الحمراء من هنا مغلق. وافق عليها داخل زاجل، أو افتحه من إعدادات تيليجرام.", chat)
-        elif p.get("needs_word"):
-            send("طلب حساس: " + _desc_pending(p) + "\n\nيتطلب كتابة كلمة تأكيد، وهذا لا يتم من تيليجرام. وافق عليه داخل زاجل.", chat)
-        else:
-            send("طلب يحتاج موافقتك\n" + _desc_pending(p) + "\n\nينتهي خلال %d دقيقة." % max(1, p["expires_in"] // 60), chat,
-                 kb=[[{"text": "راجعتُ الأرقام", "callback_data": "ok1:" + p["id"]}], [{"text": "ارفض", "callback_data": "no:" + p["id"]}]])
+        _push_pending(chat, p)
+
+
+def _pending_loop():
+    while not _stop.is_set():
+        try:
+            c = _cfg()
+            if c["chat_id"] and _token():
+                _check_pending(c["chat_id"])
+        except Exception:
+            pass
+        _stop.wait(4)
 
 
 def _on_callback(chat, mid, data):
@@ -552,9 +589,19 @@ def _on_callback(chat, mid, data):
             _ask(chat, txt)
     elif kind == "no":
         try:
-            agent_server.deny(rest); edit(chat, mid, "رفضتَ الطلب.", [])
+            agent_server.deny(rest); edit(chat, mid, "❌ رفضتَ الطلب.", [])
         except ValueError as e:
             edit(chat, mid, str(e), [])
+    elif kind == "word":
+        import agent_server
+        pv = next((x for x in agent_server.pending_list() if x["id"] == rest), None)
+        if not pv:
+            edit(chat, mid, "الطلب غير موجود أو انتهت صلاحيته.", [])
+        elif not _cfg()["approve_red"]:
+            edit(chat, mid, "اعتماد العمليات من تيليجرام مغلق.", [])
+        else:
+            WAITWORD[chat] = rest
+            edit(chat, mid, "اكتب الآن كلمة التأكيد «%s» في رسالة للموافقة، أو اكتب غير ذلك للإلغاء." % pv.get("needs_word"), [])
     elif kind == "ok1":
         code = "%04d" % random.randint(0, 9999)
         CODES[rest] = code
@@ -567,7 +614,7 @@ def _on_callback(chat, mid, data):
         try:
             agent_server.approve(pid)
             CODES.pop(pid, None)
-            edit(chat, mid, "تم تنفيذ الطلب.", [])
+            edit(chat, mid, "✅ تم تنفيذ الطلب.", [])
         except ValueError as e:
             edit(chat, mid, str(e), [])
     elif kind == "scr":
