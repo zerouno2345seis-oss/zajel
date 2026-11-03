@@ -92,8 +92,12 @@ class ConflictError(Exception):
 
 def status():
     c = _cfg()
-    if DATA and c["enabled"] and not c["chat_id"] and STATE["pair_until"] <= time.time() and _token():
-        new_pair_code(); start()          # مفتاح محفوظ بلا اقتران (مثلًا بعد إعادة التشغيل): نجهّز رمزًا جديدًا
+    if DATA and not c["chat_id"] and _token():
+        if not c["enabled"]:
+            c = _save_cfg({"enabled": True})      # مفتاح محفوظ بلا اقتران: لا معنى لتركه معطّلًا
+        if STATE["pair_until"] <= time.time():
+            new_pair_code()
+        start()                                   # يعيد التشغيل إن كان الاستماع متوقفًا
     live = STATE["pair_until"] > time.time()
     return {"pair_link": f"https://t.me/{c.get('bot')}?start={STATE['pair_code']}" if live and c.get("bot") else "", **{"has_token": bool(_token()) if DATA else False, "enabled": c["enabled"], "bot": c.get("bot", ""), "paired": bool(c["chat_id"]), "machine": socket.gethostname().split(".")[0],
             "gateway": STATE["gateway"], "running": STATE["running"], "error": STATE["error"],

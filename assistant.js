@@ -6246,6 +6246,10 @@
           telegramBody.appendChild(line);
         }
         telegramBody.appendChild(telegramButton('رمز اقتران جديد', async () => renderTelegram(await api('/api/assistant/telegram/pair', {}))));
+        telegramBody.appendChild(telegramButton('حذف المفتاح', async () => {
+          if (!window.confirm('هل تريد حذف مفتاح Telegram من سلسلة مفاتيح هذا الجهاز؟')) return;
+          renderTelegram(await api('/api/assistant/telegram/forget', {}));
+        }));
         if (!telegramPoll) telegramPoll = setInterval(async () => {
           try { renderTelegram(await api('/api/assistant/telegram/status')); }
           catch (err) { telegramError(err); }
