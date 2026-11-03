@@ -691,6 +691,8 @@ def handle(h, method):
                 h.send_json(whatsapp_watch.preview())
             elif act == "digest":
                 h.send_json(whatsapp_watch.digest_now())
+            elif act == "ai_test":
+                h.send_json(whatsapp_watch.ai_selftest())
             else:
                 h.send_json({"error": "غير معروف"}, 404)
         elif path == "/api/assistant/telegram/status":

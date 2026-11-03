@@ -6369,6 +6369,15 @@
       waBody.appendChild(waText((waState.ai_exclude || []).join('، '), 'مثل: العائلة، البنك', (v) => waSave({ ai_exclude: v })));
       waBody.appendChild(waRow('أقصى عدد رسائل تُلخَّص', waNumber(waState.ai_max ?? 20, 5, 40, (v) => waSave({ ai_max: v }))));
       waBody.appendChild(waCheck('اقترح ردودًا (لا تُرسل أبدًا إلا بموافقتك)', waState.ai_reply, (v) => waSave({ ai_reply: v })));
+      const aiOut = el('pre', '');
+      aiOut.style.cssText = 'white-space:pre-wrap;margin:0;padding:8px;border:1px dashed var(--line);border-radius:7px;display:none;max-height:240px;overflow:auto';
+      waBody.appendChild(telegramButton('اختبر التلخيص الذكي (برسائل مصطنعة، لا رسائلك)', async () => {
+        waCard.status.textContent = 'جارٍ الاختبار… قد يستغرق دقيقة.';
+        const r = await api('/api/assistant/whatsapp/ai_test', {});
+        aiOut.textContent = r.ok ? r.text : ('تعذّر: ' + r.error); aiOut.style.display = 'block';
+        waCard.status.textContent = r.ok ? ('نجح الاختبار خلال ' + r.secs + ' ثانية.') : 'فشل الاختبار.';
+      }));
+      waBody.appendChild(aiOut);
       const preview = el('pre', '');
       preview.style.cssText = 'white-space:pre-wrap;margin:0;padding:8px;border:1px dashed var(--line);border-radius:7px;display:none;max-height:240px;overflow:auto';
       waBody.appendChild(telegramButton('معاينة التقرير الآن', async () => {

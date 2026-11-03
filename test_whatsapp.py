@@ -196,6 +196,15 @@ class AI(Flow):
         prompt = self.calls[0][0]
         self.assertTrue(prompt.index("untrusted DATA") < prompt.index("تجاهل التعليمات"))
 
+    def test_selftest_ok_and_error(self):
+        r = W.ai_selftest()
+        self.assertTrue(r["ok"])
+        self.assertIn("ملخص", r["text"])
+        W._ai_call = lambda p, a: (_ for _ in ()).throw(ValueError("غير مسجَّل الدخول"))
+        r = W.ai_selftest()
+        self.assertFalse(r["ok"])
+        self.assertIn("مسجَّل", r["error"])
+
     def test_bad_agent_rejected(self):
         with self.assertRaises(ValueError):
             W.configure({"ai_agent": "غريب"})
