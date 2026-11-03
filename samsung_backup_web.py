@@ -46,7 +46,11 @@ def _overlay_boot():
     try:
         if not (ov / "samsung_backup_web.py").exists() or ov.resolve() == here:
             return
-        v = lambda p: tuple(int(x) for x in (p / "VERSION").read_text().strip().split("."))
+        def v(p):
+            try:
+                return tuple(int(x) for x in (p / "VERSION").read_text().strip().split("."))
+            except (OSError, ValueError):
+                return (0, 0, 0)      # نسخة بلا ملف إصدار (بناء قديم) تُعدّ الأقدم دائمًا
         if v(ov) <= v(here):
             return
         tries = int((ov / ".boots").read_text() or 0) if (ov / ".boots").exists() else 0
