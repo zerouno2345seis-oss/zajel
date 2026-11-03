@@ -844,6 +844,15 @@ def make_preview(name, a, H):
         pv["note"] = "مع بياناته" if not a.get("keep_data") else "مع إبقاء بياناته"
     elif name == "install_apk":
         pv["target"] = a.get("path")
+    elif name in ("whatsapp_send_message", "whatsapp_send_reply", "whatsapp_send_template", "whatsapp_send_file"):
+        import whatsapp_watch
+        pv["target"] = "واتساب ← " + str(a.get("recipient") or a.get("chat_jid") or "")
+        if name == "whatsapp_send_file":
+            pv["note"] = f"سيُرسل الملف «{str(a.get('path') or '').rsplit('/', 1)[-1]}» من {_place_name(H, a.get('place'))}" + (f" مع الوصف: {a.get('caption')}" if a.get("caption") else "")
+        elif name == "whatsapp_send_template":
+            pv["note"] = "نص الرد الجاهز: " + whatsapp_watch.render_template(a.get("template"), a.get("values") if isinstance(a.get("values"), dict) else {})
+        else:
+            pv["note"] = "نص الرسالة: " + str(a.get("message") or a.get("body") or "")
     elif name == "convert_file":
         pv["target"] = f"{_place_name(H, a.get('place'))} / {a.get('path')} ← {a.get('to')}"
         pv["note"] = f"تحويل الصيغة إلى {a.get('to')}"
@@ -1231,3 +1240,108 @@ def t_whatsapp_send_reply(a, H):
     if a.get("target_sender_jid"):
         args["target_sender_jid"] = str(a["target_sender_jid"])
     return {"result": whatsapp_link.call("send_reply", args)}
+
+
+@tool("whatsapp_send_file", "أرسل ملفًا أو صورة من جهازه إلى شخص أو مجموعة في واتساب. تنتظر موافقة المستخدم من نافذة زاجل ولا تُرسل قبلها.",
+      {"recipient": S("رقم الهاتف بصيغة دولية بلا + أو معرّف المحادثة"), "place": PLACE, "path": PATH, "caption": S("وصف قصير تحت الملف (اختياري)")},
+      ["recipient", "place", "path"], RED)
+def t_whatsapp_send_file(a, H):
+    import shutil
+    import uuid as _uuid
+    import whatsapp_link
+    check_place_path(a["place"], a.get("path"))
+    src = to_src(a["place"])
+    if src["type"] != "local":
+        raise ValueError("إرسال الملفات إلى واتساب متاح لملفات الكمبيوتر والأقراص والسحابة المتزامنة؛ انسخ الملف من الهاتف إلى الكمبيوتر أولًا.")
+    p = H.M.fileops.local_path(src, a["path"])
+    if not p.is_file():
+        raise ValueError("ليس ملفًا أو غير موجود.")
+    if p.stat().st_size > 64 << 20:
+        raise ValueError("الملف أكبر من ٦٤ ميغابايت.")
+    root = whatsapp_link.MEDIA_ROOT
+    root.mkdir(parents=True, exist_ok=True)
+    staged = root / f"{_uuid.uuid4().hex[:8]}_{p.name}"
+    shutil.copy2(p, staged)                      # الجسر لا يقرأ إلا من مجلده المحدد
+    try:
+        args = {"recipient": str(a["recipient"]), "media_path": str(staged)}
+        if a.get("caption"):
+            args["caption"] = str(a["caption"])
+        return {"result": whatsapp_link.call("send_file", args)}
+    finally:
+        try:
+            staged.unlink()
+        except OSError:
+            pass
+
+
+@tool("whatsapp_download_media", "نزّل صورة أو ملفًا صوتيًا أو فيديو أو مستندًا من رسالة واتساب إلى مجلد «التنزيلات/واتساب». معرّفا المحادثة والرسالة من whatsapp_list_messages. بعد التنزيل يمكن تفريغ الصوت بـ transcribe_audio.",
+      {"chat_jid": S("معرّف المحادثة (Chat JID)"), "message_id": S("معرّف الرسالة (Message ID)")}, ["chat_jid", "message_id"], YELLOW)
+def t_whatsapp_download_media(a, H):
+    import shutil
+    import whatsapp_link
+    raw = whatsapp_link.call("download_media", {"chat_jid": str(a["chat_jid"]), "message_id": str(a["message_id"])})
+    info = json.loads(raw)
+    src = Path(str(info.get("Path") or ""))
+    if not src.is_file():
+        raise ValueError("تعذّر العثور على الملف المنزَّل.")
+    dest_dir = Path.home() / "Downloads" / "واتساب"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / (info.get("Filename") or src.name)
+    n = 1
+    while dest.exists() and dest.stat().st_size != src.stat().st_size:
+        dest = dest_dir / f"{dest.stem}_{n}{dest.suffix}"
+        n += 1
+    if not dest.exists():
+        shutil.copy2(src, dest)
+    return {"place": "home", "path": "Downloads/واتساب/" + dest.name, "type": info.get("MediaType"), "size": dest.stat().st_size,
+            "hint": "للصوت: transcribe_audio بهذا المكان والمسار؛ وللعرض في تيليجرام: send_to_telegram."}
+
+
+@tool("whatsapp_templates", "قائمة الردود الجاهزة المحفوظة (الاسم والنص). المتغيرات بين أقواس مثل {الاسم}.", {}, [], GREEN)
+def t_whatsapp_templates(a, H):
+    import whatsapp_watch
+    return {"templates": whatsapp_watch.templates()}
+
+
+@tool("whatsapp_save_template", "احفظ ردًّا جاهزًا جديدًا أو حدّث رديفه بالاسم نفسه. يمكن وضع متغيرات مثل {الاسم}.",
+      {"name": S("اسم قصير للرد الجاهز"), "text": S("نص الرد")}, ["name", "text"], YELLOW)
+def t_whatsapp_save_template(a, H):
+    import whatsapp_watch
+    return {"templates": whatsapp_watch.save_template(a["name"], a["text"])}
+
+
+@tool("whatsapp_delete_template", "احذف ردًّا جاهزًا بالاسم.", {"name": S("اسم الرد الجاهز")}, ["name"], YELLOW)
+def t_whatsapp_delete_template(a, H):
+    import whatsapp_watch
+    return {"templates": whatsapp_watch.delete_template(a["name"])}
+
+
+@tool("whatsapp_send_template", "أرسل ردًّا جاهزًا في واتساب إلى شخص أو مجموعة. تنتظر موافقة المستخدم، ويرى النص النهائي قبل الموافقة.",
+      {"recipient": S("رقم الهاتف بصيغة دولية بلا + أو معرّف المحادثة"), "template": S("اسم الرد الجاهز من whatsapp_templates"),
+       "values": {"type": "object", "description": "قيم المتغيرات، مثل {\"الاسم\": \"أحمد\"}"}}, ["recipient", "template"], RED)
+def t_whatsapp_send_template(a, H):
+    import whatsapp_link
+    import whatsapp_watch
+    text = whatsapp_watch.render_template(a["template"], a.get("values") if isinstance(a.get("values"), dict) else {})
+    return {"result": whatsapp_link.call("send_message", {"recipient": str(a["recipient"]), "message": text})}
+
+
+@tool("whatsapp_watch_status", "حالة مراقب واتساب: هل هو مفعّل، من الأشخاص المهمون، والتقرير الصباحي، وآخر فحص.", {}, [], GREEN)
+def t_whatsapp_watch_status(a, H):
+    import whatsapp_watch
+    return whatsapp_watch.status()
+
+
+@tool("whatsapp_watch_config", "اضبط مراقب واتساب: enabled لتنبيهات تيليجرام، vip أسماء أو أرقام الأشخاص المهمين، keywords كلمات مراقبة، alert_groups للمجموعات، "
+      "quiet_from وquiet_to ساعات الهدوء، digest للتقرير الصباحي وdigest_hour ساعته. لا يرسل شيئًا إلى واتساب أبدًا.",
+      {"enabled": B("تفعيل التنبيهات"), "vip": L("أسماء أو أرقام مهمة"), "keywords": L("كلمات تُنبّه"), "alert_groups": B("تنبيه من المجموعات"),
+       "quiet_from": N("بداية ساعات الهدوء (٠–٢٣)"), "quiet_to": N("نهايتها"), "digest": B("التقرير الصباحي"), "digest_hour": N("ساعة التقرير (٠–٢٣)")}, [], YELLOW)
+def t_whatsapp_watch_config(a, H):
+    import whatsapp_watch
+    return whatsapp_watch.configure(a)
+
+
+@tool("whatsapp_digest_now", "أرسل إلى تيليجرام الآن تقرير واتساب (أهم رسائل آخر ٢٤ ساعة، ومن ينتظر ردك).", {}, [], YELLOW)
+def t_whatsapp_digest_now(a, H):
+    import whatsapp_watch
+    return whatsapp_watch.digest_now()

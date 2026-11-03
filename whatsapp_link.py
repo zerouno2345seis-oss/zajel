@@ -3,11 +3,15 @@
 - القراءة تُنفَّذ مباشرة، والإرسال أحمر ينتظر موافقتك في زاجل (انظر agent_tools)."""
 import json
 import os
+import re
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 URL = os.environ.get("PB_WA_URL", "http://127.0.0.1:8765/mcp")
-ALLOWED = {"get_status", "list_chats", "list_messages", "search_contacts", "list_groups", "send_message", "send_reply"}
+ALLOWED = {"get_status", "list_chats", "list_messages", "search_contacts", "list_groups", "send_message", "send_reply", "send_file", "download_media"}
+# المجلد الوحيد الذي يسمح الجسر بإرسال الملفات منه واستقبالها فيه
+MEDIA_ROOT = Path(os.environ.get("WHATSAPP_MCP_MEDIA_ROOT") or Path.home() / ".config/opencode/whatsapp-store/uploads")
 MAX_CHARS = 12000
 _HEAD = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
 
@@ -53,3 +57,33 @@ def call(name, args=None):
     if len(text) > MAX_CHARS:
         text = text[:MAX_CHARS] + "\n… (قُصّ الناتج؛ ضيّق البحث أو قلّل العدد)"
     return text
+
+
+_LINE = re.compile(r"^\[(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)\] Chat: (.*?) From: (.*?): (.*)$")
+
+
+def parse_messages(text):
+    """يحوّل ناتج list_messages (أسطر نصية) إلى قائمة رسائل مرتّبة من الأقدم إلى الأحدث.
+    كل رسالة: ts, chat, sender, text, kind (text/image/audio/video/document…), mid, jid, me."""
+    out = []
+    for ln in (text or "").splitlines():
+        m = _LINE.match(ln.strip())
+        if not m:
+            continue
+        ts, chat, sender, rest = m.groups()
+        mid = re.search(r"Message ID: (\S+)", rest)
+        jid = re.search(r"Chat JID: ([^\]\s]+)", rest)
+        kind = re.match(r"\[(image|video|audio|document|sticker|contact|location|poll)\b", rest)
+        body = re.sub(r"\s*\[(?:[a-z]+ - )?Message ID:[^\]]*\]\s*$", "", rest).strip()
+        out.append({"ts": ts, "chat": chat, "sender": sender, "text": body, "kind": kind.group(1) if kind else "text",
+                    "mid": mid.group(1) if mid else "", "jid": jid.group(1) if jid else "", "me": sender == "Me"})
+    out.sort(key=lambda x: x["ts"])
+    return out
+
+
+def messages_since(date_str, limit=100, query=""):
+    """رسائل من تاريخ معيّن (YYYY-MM-DD) فصاعدًا، مرتبة زمنيًا."""
+    args = {"limit": limit, "after": date_str}
+    if query:
+        args["query"] = query
+    return parse_messages(call("list_messages", args))

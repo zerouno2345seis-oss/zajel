@@ -1,0 +1,123 @@
+import datetime as dt
+import json
+import tempfile
+import unittest
+from pathlib import Path
+
+import whatsapp_link as WL
+import whatsapp_watch as W
+
+SAMPLE = ("[2026-11-03 06:49:21] Chat: خالتي سمر From: خالتي سمر: [video - Message ID: A1 - Chat JID: status@broadcast] \n"
+          "[2026-11-03 07:10:00] Chat: أحمد From: أحمد: هل وصلتك الأوراق؟ ضروري [Message ID: B2 - Chat JID: 123@s.whatsapp.net]\n"
+          "[2026-11-03 07:11:00] Chat: أحمد From: Me: نعم [Message ID: B3 - Chat JID: 123@s.whatsapp.net]\n"
+          "[2026-11-03 08:00:00] Chat: مجموعة العمل From: سعد: صباح الخير [Message ID: C4 - Chat JID: 999@g.us]\n"
+          "[2026-11-03 08:05:00] Chat: قناة From: قناة: خبر [Message ID: D5 - Chat JID: 1@newsletter]\n")
+
+
+def msg(**k):
+    base = {"ts": "2026-11-03 09:00:00", "chat": "أحمد", "sender": "أحمد", "text": "مرحبا", "kind": "text", "mid": "X", "jid": "123@s.whatsapp.net", "me": False}
+    return {**base, **k}
+
+
+class Parse(unittest.TestCase):
+    def test_parse(self):
+        ms = WL.parse_messages(SAMPLE)
+        self.assertEqual([m["mid"] for m in ms], ["A1", "B2", "B3", "C4", "D5"])
+        b2 = ms[1]
+        self.assertEqual((b2["chat"], b2["text"], b2["jid"], b2["me"]), ("أحمد", "هل وصلتك الأوراق؟ ضروري", "123@s.whatsapp.net", False))
+        self.assertTrue(ms[2]["me"])
+        self.assertEqual(ms[0]["kind"], "video")
+
+    def test_blocked_tools(self):
+        for name in ("delete_message", "block_contact", "leave_group", "set_privacy_setting", "update_group_participants"):
+            with self.assertRaises(ValueError):
+                WL.call(name, {})
+
+
+class Score(unittest.TestCase):
+    cfg = {**W.DEFAULTS}
+
+    def test_skip(self):
+        self.assertIsNone(W.score(msg(jid="status@broadcast"), self.cfg))
+        self.assertIsNone(W.score(msg(jid="1@newsletter"), self.cfg))
+        self.assertIsNone(W.score(msg(me=True), self.cfg))
+
+    def test_alert_rules(self):
+        c = {**self.cfg, "vip": ["أحمد"], "keywords": ["عقد"]}
+        self.assertTrue(W._alertworthy(msg(), c))                                  # شخص مهم
+        self.assertTrue(W._alertworthy(msg(chat="س", sender="س", text="العقد جاهز"), c))                 # كلمة مراقبة
+        self.assertTrue(W._alertworthy(msg(chat="س", sender="س", text="ضروري جدًا"), self.cfg))   # استعجال في محادثة فردية
+        self.assertIsNone(W._alertworthy(msg(chat="س", sender="س", text="صباح الخير"), self.cfg))
+        g = msg(jid="9@g.us", chat="مجموعة", text="ضروري")
+        self.assertIsNone(W._alertworthy(g, self.cfg))                              # المجموعات صامتة افتراضيًا
+        self.assertTrue(W._alertworthy(g, {**self.cfg, "alert_groups": True}))
+
+    def test_quiet(self):
+        c = {**self.cfg, "quiet_from": 23, "quiet_to": 6}
+        self.assertTrue(W._quiet(c, dt.datetime(2026, 11, 3, 2)))
+        self.assertTrue(W._quiet(c, dt.datetime(2026, 11, 3, 23, 30)))
+        self.assertFalse(W._quiet(c, dt.datetime(2026, 11, 3, 12)))
+
+
+class Flow(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        W.DATA = Path(self.tmp.name)
+        self.sent = []
+        self._ms, self._tg = WL.messages_since, W._tg
+        W._tg = lambda t: self.sent.append(t) or True
+        self.now = dt.datetime(2026, 11, 3, 12, 0)
+
+    def tearDown(self):
+        WL.messages_since, W._tg = self._ms, self._tg
+        self.tmp.cleanup()
+
+    def feed(self, ms):
+        WL.messages_since = lambda d, limit=100, query="": ms
+
+    def test_baseline_then_alert_once(self):
+        W.configure({"enabled": True, "vip": ["أحمد"]})
+        self.feed([msg(mid="OLD", ts="2026-11-03 07:00:00")])
+        self.assertEqual(W.poll_once(self.now), 0)                                  # خط الأساس بلا إشعار
+        self.feed([msg(mid="OLD", ts="2026-11-03 07:00:00"), msg(mid="NEW", ts="2026-11-03 12:01:00", text="تعال")])
+        self.assertEqual(W.poll_once(self.now + dt.timedelta(minutes=2)), 1)
+        self.assertEqual(W.poll_once(self.now + dt.timedelta(minutes=3)), 0)        # لا تكرار
+        self.assertIn("أحمد", self.sent[0])
+
+    def test_quiet_hours_hold_back(self):
+        W.configure({"enabled": True, "vip": ["أحمد"]})
+        self.feed([])
+        W.poll_once(self.now)
+        self.feed([msg(mid="N1", ts="2026-11-03 23:30:00")])
+        self.assertEqual(W.poll_once(dt.datetime(2026, 11, 3, 23, 40)), 0)
+        self.assertEqual(self.sent, [])
+
+    def test_digest(self):
+        W.configure({"vip": ["أحمد"]})
+        ms = WL.parse_messages(SAMPLE)
+        self.feed(ms)
+        t = W.build_digest(dt.datetime(2026, 11, 3, 9, 0))
+        self.assertIn("أحمد", t)
+        self.assertNotIn("خالتي سمر", t)          # الحالات مستبعدة
+        self.assertNotIn("خبر", t)                 # القنوات مستبعدة
+
+    def test_templates(self):
+        W.save_template("شكر", "شكرًا يا {الاسم}، {شيء}")
+        self.assertEqual(W.render_template("شكر", {"الاسم": "أحمد"}), "شكرًا يا أحمد،")
+        W.delete_template("شكر")
+        with self.assertRaises(ValueError):
+            W.render_template("شكر")
+
+
+class Preview(unittest.TestCase):
+    def test_send_preview_shows_text(self):
+        import agent_tools as T
+        pv = T.make_preview("whatsapp_send_message", {"recipient": "5491100000000", "message": "مرحبًا"}, None)
+        self.assertIn("5491100000000", pv["target"])
+        self.assertIn("مرحبًا", pv["note"])
+        for n in ("whatsapp_send_message", "whatsapp_send_reply", "whatsapp_send_file", "whatsapp_send_template"):
+            self.assertEqual(T.TOOLS[n]["tier"], "red")
+
+
+if __name__ == "__main__":
+    unittest.main()
