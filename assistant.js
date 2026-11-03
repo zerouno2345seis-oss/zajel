@@ -8411,6 +8411,10 @@
     controlPanelEl.style.cssText = 'position:fixed;inset:12px 12px 12px auto;z-index:10001;display:flex;flex-direction:column;width:min(1040px,96vw);height:calc(100vh - 24px);background:var(--bg);box-shadow:0 8px 40px #0005;border-radius:12px;overflow:hidden';
     const controlHead = el('header', '', 'as-head');
     controlHead.append(el('strong', 'مركز التحكم', 'as-head-title'));
+    const ctlVer = el('span', '', 'as-head-title');
+    ctlVer.style.cssText = 'font-size:11px;opacity:.7;margin-inline-start:8px';
+    controlHead.append(ctlVer);
+    fetch('/api/assistant/app/update/check').then(r => r.json()).then(d => { if (d && d.current) ctlVer.textContent = 'الإصدار ' + d.current + (d.available ? ' · يتوفر ' + d.latest : ''); }).catch(() => {});
     const closeControl = el('button', '', 'as-icon-btn', { type: 'button', title: 'إغلاق مركز التحكم', 'aria-label': 'إغلاق مركز التحكم' });
     closeControl.appendChild(createSvg('close', 15)); closeControl.onclick = () => { controlPanelEl.hidden = true; controlPanelEl.style.display = 'none'; stopAutomationsPolling(); stopAgentsPolling(); window.ZajelTerminalUI?.deactivate?.(); };
     const minCtl = el('button', '', 'as-icon-btn', { type: 'button', title: 'تصغير مركز التحكم', 'aria-label': 'تصغير مركز التحكم' });

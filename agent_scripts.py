@@ -333,3 +333,55 @@ def stop(rid):
         p.kill()
         return True
     return False
+
+
+# ---------- المزامنة بين الأجهزة (الأحدث تحديثًا يفوز؛ لا يُحذف شيء عبر المزامنة) ----------
+SYNC_KEYS = ("title", "tags", "params", "desc", "created", "updated")
+
+
+def sync_export():
+    out = {}
+    with LOCK:
+        for name, m in _idx().items():
+            try:
+                code = (_dir() / name).read_text(encoding="utf-8")
+            except OSError:
+                continue
+            out[name] = {**{k: m.get(k) for k in SYNC_KEYS}, "code": code}
+    return out
+
+
+def sync_import(remote):
+    """يضيف السكربتات الناقصة ويحدّث الأقدم؛ لا يشغّل شيئًا ولا يمسح سجل التشغيل المحلي."""
+    added = updated = 0
+    if not isinstance(remote, dict):
+        return 0, 0
+    with LOCK:
+        idx = _idx()
+        for name, r in remote.items():
+            if not (isinstance(r, dict) and NAME_RE.match(str(name)) and isinstance(r.get("code"), str)):
+                continue
+            code = r["code"]
+            if not code.strip() or len(code) > MAX_CODE:
+                continue
+            if name.endswith(".py"):
+                try:
+                    compile(code, name, "exec")
+                except SyntaxError:
+                    continue
+            mine = idx.get(name)
+            if mine and float(mine.get("updated") or 0) >= float(r.get("updated") or 0):
+                continue
+            if not mine and len(idx) >= 60:
+                continue
+            (_dir() / name).write_text(code, encoding="utf-8")
+            old = mine or {}
+            idx[name] = {"title": str(r.get("title") or "")[:60], "tags": _tags(r.get("tags") or []), "params": clean_params(r.get("params") or []),
+                         "desc": str(r.get("desc") or old.get("desc") or "")[:240], "created": r.get("created") or time.time(),
+                         "updated": r.get("updated") or time.time(), "runs": old.get("runs", 0), "last_run": old.get("last_run", 0),
+                         "last_state": old.get("last_state", ""), "sha": sha(name)}
+            updated += 1 if mine else 0
+            added += 0 if mine else 1
+        if added or updated:
+            _save_idx(idx)
+    return added, updated

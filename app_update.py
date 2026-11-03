@@ -26,6 +26,19 @@ KEEP = ("*.py", "*.js", "*.html", "VERSION", "icon.icns", "icon.png")
 def init(data_dir):
     global DATA
     DATA = Path(data_dir)
+    threading.Thread(target=_auto_sync, daemon=True).start()
+
+
+def _auto_sync():
+    """مزامنة تلقائية كل ١٠ دقائق بعد أن يستعمل المستخدم المزامنة يدويًا مرة واحدة على الأقل."""
+    time.sleep(120)
+    while True:
+        try:
+            if _state_file().exists():
+                sync_run()
+        except Exception:
+            pass
+        time.sleep(600)
 
 
 def _ver(text):
@@ -227,6 +240,16 @@ def sync_run():
         rs.write_text(ls.read_text(encoding="utf-8"), encoding="utf-8"); settings = "pushed"
     elif rs.exists() and not ls.exists():
         ls.write_text(rs.read_text(encoding="utf-8"), encoding="utf-8"); settings = "pulled"
+    # المكتبة: السكربتات تُضاف وتُحدَّث بحسب الأحدث (الحذف لا ينتقل)
+    sc_add = sc_upd = 0
+    try:
+        import agent_scripts as AS
+        rs_ = repo / "scripts_sync.json"
+        sc_add, sc_upd = AS.sync_import(_j(rs_, {}))
+        merged_sc = {**_j(rs_, {}), **{k: v for k, v in AS.sync_export().items()}}
+        rs_.write_text(json.dumps(merged_sc, ensure_ascii=False, indent=1), encoding="utf-8")
+    except (OSError, ValueError, ImportError):
+        pass
     # واتساب: الإعدادات فقط (الأحدث يفوز)، وحالة المتابعة تبقى على كل جهاز
     wa = "same"
     try:
@@ -252,6 +275,6 @@ def sync_run():
         p = _run(["git", "push", "--quiet"], cwd=repo, timeout=90)
         if p.returncode != 0:
             raise ValueError("تعذّر رفع المزامنة: " + p.stderr.strip()[:120])
-    msg = f"أُضيف {a} وتحدّث {u} وحُذف {d} في الذاكرة" + (f"، ووصلت {auto_new} قاعدة أتمتة (موقوفة)" if auto_new else "")
+    msg = f"أُضيف {a} وتحدّث {u} وحُذف {d} في الذاكرة" + (f"، ووصلت {auto_new} قاعدة أتمتة (موقوفة)" if auto_new else "") + (f"، ووصل {sc_add} سكربت وتحدّث {sc_upd}" if (sc_add or sc_upd) else "")
     _state_file().write_text(json.dumps({"last": time.time(), "msg": msg, "repo": DATA_REPO_NAME}), encoding="utf-8")
-    return {"ok": True, "memory_added": a, "memory_updated": u, "memory_removed": d, "settings": settings, "whatsapp": wa, "msg": msg}
+    return {"ok": True, "memory_added": a, "memory_updated": u, "memory_removed": d, "settings": settings, "whatsapp": wa, "scripts_added": sc_add, "scripts_updated": sc_upd, "msg": msg}
