@@ -24,7 +24,7 @@ if application "Google Chrome" is running then
   tell application "Google Chrome"
     repeat with w in windows
       repeat with i from 1 to (count of tabs of w)
-        if (URL of tab i of w) starts with "http://127.0.0.1:8765" then
+        if (URL of tab i of w) starts with "http://127.0.0.1:8765" and (URL of tab i of w) does not contain "/pair" then
           set active tab index of w to i
           set index of w to 1
           activate

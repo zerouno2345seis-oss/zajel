@@ -8808,3 +8808,27 @@
     buildAssistantUI();
   }
 })();
+
+  // إن تحدّث البرنامج وبقيت هذه النافذة تعرض الصفحة القديمة فأعد تحميلها تلقائيًا (أو نبّه إن كنت تكتب)
+  (function watchVersion() {
+    let loaded = null;
+    const tick = () => {
+      fetch('/api/assistant/app/update/check').then(r => r.json()).then(d => {
+        if (!d || !d.current) return;
+        if (loaded === null) { loaded = d.current; return; }
+        if (d.current === loaded) return;
+        const a = document.activeElement;
+        const typing = a && (a.tagName === 'TEXTAREA' || a.tagName === 'INPUT') && String(a.value || '').trim();
+        if (!typing) { location.reload(); return; }
+        if (document.getElementById('zajel-reload-bar')) return;
+        const bar = document.createElement('div');
+        bar.id = 'zajel-reload-bar';
+        bar.textContent = 'تحدّث زاجل إلى ' + d.current + ' — اضغط هنا لإعادة تحميل الصفحة';
+        bar.style.cssText = 'position:fixed;bottom:12px;left:50%;transform:translateX(-50%);z-index:100000;background:#2563eb;color:#fff;padding:8px 14px;border-radius:8px;cursor:pointer;font-size:13px';
+        bar.onclick = () => location.reload();
+        document.body.appendChild(bar);
+      }).catch(() => {});
+    };
+    tick();
+    setInterval(tick, 60000);
+  })();
