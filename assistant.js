@@ -6164,7 +6164,7 @@
         const status = await api('/api/assistant/sync/status');
         const when = Number(status.last) > 0 ? agentRelativeTime(Number(status.last) * 1000) : 'لا توجد مزامنة سابقة';
         syncCard.status.textContent = `آخر مزامنة: ${when}${status.last_msg ? ' · ' + status.last_msg : ''}`;
-        syncBtn.disabled = !status.configured || !status.gh_ready;
+        syncBtn.disabled = !status.gh_ready;      // أول مزامنة هي التي تجهّز المستودع، فلا يُشترط أن تكون قد تمّت قبلًا
         if (!status.gh_ready && !syncCard.actions.querySelector('code')) {
           const code = el('code', 'gh auth login');
           code.style.cssText = 'display:inline-block;padding:4px 7px;border-radius:5px;background:var(--side);color:var(--ink);cursor:pointer;user-select:all';
