@@ -140,9 +140,12 @@ def ensure_repo():
     """يجهّز النسخة المحلية من مستودع المزامنة الخاص (ينشئه إن لم يوجد) ويعيد مساره."""
     if not sync_status()["gh_ready"]:
         raise ValueError("سجّل الدخول إلى GitHub في الطرفية أولًا: gh auth login")
-    owner = _run(["gh", "api", "user", "-q", ".login"], timeout=20).stdout.strip()
-    if not owner:
-        raise ValueError("تعذّر معرفة حساب GitHub.")
+    # المالك ثابت (صاحب مستودع زاجل) لا الحساب المسجَّل على هذا الجهاز: وإلا صار لكل جهاز بحساب مختلف مستودع منفصل فلا يلتقيان
+    owner = REPO.split("/")[0]
+    me = _run(["gh", "api", "user", "-q", ".login"], timeout=20).stdout.strip()
+    if me and me != owner and _run(["gh", "api", f"repos/{owner}/{DATA_REPO_NAME}", "-q", ".name"], timeout=20).returncode != 0:
+        raise ValueError(f"هذا الجهاز مسجَّل في GitHub بحساب «{me}»، ومستودع المزامنة الخاص يملكه «{owner}». "
+                         f"اقبل دعوة المشاركة في المستودع على هذا الجهاز، أو سجّل الدخول بحساب {owner}: gh auth login")
     repo = DATA / "sync_repo"
     full = f"{owner}/{DATA_REPO_NAME}"
     if not (repo / ".git").exists():
