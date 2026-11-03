@@ -291,14 +291,33 @@ def _loop():
     STATE["gateway"] = False
 
 
-GW_FRESH = 720      # حضور «المستقبِل» يُعدّ حيًّا ١٢ دقيقة (يُجدَّد كل ٥ دقائق)
+GW_FRESH = 420      # الحضور يُعدّ حيًّا ٧ دقائق (يُجدَّد كل ٣ دقائق)
+
+
+def _is_laptop():
+    try:
+        return "InternalBattery" in subprocess.run(["pmset", "-g", "batt"], capture_output=True, text=True, timeout=5).stdout   # له بطارية ← محمول
+    except Exception:
+        return False
+
+
+LAPTOP = None
 
 
 def _other_gateway():
-    """جهاز آخر يعلن أنه المستقبِل وحضوره حديث. عند التعادل (كلاهما يعلن) يبقى صاحب الاسم الأصغر."""
+    """من يستقبل رسائل البوت؟ الجهاز المكتبي أولًا (لا ينام بإغلاق الغطاء)، ثم من يعلن الاستقبال بحضور حديث.
+    عند التعادل يبقى صاحب الاسم الأصغر. يعيد اسم الجهاز الذي يجب أن نترك له الاستقبال، أو فارغًا."""
+    global LAPTOP
+    if LAPTOP is None:
+        LAPTOP = _is_laptop()
     now = time.time()
-    for h, p in sorted(MAIL["presence"].items()):
-        if h != HOST and p.get("gateway") and now - p.get("ts", 0) < GW_FRESH:
+    fresh = {h: p for h, p in MAIL["presence"].items() if h != HOST and now - p.get("ts", 0) < GW_FRESH}
+    if LAPTOP:
+        desk = sorted(h for h, p in fresh.items() if not p.get("laptop"))
+        if desk:
+            return desk[0]                  # جهاز مكتبي حيّ: هو المستقبِل
+    for h, p in sorted(fresh.items()):
+        if p.get("gateway") and bool(p.get("laptop")) == bool(LAPTOP):
             if STATE["gateway"] and HOST < h:
                 continue
             return h
@@ -671,7 +690,7 @@ def _screen_more(name):
         rows, kb = [], []
         for h, p in sorted(_presence().items()):
             age = time.time() - p.get("ts", 0)
-            st = "متصل" if age < 1500 else f"غير متصل منذ {int(age // 3600)} ساعة" if age > 3600 else f"غير متصل منذ {int(age // 60)} دقيقة"
+            st = "متصل" if age < GW_FRESH else f"غير متصل منذ {int(age // 3600)} ساعة" if age > 3600 else f"غير متصل منذ {int(age // 60)} دقيقة"
             rows.append(("▶ " if h == tgt else "• ") + f"{h} — {st}" + (" · الإصدار " + p.get("version", "") if p.get("version") else ""))
             if h != tgt:
                 kb.append([_b("اجعله الحالي: " + _alias(h), "pc:" + h), _b("سؤال واحد له", "one:" + h)])
@@ -826,6 +845,22 @@ def _forward(u, host):
         ok = _push("تيليجرام: طلب إلى " + host)
     if not ok:
         send("تعذّر إيصال الطلب إلى " + host + ".")
+        return
+    threading.Thread(target=_pickup_watch, args=(u, host), daemon=True).start()
+
+
+def _pickup_watch(u, host):
+    """إن لم يستلم الجهاز المختار طلبك خلال ٩٠ ثانية (نائم أو مغلق)، يُنفَّذ هنا وتُبلَّغ."""
+    _stop.wait(90)
+    with MAIL_LOCK:
+        _pull()
+        f = MAIL["repo"] / "tg" / "inbox" / host / f"{u['update_id']}.json"
+        if not f.exists():
+            return
+        f.unlink()
+        _push("تيليجرام: استرجاع طلب لم يُستلم من " + host)
+    send(f"لم يستلم {host} طلبك خلال دقيقة ونصف (قد يكون نائمًا أو مغلقًا)، فنفّذته هنا على {HOST}.")
+    _dispatch(u)
 
 
 def _route(u):
@@ -859,7 +894,7 @@ def _route(u):
         _dispatch(u)
         return
     age = time.time() - _presence().get(tgt, {}).get("ts", 0)
-    if age > 1500:
+    if age > GW_FRESH:
         send(f"الجهاز {tgt} غير متصل منذ {int(age // 60)} دقيقة. نفّذتُ طلبك هنا على {HOST}.", m.get("chat", {}).get("id"))
         _dispatch(u)
         return
@@ -880,10 +915,10 @@ def _mail_tick():
             except ValueError:
                 pass
             f.unlink()
-        if time.time() - MAIL["last_presence"] > (300 if STATE["gateway"] else 600) or todo or STATE.pop("gw_changed", False):
+        if time.time() - MAIL["last_presence"] > 180 or todo or STATE.pop("gw_changed", False):
             pd = MAIL["repo"] / "tg" / "presence"
             pd.mkdir(parents=True, exist_ok=True)
-            (pd / f"{HOST}.json").write_text(json.dumps({"ts": time.time(), "version": _version(), "gateway": STATE["gateway"]}), encoding="utf-8")
+            (pd / f"{HOST}.json").write_text(json.dumps({"ts": time.time(), "version": _version(), "gateway": STATE["gateway"], "laptop": bool(LAPTOP if LAPTOP is not None else _is_laptop())}), encoding="utf-8")
             if _cfg()["chat_id"]:
                 (MAIL["repo"] / "tg" / "chat.json").write_text(json.dumps({"chat_id": _cfg()["chat_id"]}), encoding="utf-8")
             MAIL["last_presence"] = time.time()
