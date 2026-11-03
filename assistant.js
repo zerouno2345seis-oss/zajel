@@ -8475,6 +8475,7 @@
       const materialize = () => {
         if (geo) return;
         const r = controlPanelEl.getBoundingClientRect();
+        if (r.width < 50) { geo = { x: Math.max(0, innerWidth - 1052), y: 12, w: Math.min(1040, innerWidth - 24), h: innerHeight - 24 }; return; }
         geo = { x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) };
       };
       minCtl.onclick = () => { minimized = !minimized; if (minimized) materialize(); apply(); };

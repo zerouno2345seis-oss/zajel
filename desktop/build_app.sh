@@ -19,7 +19,7 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/server"
 /usr/bin/swiftc -O -target arm64-apple-macos13.0 -o "$APP/Contents/MacOS/PhoneBackup" "$ROOT/desktop/main.swift" -framework Cocoa -framework WebKit
 /usr/bin/swiftc -O -target arm64-apple-macos13.0 -o "$APP/Contents/MacOS/pbvision" "$ROOT/desktop/vision.swift" -framework Vision -framework ImageIO || echo "تعذّر بناء أداة تصنيف الصور؛ يعمل البرنامج بدونها."
-for f in "$ROOT"/*.py "$ROOT"/app.js "$ROOT"/ui.js "$ROOT"/assistant.js "$ROOT"/assistant_nav.js "$ROOT"/sections.js "$ROOT"/sw.js "$ROOT"/samsung_backup.html "$ROOT"/VERSION; do cp "$f" "$APP/Contents/Resources/server/"; done
+for f in "$ROOT"/*.py "$ROOT"/app.js "$ROOT"/ui.js "$ROOT"/assistant.js "$ROOT"/assistant_nav.js "$ROOT"/terminal_ui.js "$ROOT"/sections.js "$ROOT"/sw.js "$ROOT"/samsung_backup.html "$ROOT"/VERSION; do cp "$f" "$APP/Contents/Resources/server/"; done
 cp -R "$ROOT/icons" "$APP/Contents/Resources/server/icons"
 rm -f "$APP/Contents/Resources/server/app.py"
 cp "$ROOT/icon.icns" "$APP/Contents/Resources/icon.icns"
