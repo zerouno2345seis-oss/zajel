@@ -106,9 +106,12 @@ def new_job(kind: str, target: str) -> dict:
            "result": None, "error": "", "cancel": False, "allowed": set(), "perm_ok": set(), "started": time.time()}
     with LOCK:
         JOBS[job["id"]] = job
-        if len(JOBS) > 12:
-            for k in sorted(JOBS, key=lambda x: JOBS[x]["started"])[:-12]:
-                JOBS.pop(k, None)
+        now = time.time()
+        for k in [k for k, j in JOBS.items() if j.get("keep") and now - j["started"] > 6 * 3600]:
+            JOBS.pop(k, None)
+        loose = [k for k in sorted(JOBS, key=lambda x: JOBS[x]["started"]) if not JOBS[k].get("keep")]
+        for k in loose[:-12]:
+            JOBS.pop(k, None)
     return job
 
 
@@ -122,12 +125,26 @@ def check(job):
         raise Cancelled()
 
 
+CLOUD_DIR_NAMES = {"CloudStorage", "Mobile Documents", "Volumes"}   # سحابات/شبكات: قراءتها تُنزّل الملفات أو تتجمّد
+SF_DATALESS = 0x40000000   # ملف في iCloud لم يُنزَّل بعد: قراءته تبدأ تنزيله فتتجمّد العملية
+
+
 def walk(job, top: Path, skip_special=True, include_hidden=True):
-    """يمرّ على الملفات (بلا روابط رمزية). يعيد (مسار، stat)."""
+    """يمرّ على الملفات (بلا روابط رمزية، وبلا مغادرة قرص المجلد المختار، وبلا مجلدات السحابة). يعيد (مسار، stat)."""
+    try:
+        root_dev = os.stat(top).st_dev
+    except OSError:
+        root_dev = None
     stack = [top]
+    last = 0.0
     while stack:
         check(job)
         d = stack.pop()
+        now = time.time()
+        if now - last > 0.4:
+            last = now
+            job["beat"] = now
+            job["progress"] = f"فُحص {job['scanned']:,} ملف · {d.name or str(d)[:40]}"
         try:
             it = os.scandir(d)
         except OSError:
@@ -141,18 +158,23 @@ def walk(job, top: Path, skip_special=True, include_hidden=True):
                         continue
                     name = e.name
                     if e.is_dir(follow_symlinks=False):
+                        if name in CLOUD_DIR_NAMES:
+                            continue
                         if skip_special and (name in SKIP_DIR_NAMES or name.endswith(SKIP_SUFFIX)):
                             continue
                         if not include_hidden and name.startswith("."):
+                            continue
+                        if root_dev is not None and e.stat(follow_symlinks=False).st_dev != root_dev:
                             continue
                         stack.append(Path(e.path))
                     elif e.is_file(follow_symlinks=False):
                         if not include_hidden and name.startswith("."):
                             continue
+                        st = e.stat(follow_symlinks=False)
+                        if getattr(st, "st_flags", 0) & SF_DATALESS:
+                            continue
                         job["scanned"] += 1
-                        if job["scanned"] % 2000 == 0:
-                            job["progress"] = f"فُحص {job['scanned']:,} ملف…"
-                        yield Path(e.path), e.stat(follow_symlinks=False)
+                        yield Path(e.path), st
                 except OSError:
                     continue
 
@@ -232,34 +254,52 @@ def duplicates(job, target: Path, min_size: int):
         seen.add(key)
         by_size.setdefault(st.st_size, []).append((str(p), st.st_mtime))
     cands = {s: v for s, v in by_size.items() if len(v) > 1}
-    total_files = sum(len(v) for v in cands.values())
-    done = 0
+    del by_size, seen
+    flat = [(size, pth, mt) for size, items in cands.items() for pth, mt in items]
+    total_files = len(flat)
+    job["progress"] = f"مقارنة سريعة لـ {total_files:,} ملف محتمل التكرار…"
+    workers = min(8, (os.cpu_count() or 4))
+
+    def safe_part(rec):
+        if job["cancel"]:
+            return None
+        try:
+            return hash_part(rec[1])
+        except OSError:
+            return None
+
+    part: dict[tuple, list] = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        for n, (rec, h) in enumerate(zip(flat, pool.map(safe_part, flat)), 1):
+            check(job)
+            if h:
+                part.setdefault((rec[0], h), []).append((rec[1], rec[2]))
+            if n % 200 == 0:
+                job["progress"] = f"مقارنة سريعة… {n:,}/{total_files:,}"
+    todo = [(size, pth, mt) for (size, _h), sub in part.items() if len(sub) > 1 for pth, mt in sub]
+    del part, flat, cands
+
+    def safe_full(rec):
+        try:
+            return hash_full(job, rec[1])
+        except Cancelled:
+            raise
+        except OSError:
+            return None
+
+    full: dict[tuple, list] = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        for n, (rec, h) in enumerate(zip(todo, pool.map(safe_full, todo)), 1):
+            check(job)
+            if h:
+                full.setdefault((rec[0], h), []).append((rec[1], rec[2]))
+            job["progress"] = f"مقارنة المحتوى… {n:,}/{len(todo):,}"
     groups = []
-    for size, items in sorted(cands.items(), key=lambda kv: -kv[0] * (len(kv[1]) - 1)):
-        check(job)
-        part: dict[str, list] = {}
-        for pth, mt in items:
-            try:
-                part.setdefault(hash_part(pth), []).append((pth, mt))
-            except OSError:
-                pass
-        for sub in part.values():
-            if len(sub) < 2:
-                done += len(sub)
-                continue
-            full: dict[str, list] = {}
-            for pth, mt in sub:
-                try:
-                    full.setdefault(hash_full(job, pth), []).append((pth, mt))
-                except OSError:
-                    pass
-                done += 1
-                job["progress"] = f"مقارنة المحتوى… {done}/{total_files}"
-            for digest, same in full.items():
-                if len(same) > 1:
-                    same.sort(key=lambda x: (x[1], len(x[0])))
-                    groups.append({"hash": digest[:12], "size": size, "wasted": size * (len(same) - 1),
-                                   "files": [{"path": p, "mtime": int(m * 1000)} for p, m in same]})
+    for (size, digest), same in full.items():
+        if len(same) > 1:
+            same.sort(key=lambda x: (x[1], len(x[0])))
+            groups.append({"hash": digest[:12], "size": size, "wasted": size * (len(same) - 1),
+                           "files": [{"path": p, "mtime": int(m * 1000)} for p, m in same]})
     groups.sort(key=lambda g: -g["wasted"])
     groups = apply_rules(groups[:400])
     for g in groups:
@@ -278,11 +318,13 @@ def dhash(path: str):
     """بصمة بصرية 64 بت: تتشابه للصور المتقاربة وإن اختلف حجمها أو ضغطها."""
     from PIL import Image
     with Image.open(path) as im:
+        w, h = im.size
+        if w * h > 120_000_000:       # صورة ضخمة جدًا: فكّها يستهلك الذاكرة حتى ينهار البرنامج
+            raise ValueError("too large")
         try:
             im.draft("L", (64, 64))
         except Exception:
             pass
-        w, h = im.size
         g = im.convert("L").resize((9, 8), Image.LANCZOS)
         px = list(g.getdata())
     bits = 0
@@ -315,19 +357,25 @@ def similar(job, target: Path, max_dist: int, with_names: bool, min_size: int):
         ext = p.suffix.lower()
         if ext in IMG_EXT and st.st_size >= max(2048, min_size // 100):
             imgs.append((str(p), st.st_size, st.st_mtime))
-        if with_names and st.st_size >= min_size:
+        if with_names and st.st_size >= min_size and len(names) < 400_000:
             names.setdefault((normalize_name(p.name), p.suffix.lower()), []).append((str(p), st.st_size, st.st_mtime))
     imgs = imgs[:30000]
     hashed = []
-    for i, (pth, size, mt) in enumerate(imgs):
-        check(job)
+
+    def safe_dhash(rec):
+        if job["cancel"]:
+            return None
         try:
-            b, w, h = dhash(pth)
-            hashed.append((b, pth, size, mt, w, h))
+            return dhash(rec[0])
         except Exception:
-            pass
-        if i % 50 == 0:
-            job["progress"] = f"تحليل الصور… {i}/{len(imgs)}"
+            return None
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(6, (os.cpu_count() or 4))) as pool:
+        for i, (rec, res) in enumerate(zip(imgs, pool.map(safe_dhash, imgs))):
+            check(job)
+            if res:
+                hashed.append((res[0], rec[0], rec[1], rec[2], res[1], res[2]))
+            if i % 50 == 0:
+                job["progress"] = f"تحليل الصور… {i:,}/{len(imgs):,}"
     # فهرسة متعددة: كل بصمة تُقسَّم إلى أجزاء؛ المتشابهان يتشاركان جزءًا واحدًا على الأقل
     k = max_dist + 1
     width = 64 // k
@@ -430,7 +478,7 @@ def similar_folders(job, target: Path, threshold: float, min_files: int = 3):
 # ---------------- الكاش وملفات النظام ----------------
 def du_kb(path: str) -> int:
     try:
-        r = subprocess.run(["/usr/bin/du", "-sk", path], capture_output=True, text=True, timeout=120)
+        r = subprocess.run(["/usr/bin/du", "-sk", path], capture_output=True, text=True, timeout=45)
         return int(r.stdout.split()[0]) * 1024 if r.stdout.split() else 0
     except Exception:
         return 0

@@ -423,7 +423,7 @@ def friendly(msg):
     if "usage limit" in m or "quota" in m or "rate limit" in m or "429" in m or "exhausted" in m:
         return "نفدت حصة هذا المصدر مؤقتًا؛ اختر مصدرًا آخر من القائمة أو انتظر تجدّدها."
     if "not logged in" in m or "/login" in m or "unauthorized" in m or "401" in m:
-        return "هذا المصدر غير مسجَّل الدخول على جهازك. افتح تطبيق «الطرفية» واكتب اسمه (مثل claude) ثم أمر الدخول /login مرة واحدة، أو اختر مصدرًا آخر من الإعدادات."
+        return "هذا المصدر غير مسجَّل الدخول (أو انتهت جلسته). افتح الإعدادات ← الوكلاء ← «تسجيل الدخول» عند هذا الوكيل، أو اختر مصدرًا آخر."
     if "model_not_found" in m or ("model" in m and "not supported" in m) or "unknown model" in m:
         return "النموذج المختار لهذا الوكيل غير متاح لحسابك. اختر نموذجًا آخر له من إعدادات المساعد، أو امسح اسم النموذج ليستعمل الافتراضي."
     if "expired" in m:

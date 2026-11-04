@@ -6201,6 +6201,76 @@
     }, 'btn pri');
     syncCard.actions.appendChild(syncBtn);
     sideContentEl.appendChild(syncCard.card);
+
+    // ===== البريد الإلكتروني: ربط عدة حسابات والبحث في الوارد والصادر (قراءة فقط) =====
+    const mailCard = makeSettingsCard('البريد الإلكتروني', 'اربط أكثر من بريد (IMAP) للبحث في الرسائل الواردة والصادرة وقراءتها. للقراءة فقط: لا يُرسل زاجل ولا يحذف ولا ينقل رسائل. كلمة مرور التطبيق تُحفظ في سلسلة مفاتيح الماك.');
+    const mailAccounts = el('div', ''); mailAccounts.style.cssText = 'display:flex;flex-direction:column;gap:4px;margin:6px 0';
+    const mailForm = el('div', ''); mailForm.style.cssText = 'display:none;flex-direction:column;gap:5px;margin:6px 0;padding:8px;border:1px dashed var(--line);border-radius:8px';
+    const mailSearch = el('div', ''); mailSearch.style.cssText = 'display:flex;flex-direction:column;gap:5px;margin-top:8px';
+    const mailOut = el('div', ''); mailOut.style.cssText = 'display:flex;flex-direction:column;gap:4px;margin-top:6px';
+    const inp = (ph, type) => { const i = el('input', '', 'as-input-text', { placeholder: ph }); if (type) i.type = type; i.dir = 'ltr'; return i; };
+    const fEmail = inp('name@gmail.com'), fPass = inp('كلمة مرور التطبيق', 'password'), fHost = inp('خادم IMAP (يُملأ تلقائيًا للمزوّدين المعروفين)'), fLabel = inp('اسم اختياري (مثل: العمل)');
+    fLabel.dir = 'rtl';
+    const fHint = el('div', '', 'as-memory-desc'); fHint.style.cssText = 'color:var(--muted);font-size:11.5px';
+    fEmail.onchange = async () => { try { const h = await api('/api/assistant/mail/hint?email=' + encodeURIComponent(fEmail.value)); if (h.host && !fHost.value) fHost.value = h.host; fHint.textContent = h.hint || ''; } catch (_) {} };
+    const addBtn = btn('ربط الحساب', async () => {
+      addBtn.disabled = true; mailCard.status.textContent = 'يختبر الدخول…';
+      try {
+        const r = await api('/api/assistant/mail/add', { email: fEmail.value, password: fPass.value, host: fHost.value, label: fLabel.value });
+        if (r.error) { mailCard.status.textContent = r.error; return; }
+        fPass.value = ''; fEmail.value = ''; fHost.value = ''; mailForm.style.display = 'none'; mailCard.status.textContent = 'تم ربط الحساب.'; loadMail();
+      } catch (e) { mailCard.status.textContent = e.message || 'تعذر الربط'; } finally { addBtn.disabled = false; }
+    }, 'btn pri');
+    mailForm.append(fEmail, fPass, fHost, fLabel, fHint, addBtn);
+    const sQ = inp('ابحث: كلمة أو عنوان أو اسم مرسل…'); sQ.dir = 'auto';
+    const sAcc = el('select', '', 'as-select'), sWhere = el('select', '', 'as-select'), sDays = el('select', '', 'as-select');
+    [['all', 'الوارد والصادر'], ['inbox', 'الوارد فقط'], ['sent', 'الصادر فقط']].forEach(([v, t]) => { const o = el('option', t); o.value = v; sWhere.append(o); });
+    [['0', 'كل المدة'], ['7', 'آخر أسبوع'], ['30', 'آخر شهر'], ['365', 'آخر سنة']].forEach(([v, t]) => { const o = el('option', t); o.value = v; sDays.append(o); });
+    const fmtDate = ts => ts ? new Date(ts * 1000).toLocaleDateString('ar', { year: 'numeric', month: 'short', day: 'numeric' }) : '';
+    const runMailSearch = async () => {
+      mailOut.replaceChildren(el('div', 'يبحث…', 'as-memory-desc'));
+      try {
+        const r = await api('/api/assistant/mail/search', { query: sQ.value, account: sAcc.value, where: sWhere.value, days: +sDays.value, limit: 30 });
+        mailOut.replaceChildren();
+        if (r.error) { mailOut.append(el('div', r.error, 'as-memory-desc')); return; }
+        (r.errors || []).forEach(e => { const d = el('div', '⚠️ ' + e, 'as-memory-desc'); d.style.color = 'var(--err)'; mailOut.append(d); });
+        if (!(r.results || []).length) mailOut.append(el('div', 'لا نتائج.', 'as-memory-desc'));
+        (r.results || []).forEach(m => {
+          const row = el('div', ''); row.style.cssText = 'border:1px solid var(--line);border-radius:8px;padding:5px 8px;cursor:pointer;font-size:12px;display:flex;flex-direction:column;gap:1px';
+          const who = m.folder === 'sent' ? 'إلى: ' + m.to : 'من: ' + m.from;
+          row.append(el('b', m.subject), el('span', who), el('span', `${fmtDate(m.ts)} · ${m.account} · ${m.folder === 'sent' ? 'صادر' : 'وارد'}`, 'as-memory-desc'));
+          row.onclick = async () => {
+            let box = row.querySelector('.mail-body');
+            if (box) { box.remove(); return; }
+            box = el('div', 'يفتح الرسالة…'); box.className = 'mail-body'; box.style.cssText = 'white-space:pre-wrap;margin-top:5px;padding-top:5px;border-top:1px dashed var(--line);max-height:260px;overflow:auto;line-height:1.6'; row.append(box);
+            try { const d = await api('/api/assistant/mail/read', { account: m.account, folder_name: m.folder_name, uid: m.uid }); box.textContent = d.error || ((d.text || '(بلا نص)') + (d.attachments?.length ? '\n\n📎 ' + d.attachments.join('، ') : '')); } catch (e) { box.textContent = e.message; }
+          };
+          mailOut.append(row);
+        });
+      } catch (e) { mailOut.replaceChildren(el('div', e.message || 'تعذر البحث', 'as-memory-desc')); }
+    };
+    sQ.onkeydown = e => { if (e.key === 'Enter') runMailSearch(); };
+    mailSearch.append(sQ, (() => { const r = el('div', ''); r.style.cssText = 'display:flex;gap:5px;flex-wrap:wrap'; r.append(sAcc, sWhere, sDays, btn('بحث', runMailSearch, 'btn pri')); return r; })());
+    const loadMail = async () => {
+      try {
+        const r = await api('/api/assistant/mail/accounts'); const list = r.accounts || [];
+        mailAccounts.replaceChildren(); sAcc.replaceChildren();
+        const all = el('option', 'كل الحسابات'); all.value = ''; sAcc.append(all);
+        list.forEach(a => {
+          const row = el('div', ''); row.style.cssText = 'display:flex;align-items:center;gap:6px;font-size:12px';
+          const nm = el('span', (a.label ? a.label + ' · ' : '') + a.email); nm.style.cssText = 'flex:1;direction:ltr;text-align:right;overflow:hidden;text-overflow:ellipsis';
+          row.append(nm, btn('فصل', async () => { if (!confirm('فصل ' + a.email + '؟ تُحذف كلمة مرورها من سلسلة المفاتيح.')) return; await api('/api/assistant/mail/remove', { email: a.email }); loadMail(); }, 'btn'));
+          mailAccounts.append(row);
+          const o = el('option', a.email); o.value = a.email; sAcc.append(o);
+        });
+        mailCard.status.textContent = list.length ? `${list.length} حساب مربوط` : 'لا حسابات مربوطة بعد.';
+        mailSearch.style.display = list.length ? 'flex' : 'none';
+      } catch (e) { mailCard.status.textContent = e.message || 'تعذر التحميل'; }
+    };
+    mailCard.actions.append(btn('＋ ربط بريد', () => { mailForm.style.display = mailForm.style.display === 'none' ? 'flex' : 'none'; }, 'btn'));
+    mailCard.card.append(mailAccounts, mailForm, mailSearch, mailOut);
+    sideContentEl.appendChild(mailCard.card);
+    loadMail();
     async function loadSyncStatus() {
       try {
         const status = await api('/api/assistant/sync/status');
@@ -6478,6 +6548,7 @@
     sideContentEl.appendChild(refreshBox);
 
     // 3. بطاقات الوكلاء
+    ensureAgentAuth();
     agentsList.forEach(ag => {
       const isCurrentActive = ag.id === activeAgentId;
       const isDefault = ag.id === currentSettings.default_agent || (ag.default && !currentSettings.default_agent);
@@ -6667,9 +6738,51 @@
         controls.appendChild(chooseBtn);
       }
 
-      card.append(head, descBox, controls);
+      card.append(head, buildAuthRow(ag), descBox, controls);
       sideContentEl.appendChild(card);
     });
+  }
+
+  // ===== تسجيل الدخول والخروج لكل وكيل =====
+  let agentAuth = {}, agentAuthTs = 0, agentAuthBusy = false;
+  async function ensureAgentAuth(force) {
+    if (agentAuthBusy || (!force && Date.now() - agentAuthTs < 20000)) return;
+    agentAuthBusy = true; agentAuthTs = Date.now();
+    try {
+      const r = await api('/api/assistant/agents/auth' + (force ? '?force=1' : ''));
+      agentAuth = Object.fromEntries((r.auth || []).map(a => [a.id, a]));
+    } catch (_) { /* تبقى آخر حالة معروفة */ }
+    agentAuthBusy = false;
+    if (activeTab === 'settings') renderSettingsTab();
+  }
+  function buildAuthRow(ag) {
+    const a = agentAuth[ag.id];
+    const row = el('div', '', 'as-auth-row');
+    row.style.cssText = 'display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:6px 0;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--side)';
+    const st = a ? a.state : 'unknown';
+    const meta = { in: ['✓ مسجَّل الدخول', 'var(--ok,#16a34a)'], out: ['✗ غير مسجَّل', 'var(--err,#dc2626)'], expired: ['⚠ انتهت الجلسة', '#d97706'], missing: ['غير مثبّت', 'var(--mut)'], unknown: [a ? '؟ تعذرت القراءة' : '… يفحص', 'var(--mut)'] }[st] || ['؟', 'var(--mut)'];
+    const pill = el('b', meta[0]); pill.style.cssText = 'font-size:12px;color:' + meta[1];
+    row.appendChild(pill);
+    const info = [a && a.who, a && a.detail].filter(Boolean).join(' · ');
+    if (info) { const i = el('span', info); i.style.cssText = 'font-size:11px;color:var(--mut);flex:1;min-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'; i.title = info; row.appendChild(i); } else { const sp = el('span'); sp.style.flex = '1'; row.appendChild(sp); }
+    if (!a || st === 'missing') return row;
+    const act = async (action, label) => {
+      if (action === 'logout' && !confirm('تسجيل الخروج من ' + ag.name + '؟ ستحتاج لتسجيل الدخول من جديد قبل استعماله.')) return;
+      try {
+        const r = await api('/api/assistant/agents/auth', { agent: ag.id, action });
+        if (r.error) { safeNote(r.error); return; }
+        if (r.auth) agentAuth = Object.fromEntries(r.auth.map(x => [x.id, x]));
+        agentAuthTs = Date.now();
+        safeNote(r.message || label);
+        renderSettingsTab();
+        if (r.terminal) setTimeout(() => ensureAgentAuth(true), 15000);
+      } catch (err) { safeNote('تعذر التنفيذ: ' + (err.message || '')); }
+    };
+    const mk = (t, fn, cls) => { const b = btn(t, fn, 'btn ' + (cls || '')); b.style.cssText = 'padding:2px 10px;font-size:11.5px'; return b; };
+    row.appendChild(mk(st === 'in' ? 'إعادة الدخول' : 'تسجيل الدخول', () => act('login', 'فُتحت الطرفية'), st === 'in' ? '' : 'pri'));
+    if (st === 'in' || st === 'expired') row.appendChild(mk('تسجيل الخروج', () => act('logout', 'تم'), ''));
+    row.appendChild(mk('تحقق الآن', async () => { agentAuthTs = 0; await ensureAgentAuth(true); safeNote('حُدّثت حالة الدخول.'); }, ''));
+    return row;
   }
 
   const agentChartColors = ['#4f8cff', '#19a974', '#f59e0b', '#e05d8c', '#8b6ce8', '#13a8a8', '#ef6548', '#78909c'];

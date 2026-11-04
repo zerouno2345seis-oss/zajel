@@ -257,7 +257,7 @@ def status():
     wip = watch_cfg().get("ip")
     waddr = watch_current(wip) if wip else None
     state["watch"] = {"ip": wip, "connected": bool(waddr), "addr": waddr}
-    state["volumes"] = [{"name": v["name"], "free": v["free"], "writable": v["writable"], "network": bool(v.get("network"))} for v in volumes()]
+    state["volumes"] = [{"name": v["name"], "free": v["free"], "total": v.get("total"), "fs": v.get("fs"), "writable": v["writable"], "network": bool(v.get("network"))} for v in volumes()]
     try:
         serial = connected_device()
         model = shell("getprop ro.product.model", serial).stdout.strip()
@@ -961,7 +961,7 @@ def cloud_roots():
     if ICLOUD_BASE.is_dir():
         roots.append({"id": "icloud", "group": "cloud", "label": "iCloud Drive"})
     roots += rclone_src.remotes()
-    roots += [{"id": "vol:" + v["name"], "group": "network" if v.get("network") else "disk", "label": ("🌐 " if v.get("network") else "💾 ") + v["name"]} for v in volumes()]
+    roots += [{"id": "vol:" + v["name"], "group": "network" if v.get("network") else "disk", "label": ("🌐 " if v.get("network") else "💾 ") + v["name"], "total": v.get("total"), "free": v.get("free"), "fs": v.get("fs"), "writable": v.get("writable")} for v in volumes()]
     roots.append({"id": "home", "group": "computer", "label": "هذا الكمبيوتر"})
     return roots
 
@@ -2239,6 +2239,12 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"root": root, "path": rel})
             elif url.path == "/api/clean/rules":
                 self.send_json({"rules": cleaner.load_rules(), "choices": cleaner.KEEP_CHOICES})
+            elif url.path == "/api/clean/full/job":
+                import fullclean
+                f = fullclean.FULL.get(query.get("id", [""])[0])
+                if not f:
+                    raise ValueError("عملية التنظيف الكامل غير موجودة.")
+                self.send_json(fullclean.public(f))
             elif url.path == "/api/clean/job":
                 job = cleaner.JOBS.get(query.get("id", [""])[0])
                 if not job:
@@ -2513,6 +2519,22 @@ class Handler(BaseHTTPRequestHandler):
                         self.send_json({"report": adbclean.remove(job, [str(x) for x in paths])})
                     else:
                         self.send_json({"report": cleaner.remove(str(body.get("job", "")), [str(x) for x in paths], bool(body.get("permanent")))})
+            elif self.path.startswith("/api/clean/full/"):
+                import fullclean, rclone_src
+                size = int(self.headers.get("Content-Length", "0"))
+                body = json.loads(self.rfile.read(size) or b"{}")
+                act = self.path.rsplit("/", 1)[1]
+                if act == "start":
+                    tg = [{"root": str(t.get("root", "")), "label": str(t.get("label", ""))[:60]} for t in (body.get("targets") or [])[:12]]
+                    self.send_json(fullclean.start(tg, lambda r: cloud_resolve(r, ""), lambda r: rclone_src.spec(r, ""), str(body.get("agent", ""))))
+                elif act == "apply":
+                    if body.get("confirm") is not True:
+                        raise ValueError("يلزم تأكيد صريح من المستخدم.")
+                    self.send_json(fullclean.apply(str(body.get("id", "")), [str(x) for x in body.get("items", [])]))
+                elif act == "cancel":
+                    self.send_json(fullclean.cancel(str(body.get("id", ""))))
+                else:
+                    raise ValueError("طلب غير معروف.")
             elif self.path == "/api/favorites":
                 size = int(self.headers.get("Content-Length", "0"))
                 self.send_json({"favs": favorites_set(json.loads(self.rfile.read(size)).get("favs"))})

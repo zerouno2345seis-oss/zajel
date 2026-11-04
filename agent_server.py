@@ -61,6 +61,8 @@ def init(module, data_dir, port):
     (DATA / ".zajel_port").write_text(str(PORT), encoding="utf-8")
     import agent_runner
     agent_runner.init(DATA, PORT)
+    import zajel_mail as mailbox
+    mailbox.init(DATA)
     import automation, agent_scripts
     automation.init(DATA)
     agent_scripts.init(DATA)
@@ -795,6 +797,40 @@ def handle(h, method):
             hrs = int((query.get("hours") or ["24"])[0] or 24)
             inst = {a["id"]: a["installed"] for a in agent_runner.agents()}
             h.send_json(agent_metrics.stats(hrs, inst, [a["id"] for a in agent_runner.agents()]) | {"names": {a["id"]: a["name"] for a in agent_runner.agents()}})
+        elif path.startswith("/api/assistant/mail/"):
+            import zajel_mail as mailbox
+            act = path.rsplit("/", 1)[1]
+            try:
+                if act == "accounts":
+                    h.send_json({"accounts": mailbox.accounts()})
+                elif act == "hint":
+                    h.send_json(mailbox.hint_for((query.get("email") or [""])[0]))
+                else:
+                    b = _body(h)
+                    if act == "add":
+                        h.send_json({"accounts": mailbox.add(str(b.get("email", "")), str(b.get("password", "")), str(b.get("host", "")), str(b.get("label", "")))})
+                    elif act == "remove":
+                        h.send_json({"accounts": mailbox.remove(str(b.get("email", "")))})
+                    elif act == "search":
+                        h.send_json(mailbox.search(str(b.get("query", "")), str(b.get("account", "")), str(b.get("where", "all")), int(b.get("days") or 0), int(b.get("limit") or 30)))
+                    elif act == "read":
+                        h.send_json(mailbox.read(str(b.get("account", "")), str(b.get("folder_name", "INBOX")), str(b.get("uid", ""))))
+                    else:
+                        h.send_json({"error": "طلب غير معروف."})
+            except ValueError as e:
+                h.send_json({"error": str(e)})
+        elif path == "/api/assistant/agents/auth" and method == "GET":
+            import agent_auth
+            h.send_json({"auth": agent_auth.status(force=(query.get("force") or ["0"])[0] == "1")})
+        elif path == "/api/assistant/agents/auth" and method == "POST":
+            import agent_auth
+            b = _body(h)
+            aid, act = str(b.get("agent", "")), str(b.get("action", ""))
+            try:
+                res = agent_auth.login(aid) if act == "login" else agent_auth.logout(aid) if act == "logout" else {"ok": True}
+                h.send_json(res | {"auth": agent_auth.status(force=True)})
+            except ValueError as e:
+                h.send_json({"error": str(e)})
         elif path == "/api/assistant/agents/ping" and method == "POST":
             h.send_json(agent_runner.ping(str(_body(h).get("agent", ""))))
         elif path == "/api/assistant/memory":

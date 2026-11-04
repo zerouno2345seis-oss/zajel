@@ -417,20 +417,20 @@ def _ensure_ready(i, timeout=45):
     if _t("has-session", "-t", _name(i)).returncode != 0:
         start(i)
     t0 = time.time()
-    time.sleep(2)
+    time.sleep(0.5)
     while time.time() - t0 < timeout:
         st, _, idle = state_of(i)
-        if st in ("idle", "waiting") and idle >= 3:
+        if st in ("idle", "waiting") and idle >= 1.5:
             return True
         if st == "shell" and time.time() - t0 > 8:
             raise ValueError("خرج الوكيل إلى الطرفية؛ أعد تشغيله.")
-        time.sleep(1.5)
+        time.sleep(0.5)
     return False
 
 
 def _type_message(i, text):
     send(i, text, paste=True)
-    time.sleep(0.6)
+    time.sleep(0.25)
     send(i, "", keys=["Enter"])
 
 
@@ -536,8 +536,8 @@ def _ask(rd, i, entry, question, tok, add_dirs=()):
                 if rd["stop"]:
                     entry["state"] = "stopped"
                     return
-                time.sleep(2)
-                txt = _plain(i)
+                time.sleep(0.8)
+                txt = _plain(i, 1500)
                 if "⟦A-%s⟧" % tok in txt:            # الإجابة قيد الكتابة: نعرض ما بعد علامة البداية حيًّا
                     entry["live"] = _clean_body(txt.rsplit("⟦A-%s⟧" % tok, 1)[1].replace("⟦Z-%s⟧" % tok, ""))[-3000:]
                 ans = extract_answer(txt, tok)
@@ -547,7 +547,7 @@ def _ask(rd, i, entry, question, tok, add_dirs=()):
                 st, _, idle = state_of(i)
                 if st == "working":
                     worked, quiet_since = True, None
-                elif not worked and time.time() - entry["sent_at"] > 90:   # لم يبدأ العمل أصلًا: نجرّب الوضع غير التفاعلي مرة واحدة
+                elif not worked and time.time() - entry["sent_at"] > 60:   # لم يبدأ العمل أصلًا: نجرّب الوضع غير التفاعلي مرة واحدة
                     hl = _headless(i, question, rd=rd)
                     if hl:
                         entry.update(state="done", answer=hl, via="headless", finished_at=time.time())
@@ -556,7 +556,7 @@ def _ask(rd, i, entry, question, tok, add_dirs=()):
                     return
                 elif worked:
                     quiet_since = quiet_since or time.time()
-                    if time.time() - quiet_since > 40:        # انتهى العمل بلا علامات: نعرض آخر الشاشة خامًا
+                    if time.time() - quiet_since > 25:        # انتهى العمل بلا علامات: نعرض آخر الشاشة خامًا
                         hl = _headless(i, question, rd=rd)
                         if hl:
                             entry.update(state="done", answer=hl, via="headless", finished_at=time.time())

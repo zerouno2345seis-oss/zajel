@@ -1,0 +1,240 @@
+"""التنظيف الكامل: يفحص كل ما يعطيه المستخدم (الكمبيوتر، أقراص، سحابات) ثم يعرض خطة تحسين بمشاركة الذكاء الاصطناعي،
+ولا ينفّذ شيئًا إلا بعد موافقة صريحة. التنفيذ ينقل إلى السلة (قابل للاسترجاع) ولا يحذف نهائيًا إلا ما تسمح به نتائج الفحص.
+"""
+from __future__ import annotations
+
+import threading
+import time
+import uuid
+from pathlib import Path
+
+import cleaner as C
+
+FULL: dict[str, dict] = {}
+LOCK = threading.Lock()
+MAX_ITEM_PATHS = 3000
+
+LOCAL_STEPS = [("analyze", "تحليل المساحة", {}), ("large", "أكبر الملفات", {"min_size": 200 << 20}),
+               ("duplicates", "الملفات المكررة", {"min_size": 5 << 20}), ("empty", "المجلدات الفارغة", {})]
+CLOUD_STEPS = [("analyze", "تحليل المساحة", {}), ("large", "أكبر الملفات", {"min_size": 200 << 20}),
+               ("duplicates", "الملفات المكررة", {"min_size": 5 << 20}), ("empty", "المجلدات الفارغة", {})]
+
+
+def public(f: dict) -> dict:
+    return {"id": f["id"], "state": f["state"], "progress": f["progress"], "steps": f["steps"], "plan": f.get("plan"),
+            "ai": f.get("ai", ""), "report": f.get("report"), "error": f.get("error", ""), "seconds": round(time.time() - f["started"], 1)}
+
+
+def _cancelled(f):
+    if f["cancel"]:
+        raise C.Cancelled()
+
+
+def start(targets: list[dict], resolver, rc_spec, agent: str = "") -> dict:
+    """targets: [{'root': 'home'|'vol:X'|'rc:name', 'label': '...'}]؛ resolver(root) → (base, target) للمحلي؛ rc_spec(root) → «حساب:»."""
+    if not targets:
+        raise ValueError("اختر جهازًا أو قرصًا أو سحابة واحدة على الأقل.")
+    f = {"id": uuid.uuid4().hex[:10], "state": "scanning", "progress": "يبدأ…", "steps": [], "cancel": False, "started": time.time(),
+         "jobs": {}, "plan": None, "ai": "", "report": None, "error": "", "targets": targets, "agent": agent}
+    with LOCK:
+        FULL[f["id"]] = f
+        for k in sorted(FULL, key=lambda x: FULL[x]["started"])[:-4]:
+            FULL.pop(k, None)
+    threading.Thread(target=_run, args=(f, resolver, rc_spec), daemon=True).start()
+    return public(f)
+
+
+def _step(f, label):
+    s = {"label": label, "state": "running"}
+    f["steps"].append(s)
+    return s
+
+
+def _job(f, kind, target_label):
+    job = C.new_job(kind, target_label)
+    job["keep"] = True          # لا يُحذف من السجل حتى تُنفَّذ الخطة
+    f["jobs"][job["id"]] = job
+    return job
+
+
+def _watch(f, job, s, label):
+    """ينقل تقدّم المهمة الفرعية إلى الواجهة، ويُلغيها إن أُلغي التنظيف."""
+    def beat():
+        while job["state"] == "running":
+            f["progress"] = f"{label} · {job['progress']}"
+            if f["cancel"]:
+                job["cancel"] = True
+            time.sleep(0.5)
+    t = threading.Thread(target=beat, daemon=True)
+    t.start()
+    return t
+
+
+def _run(f, resolver, rc_spec):
+    results: list[dict] = []     # {target, kind, job, result}
+    try:
+        for tg in f["targets"]:
+            root, label = tg["root"], tg.get("label") or tg["root"]
+            is_rc = root.startswith("rc:")
+            try:
+                if is_rc:
+                    spec, base = rc_spec(root), rc_spec(root)
+                    steps = CLOUD_STEPS
+                else:
+                    base, target = resolver(root)
+                    steps = ([("caches", "الكاش والسجلات", {})] if root == "home" else []) + LOCAL_STEPS
+            except Exception as exc:  # noqa: BLE001
+                f["steps"].append({"label": f"{label}: تعذر فتحه", "state": "error", "detail": str(exc)})
+                continue
+            for kind, title, opts in steps:
+                _cancelled(f)
+                s = _step(f, f"{label} — {title}")
+                job = _job(f, kind, label)
+                job["base"] = str(base)
+                w = _watch(f, job, s, f"{label} — {title}")
+                if is_rc:
+                    C.rc_run(job, kind, spec, opts)
+                elif kind == "caches":
+                    C.run(job, kind, Path(base), Path(base), opts)
+                else:
+                    C.run(job, kind, Path(base), Path(target), opts)
+                w.join(timeout=1)
+                if job["state"] == "cancelled":
+                    raise C.Cancelled()
+                s["state"] = "done" if job["state"] == "done" else "error"
+                if job["state"] == "error":
+                    s["detail"] = job["error"]
+                else:
+                    results.append({"target": label, "root": root, "kind": kind, "job": job["id"], "result": job["result"]})
+        f["state"], f["progress"] = "planning", "يبني الخطة…"
+        f["plan"] = build_plan(results)
+        f["ai"] = ask_ai(f, results, f["plan"])
+        f["state"], f["progress"] = "ready", "الخطة جاهزة للمراجعة"
+    except C.Cancelled:
+        f["state"], f["progress"] = "cancelled", "أُلغي"
+    except Exception as exc:  # noqa: BLE001
+        f["state"], f["error"] = "error", str(exc)
+
+
+def _chunks(paths):
+    return [paths[i:i + MAX_ITEM_PATHS] for i in range(0, len(paths), MAX_ITEM_PATHS)]
+
+
+def build_plan(results: list[dict]) -> dict:
+    items: list[dict] = []
+    overview = []
+
+    def add(group, title, desc, risk, size, paths, job, target, on, sample=None):
+        if not paths:
+            return
+        items.append({"id": f"i{len(items)}", "group": group, "title": title, "desc": desc, "risk": risk, "size": size, "count": len(paths),
+                      "paths": paths[:MAX_ITEM_PATHS], "job": job, "target": target, "default_on": on, "sample": (sample or paths)[:12],
+                      "truncated": len(paths) > MAX_ITEM_PATHS})
+
+    for r in results:
+        res, kind, job, tg = r["result"] or {}, r["kind"], r["job"], r["target"]
+        if kind == "analyze":
+            overview.append({"target": tg, "total": res.get("total", 0), "files": res.get("files", 0),
+                             "types": (res.get("types") or [])[:5], "top": [{"name": c["name"], "size": c["size"]} for c in (res.get("children") or [])[:5]]})
+        elif kind == "caches":
+            for c in res.get("categories", []):
+                safe = c["risk"] in ("safe", "rebuild")
+                add("cache", c["title"], c["desc"], c["risk"], c["size"], [i["path"] for i in c["items"]], job, tg, safe,
+                    [f'{i["path"]} ({i["size"] >> 20} MB)' for i in c["items"][:12]])
+        elif kind == "empty":
+            paths = res.get("dirs") or []
+            add("empty", "مجلدات فارغة", "مجلدات بلا أي ملف: حذفها آمن.", "safe", 0, paths, job, tg, True)
+        elif kind == "duplicates":
+            paths, size = [], 0
+            sample = []
+            for g in res.get("groups", []):
+                extra = [f["path"] for f in g["files"][1:]]
+                paths += extra
+                size += g["wasted"]
+                if len(sample) < 12:
+                    sample.append(f'{extra[0]} ← مكرر لـ {g["files"][0]["path"]}')
+            add("dup", "ملفات مكررة تمامًا (يُبقى نسخة واحدة)", "نسخ مطابقة بايتًا ببايت؛ يُبقى الأنسب بحسب قواعد الاحتفاظ، وتُنقل البقية إلى السلة.", "review", size, paths, job, tg, True, sample)
+        elif kind == "large":
+            files = res.get("files") or []
+            old = [x for x in files if x.get("old")]
+            add("large", "ملفات كبيرة لم تُعدَّل منذ سنة", "للمراجعة اليدوية فقط: لا تُحدَّد تلقائيًا.", "review", sum(x["size"] for x in old), [x["path"] for x in old], job, tg, False,
+                [f'{x["path"]} ({x["size"] >> 20} MB)' for x in old[:12]])
+    groups = {}
+    for it in items:
+        g = groups.setdefault(it["group"], {"count": 0, "size": 0})
+        g["count"] += it["count"]
+        g["size"] += it["size"]
+    safe_total = sum(i["size"] for i in items if i["default_on"])
+    return {"items": items, "overview": overview, "groups": groups, "recommended_size": safe_total,
+            "total_size": sum(i["size"] for i in items)}
+
+
+def ask_ai(f, results, plan) -> str:
+    """يطلب من الوكيل الأساسي قراءة الخلاصة وكتابة رؤيته؛ إن تعذّر يبقى التحليل الآلي وحده."""
+    try:
+        import agent_runner
+        import council_agents
+        agent = f.get("agent") or agent_runner.settings().get("default_agent") or "agy"
+        lines = []
+        for o in plan["overview"]:
+            lines.append(f"- {o['target']}: الحجم {o['total'] >> 20} MB في {o['files']} ملف؛ الأنواع: " + "، ".join(f"{t['name']} {t['size'] >> 20}MB" for t in o["types"]) +
+                         "؛ أكبر العناصر: " + "، ".join(f"{t['name']} {t['size'] >> 20}MB" for t in o["top"]))
+        for it in plan["items"]:
+            lines.append(f"* [{it['group']}/{it['risk']}] {it['target']} — {it['title']}: {it['count']} عنصر، {it['size'] >> 20} MB")
+        prompt = ("أنت مستشار تنظيف ملفات داخل برنامج زاجل. هذه نتيجة فحص آلي لأجهزة وأقراص وسحابات المستخدم (لا تخترع أي مسار أو رقم غير موجود هنا):\n"
+                  + "\n".join(lines) +
+                  "\n\nاكتب بالعربية، في أقل من 180 كلمة وبنقاط قصيرة: (١) تقييمك للوضع العام وأين تضيع المساحة. (٢) ترتيب التنفيذ الأنسب ولماذا. "
+                  "(٣) ما الذي يجب مراجعته يدويًا قبل الحذف، وأي مخاطر. (٤) اقتراحات تحسين دائمة (عادات أو أتمتة) تمنع عودة الفوضى. لا تنفّذ شيئًا ولا تستعمل أدوات.")
+        res = council_agents.run(agent, prompt, depth="fast", timeout=120)
+        return (res.get("text") or "").strip() if res.get("ok") else ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def apply(fid: str, item_ids: list[str]) -> dict:
+    f = FULL.get(fid)
+    if not f or f["state"] != "ready":
+        raise ValueError("الخطة غير جاهزة أو انتهت صلاحيتها؛ أعد التنظيف الكامل.")
+    chosen = [i for i in f["plan"]["items"] if i["id"] in set(item_ids)]
+    if not chosen:
+        raise ValueError("لم تُحدَّد أي بنود.")
+    f["state"], f["progress"], f["cancel"] = "applying", "يبدأ التنفيذ…", False
+    threading.Thread(target=_apply, args=(f, chosen), daemon=True).start()
+    return public(f)
+
+
+def _apply(f, chosen):
+    report = {"ok": 0, "failed": 0, "freed": 0, "items": []}
+    try:
+        for n, it in enumerate(chosen, 1):
+            if f["cancel"]:
+                break
+            f["progress"] = f"({n}/{len(chosen)}) {it['target']} — {it['title']}"
+            ok = bad = 0
+            for part in _chunks(it["paths"]):
+                if f["cancel"]:
+                    break
+                try:
+                    rep = C.remove(it["job"], part, False)
+                except Exception as exc:  # noqa: BLE001
+                    bad += len(part)
+                    report["items"].append({"title": it["title"], "error": str(exc)})
+                    continue
+                ok += sum(1 for r in rep if r["ok"])
+                bad += sum(1 for r in rep if not r["ok"])
+            report["ok"] += ok
+            report["failed"] += bad
+            if bad == 0 or ok:
+                report["freed"] += it["size"] * (ok / max(1, it["count"]))
+            report["items"].append({"title": it["title"], "target": it["target"], "ok": ok, "failed": bad})
+        f["report"] = report
+        f["state"], f["progress"] = "done", "اكتمل التنفيذ"
+    except Exception as exc:  # noqa: BLE001
+        f["state"], f["error"] = "error", str(exc)
+
+
+def cancel(fid: str):
+    f = FULL.get(fid)
+    if f:
+        f["cancel"] = True
+    return {"ok": True}

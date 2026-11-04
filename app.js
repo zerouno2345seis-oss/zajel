@@ -77,7 +77,7 @@ function buildSources() {
     const kindle = r.group === 'disk' && /kindle/i.test(r.label || r.id);
     if (kindle) { list.push({ id: r.id, type: 'local', root: r.id, label: 'Kindle', icon: '📖', online: true, home: 'documents', kind: 'disk', kindle: true, email: '', acct: null,
       quick: [{ l: 'الكتب', p: 'documents' }, { l: 'كل الملفات', p: '' }], sub: 'قارئ Kindle · كابل' + (vol ? ' · حرة ' + fsize(vol.free) : '') }); continue; }
-    list.push({ id: r.id, type: 'local', root: r.id, label: r.group === 'disk' ? r.label.replace('💾 ', '') : r.group === 'network' ? r.label.replace('🌐 ', '') : r.label, icon: kind === 'cloud' ? '☁️' : kind === 'disk' ? '💾' : kind === 'network' ? '🌐' : '🖥️', online: true, home: '', kind, email: r.email || '', acct: r.group === 'rclone' ? r.id.slice(3) : null,
+    list.push({ id: r.id, type: 'local', root: r.id, label: r.group === 'disk' ? r.label.replace('💾 ', '') : r.group === 'network' ? r.label.replace('🌐 ', '') : r.label, icon: kind === 'cloud' ? '☁️' : kind === 'disk' ? '💾' : kind === 'network' ? '🌐' : '🖥️', online: true, home: '', kind, email: r.email || '', used: r.used ?? null, total: r.total ?? vol?.total ?? null, free: r.free ?? vol?.free ?? null, fs: r.fs || '', writable: r.writable, acct: r.group === 'rclone' ? r.id.slice(3) : null,
       quick: kind === 'home' ? QUICK_HOME.map(([l, p]) => ({ l, p })) : [], sub: (kind === 'disk' || kind === 'network') && vol ? `${kind === 'network' ? 'شبكة · ' : ''}حرة ${fsize(vol.free)}` : kind === 'cloud' ? (r.group === 'rclone' ? [r.kind, r.email].filter(Boolean).join(' · ') || 'حساب سحابي مباشر' : 'متزامن') : 'ملفاتك' });
   }
   return list;
@@ -117,6 +117,16 @@ async function loadFavs() {
   try { favList = (await api('/api/favorites')).favs; } catch (_) {}
   try { const old = JSON.parse(store.get('favs', '[]')); if (!favList.length && old.length) { favList = old.map(o => ({ id: o.id, path: o.path, name: o.label || o.path, is_dir: true })); await saveFavs(); } if (old.length) store.set('favs', '[]'); } catch (_) {}
   renderSources(); updateFavBtns();
+}
+function sourceUsage(s) {
+  if (!['disk', 'network', 'cloud'].includes(s.kind) || !s.total || s.total <= 0) return null;
+  let used = s.used, free = s.free;
+  if (used == null && free != null) used = s.total - free;
+  if (free == null && used != null) free = s.total - used;
+  if (used == null) return null;
+  const pct = Math.max(0, Math.min(100, Math.round(used / s.total * 100)));
+  const extra = [s.fs ? s.fs.toUpperCase() : '', s.writable === false ? 'للقراءة فقط' : ''].filter(Boolean).join(' · ');
+  return { pct, free: Math.max(0, free), total: s.total, extra, text: `المستخدم ${fsize(used)} من ${fsize(s.total)} (${pct}%) · حرّة ${fsize(Math.max(0, free))}` };
 }
 function renderSources() {
   const box = $('#sources'); box.replaceChildren();
@@ -160,6 +170,7 @@ function renderSources() {
       const isDev = s.type === 'adb' || s.type === 'ios' || s.type === 'kindle', hasSub = isDev && (s.quick.length || s.id === 'phone' || favList.some(f => f.under && (f.id === s.id || f.src === s.id))), open = hasSub && devOpen().includes(s.id);
       const tx = el('div', undefined, 'tx'); tx.append(el('b', s.label), el('small', s.sub || ''));
       row.append(el('span', s.icon, 'ic'), tx);
+      const usage = sourceUsage(s); if (usage) row.title += `\n${usage.text}`;
       if (hasSub) { const cv = el('span', open ? '▾' : '▸', 'devcaret'); cv.title = open ? 'طيّ الأقسام' : 'إظهار الأقسام'; cv.onclick = ev => { ev.stopPropagation(); toggleDev(s.id); }; row.append(cv); }
       if (s.acct || s.kind === 'disk') {
         const mb = el('button', '⋯', 'mb'); mb.title = 'خيارات هذا المصدر';
@@ -177,6 +188,10 @@ function renderSources() {
       dropTarget(row, () => s.online ? { src: s, dir: s.home } : null);
       row.draggable = true; row.ondragstart = ev => { ev.dataTransfer.effectAllowed = 'copy'; ev.dataTransfer.setData('application/x-zajel', JSON.stringify({ items: [{ place: s.id, path: s.home || '', name: s.label, is_dir: true, source: true }] })); };
       box.append(row);
+      if (usage) { const bar = el('div', undefined, 'ubar' + (usage.pct >= 90 ? ' crit' : usage.pct >= 75 ? ' warn' : '')); bar.title = usage.text;
+        const fill = el('i'); fill.style.width = usage.pct + '%'; bar.append(fill);
+        const meta = el('div', undefined, 'umeta'); meta.append(el('span', usage.pct + '% ممتلئ'), el('span', 'حرّة ' + fsize(usage.free)), el('span', 'من ' + fsize(usage.total)), ...(usage.extra ? [el('span', usage.extra)] : []));
+        const wrap = el('div', undefined, 'usage'); wrap.append(bar, meta); wrap.onclick = () => row.click(); box.append(wrap); }
       if (isDev ? open : cs?.id === s.id) s.quick.forEach(q => { const a = el('a', q.l, 'q' + (P.cur === q.p ? ' act' : '')); a.onclick = () => P.go(s.id, q.p); dropTarget(a, () => ({ src: s, dir: q.p })); box.append(a); });
       const pins = favList.filter(f => f.under && (f.id === s.id || f.src === s.id));
       if (isDev ? open : true) {
@@ -2179,6 +2194,97 @@ let cleanJob = null, cleanKind = '', cleanData = null, cleanTimer = null;
 const cleanSel = new Set(), cleanSizes = new Map(), cleanPerm = new Set(), cleanGroupOf = new Map();
 const SHORT = { analyze: 'المساحة', duplicates: 'المكرر', similar: 'المتشابه', caches: 'الكاش', large: 'الكبير', empty: 'الفارغ', folders: 'المجلدات' };
 TOOLS.forEach(([k, ic, t, d]) => { const c = el('button', undefined, 'tbtn'); c.title = `${t}: ${d}`; c.append(el('span', ic, 'ti'), el('span', SHORT[k])); c.onclick = () => runScan(k); $('#ctools').append(c); });
+// ===== التنظيف الكامل: فحص شامل + خطة بمشاركة الذكاء الاصطناعي + تنفيذ بعد الموافقة =====
+{
+  const b = el('button', undefined, 'tbtn pri'); b.title = 'يفحص كل ما تختاره (الكمبيوتر، الأقراص، السحابات) ويعرض خطة تحسين تراجعها ثم يبدأ بعد موافقتك';
+  b.append(el('span', '🧹', 'ti'), el('span', 'تنظيف كامل')); b.onclick = openFullClean; $('#ctools').prepend(b);
+}
+function openFullClean() {
+  const RISK = { safe: ['آمن', '#16a34a'], rebuild: ['يُعاد بناؤه', '#2563eb'], review: ['للمراجعة', '#d97706'] };
+  let fid = '', timer = null;
+  const stop = () => { if (timer) clearInterval(timer); timer = null; };
+  openModal(m => {
+    m.style.maxWidth = 'min(860px,94vw)'; m.style.width = '860px';
+    const body = el('div'); body.style.cssText = 'max-height:70vh;overflow:auto;display:flex;flex-direction:column;gap:8px';
+    const foot = el('div'); foot.style.cssText = 'display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap';
+    m.append(el('h3', '🧹 التنظيف الكامل'), body, foot);
+    const close = el('button', 'إغلاق', 'btn'); close.onclick = () => { stop(); if (fid) api('/api/clean/full/cancel', { id: fid }).catch(() => {}); closeModal(); };
+    const pick = () => {
+      body.replaceChildren(el('p', 'اختر ما تريد تنظيفه. سيُحلَّل كل واحد (المساحة، الكاش، المكرر، الكبير، الفارغ) ثم تُعرض عليك خطة كاملة؛ لا يُنقل ولا يُحذف شيء قبل موافقتك، والتنفيذ ينقل إلى السلة.', 'muted'));
+      const rank = { computer: 0, disk: 1, network: 2, cloud: 3, rclone: 3 };
+      const roots = [...cloudRoots].sort((a, c) => (rank[a.group] ?? 9) - (rank[c.group] ?? 9));
+      const boxes = [];
+      roots.forEach(r => {
+        const supported = r.group === 'computer' || r.group === 'disk' || r.group === 'rclone';
+        const row = el('label'); row.style.cssText = 'display:flex;gap:8px;align-items:center;padding:6px 8px;border:1px solid var(--line);border-radius:8px;' + (supported ? 'cursor:pointer' : 'opacity:.5');
+        const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = supported && r.id === 'home'; cb.disabled = !supported;
+        const label = r.group === 'computer' ? '🖥️ هذا الكمبيوتر' : r.label;
+        const info = r.total ? ` · ${fsize(r.total)}` : '';
+        row.append(cb, el('b', label), el('small', (supported ? '' : 'غير مدعوم هنا ') + info, 'muted')); boxes.push([cb, r, label]); body.append(row);
+      });
+      foot.replaceChildren(close);
+      const go = el('button', 'ابدأ التحليل', 'btn pri'); go.onclick = async () => {
+        const targets = boxes.filter(([c]) => c.checked).map(([, r, label]) => ({ root: r.id, label }));
+        if (!targets.length) { note('اختر هدفًا واحدًا على الأقل.'); return; }
+        try { fid = (await api('/api/clean/full/start', { targets })).id; } catch (e) { note(e.message); return; }
+        watch();
+      };
+      foot.prepend(go);
+    };
+    const watch = () => {
+      const cancel = el('button', 'إلغاء', 'btn'); cancel.onclick = () => api('/api/clean/full/cancel', { id: fid }).catch(() => {});
+      foot.replaceChildren(cancel);
+      const tick = async () => {
+        let r; try { r = await api('/api/clean/full/job?id=' + fid); } catch (e) { stop(); body.replaceChildren(el('div', '⚠️ ' + e.message, 'warnbox')); foot.replaceChildren(close); return; }
+        if (r.state === 'ready') { stop(); return plan(r); }
+        if (r.state === 'done') { stop(); return finish(r); }
+        if (r.state === 'error' || r.state === 'cancelled') { stop(); body.replaceChildren(el('div', r.state === 'error' ? '⚠️ ' + r.error : 'أُلغي التنظيف الكامل.', 'warnbox')); foot.replaceChildren(close); return; }
+        const list = el('div'); list.style.cssText = 'display:flex;flex-direction:column;gap:3px;font-size:13px';
+        (r.steps || []).forEach(s => list.append(el('div', (s.state === 'done' ? '✓ ' : s.state === 'error' ? '✗ ' : '⏳ ') + s.label + (s.detail ? ' — ' + s.detail : ''))));
+        body.replaceChildren(el('b', (r.state === 'planning' ? '🤖 ' : '🔎 ') + r.progress + ' · ' + r.seconds + ' ث'), list);
+      };
+      stop(); tick(); timer = setInterval(tick, 900);
+    };
+    const plan = r => {
+      const P = r.plan, sel = new Set(P.items.filter(i => i.default_on).map(i => i.id));
+      const total = () => P.items.filter(i => sel.has(i.id)).reduce((a, i) => a + i.size, 0);
+      const btn = el('button', '', 'btn pri'), sum = () => { btn.textContent = `ابدأ التنفيذ (${sel.size} بند · نحو ${fsize(total())})`; btn.disabled = !sel.size; };
+      body.replaceChildren();
+      if (r.ai) { const ai = el('div'); ai.style.cssText = 'white-space:pre-wrap;line-height:1.7;border:1px solid var(--acc);border-radius:10px;padding:10px 12px;background:var(--accp)'; ai.append(el('b', '🤖 رؤية الذكاء الاصطناعي\n'), document.createTextNode(r.ai)); body.append(ai); }
+      else body.append(el('div', 'تعذّر الحصول على رأي الذكاء الاصطناعي الآن؛ هذه الخطة من التحليل الآلي وحده.', 'muted'));
+      (P.overview || []).forEach(o => body.append(el('div', `📊 ${o.target}: ${fsize(o.total)} في ${o.files.toLocaleString()} ملف — الأكبر: ${o.top.map(t => t.name + ' ' + fsize(t.size)).join('، ')}`, 'muted')));
+      if (!P.items.length) body.append(el('div', '✨ لا شيء يستحق التنظيف في ما اخترته.'));
+      P.items.forEach(it => {
+        const row = el('div'); row.style.cssText = 'border:1px solid var(--line);border-radius:9px;padding:7px 10px;display:flex;flex-direction:column;gap:3px';
+        const top = el('label'); top.style.cssText = 'display:flex;gap:8px;align-items:center;cursor:pointer';
+        const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = sel.has(it.id); cb.onchange = () => { cb.checked ? sel.add(it.id) : sel.delete(it.id); sum(); };
+        const [rt, rc] = RISK[it.risk] || ['', 'inherit']; const pill = el('small', rt); pill.style.cssText = `color:${rc};border:1px solid ${rc};border-radius:99px;padding:0 7px`;
+        top.append(cb, el('b', `${it.target} — ${it.title}`), pill, el('span', `${it.count.toLocaleString()} عنصر${it.size ? ' · ' + fsize(it.size) : ''}`, 'muted'));
+        const det = el('details'); det.append(el('summary', it.desc)); const ul = el('div'); ul.style.cssText = 'font-size:11.5px;direction:ltr;text-align:left;color:var(--mut);overflow-wrap:anywhere'; it.sample.forEach(x => ul.append(el('div', x))); if (it.count > it.sample.length) ul.append(el('div', `… و${(it.count - it.sample.length).toLocaleString()} غيرها`)); det.append(ul);
+        row.append(top, det); body.append(row);
+      });
+      sum(); btn.onclick = async () => {
+        if (!confirm(`سيُنقل ${sel.size} بند إلى السلة (نحو ${fsize(total())}). متابعة؟`)) return;
+        try { await api('/api/clean/full/apply', { id: fid, items: [...sel], confirm: true }); } catch (e) { note(e.message); return; }
+        watchApply();
+      };
+      foot.replaceChildren(btn, close);
+    };
+    const watchApply = () => {
+      foot.replaceChildren(el('small', 'لا تغلق النافذة حتى ينتهي التنفيذ.', 'muted'));
+      stop(); timer = setInterval(async () => {
+        try { const r = await api('/api/clean/full/job?id=' + fid); body.replaceChildren(el('b', '⏳ ' + r.progress)); if (r.state === 'done') { stop(); finish(r); } else if (r.state === 'error') { stop(); body.replaceChildren(el('div', '⚠️ ' + r.error, 'warnbox')); foot.replaceChildren(close); } } catch (e) { stop(); body.replaceChildren(el('div', '⚠️ ' + e.message, 'warnbox')); foot.replaceChildren(close); }
+      }, 900);
+    };
+    const finish = r => {
+      const R = r.report || { ok: 0, failed: 0, freed: 0, items: [] };
+      body.replaceChildren(el('b', `✅ اكتمل: نُقل ${R.ok.toLocaleString()} عنصر إلى السلة (نحو ${fsize(R.freed)})${R.failed ? ` · تعذّر ${R.failed}` : ''}`));
+      R.items.forEach(i => body.append(el('div', `${i.target || ''} — ${i.title}: ${i.error ? '⚠️ ' + i.error : `${i.ok} نجح${i.failed ? '، ' + i.failed + ' تعذّر' : ''}`}`, 'muted')));
+      body.append(el('div', 'يمكنك استرجاع أي شيء من سلة المهملات قبل إفراغها.', 'muted')); foot.replaceChildren(close);
+    };
+    pick();
+  });
+}
 function initCleanRoots() {
   const sel0 = croot.value; croot.replaceChildren();
   sources.filter(s => s.type === 'adb').forEach(s => { const o = el('option', `${s.icon} ${s.label}${s.online ? '' : ' (غير متصل)'}`); o.value = 'dev:' + s.id; croot.append(o); });
