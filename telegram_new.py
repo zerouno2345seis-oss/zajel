@@ -133,6 +133,8 @@ def on_callback(chat, mid, kind, rest):
         act, _, arg = rest.partition(":")
         if act == "s":
             talk_start(chat, arg, mid)
+        elif act == "end":
+            talk_end(chat)
         return
     if kind == "ml":
         mail_read(chat, int(rest.split(":")[1]))
@@ -183,7 +185,7 @@ def talk_start(chat, aid, mid=None):
     name = terminal.BY_ID[aid]["name"]
     TALK[chat] = aid
     msg = f"🗣 أنت الآن تتحدث مع {name} مباشرة في طرفيته. اكتب رسالتك (أو سجّلها صوتًا) وسأوصلها وأعرض لك الإجابة.\nللخروج: /endtalk"
-    TL.send(msg, chat)
+    TL.send(msg, chat, kb=_talk_kb(aid))
     threading.Thread(target=lambda: _talk_warm(aid), daemon=True).start()
 
 
@@ -193,6 +195,11 @@ def _talk_warm(aid):
         terminal.start(aid)
     except Exception:
         pass
+
+
+def _talk_kb(aid):
+    import terminal
+    return [[_b("⏹ إنهاء الحديث مع " + terminal.BY_ID[aid]["name"], "tk:end")]]
 
 
 def talk_end(chat):
@@ -219,8 +226,8 @@ def talk_message(chat, text):
             out = r.get("text") if r.get("ok") else "⚠️ " + str(r.get("error"))
             out = (out or "").strip() or "(بلا إجابة)"
             parts = [out[i:i + 3500] for i in range(0, len(out), 3500)]
-            TL.send(f"🗣 {name}:\n" + parts[0], chat)
-            for p in parts[1:]:
-                TL.send(p, chat)
+            for n, p in enumerate(parts):
+                last = n == len(parts) - 1
+                TL.send((f"🗣 {name}:\n" if n == 0 else "") + p + (f"\n\n— تتحدث الآن مع {name} —" if last else ""), chat, kb=_talk_kb(aid) if last else None)
     threading.Thread(target=run, daemon=True).start()
     return True
