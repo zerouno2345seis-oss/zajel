@@ -821,6 +821,8 @@ def handle(h, method):
                     b = _body(h)
                     if act == "set":
                         h.send_json(zajel_oauth.set_client(str(b.get("provider", "")), str(b.get("client_id", "")), str(b.get("client_secret", ""))))
+                    elif act == "open":
+                        h.send_json(zajel_oauth.open_browser(str(b.get("provider") if b.get("console") else b.get("url", "")), bool(b.get("console"))))
                     elif act == "start":
                         prov = str(b.get("provider", "")) or zajel_oauth.provider_for(str(b.get("email", "")))
                         if not prov:

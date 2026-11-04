@@ -184,3 +184,19 @@ def access_token(addr):
     if r.get("refresh_token") and r["refresh_token"] != d["refresh"]:
         _kc()._kc_set(addr, json.dumps({"oauth": prov, "refresh": r["refresh_token"]}))
     return r["access_token"]
+
+
+def open_browser(url_or_provider, console=False):
+    """يفتح المتصفح الافتراضي من الخادم (نافذة التطبيق لا تفتح روابط خارجية)؛ لا يقبل إلا روابط المزوّدين المعروفة."""
+    import subprocess
+    if console:
+        p = PROVIDERS.get(url_or_provider)
+        if not p:
+            raise ValueError("مزوّد غير معروف.")
+        url = p["console"]
+    else:
+        url = url_or_provider
+        if not any(url.startswith(q["auth"] + "?") for q in PROVIDERS.values()):
+            raise ValueError("رابط غير مسموح.")
+    subprocess.Popen(["/usr/bin/open", url])
+    return {"ok": True}
