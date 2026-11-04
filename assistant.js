@@ -6229,15 +6229,15 @@
     let oaTimer = null;
     const oaStart = async (prov) => {
       mailCard.status.textContent = 'يفتح صفحة الدخول الرسمية…';
-      let r; try { r = await api('/api/assistant/mail/oauth/start', { provider: prov }); } catch (e) { mailCard.status.textContent = e.message; return; }
-      if (r.error === 'NEED_CLIENT') { await oaSetupShow(prov); mailCard.status.textContent = 'أدخل معرّف التطبيق مرة واحدة ثم أعد الضغط.'; return; }
-      if (r.error) { mailCard.status.textContent = r.error; return; }
+      let r; try { r = await api('/api/assistant/mail/oauth/start', { provider: prov }); } catch (e) {
+        if (e.message === 'NEED_CLIENT') { try { await oaSetupShow(prov); mailCard.status.textContent = 'أدخل معرّف التطبيق (Client ID) مرة واحدة في الخانات أدناه ثم «حفظ ومتابعة».'; oaSetup.scrollIntoView({ block: 'nearest' }); } catch (x) { mailCard.status.textContent = x.message; } return; }
+        mailCard.status.textContent = e.message; return; }
       try { await api('/api/assistant/mail/oauth/open', { url: r.url }); } catch (_) { window.open(r.url, '_blank'); }
       mailCard.status.textContent = 'سجّل الدخول في الصفحة التي فُتحت ثم ارجع هنا…';
       clearInterval(oaTimer); let n = 0;
       oaTimer = setInterval(async () => {
         if (++n > 300) { clearInterval(oaTimer); mailCard.status.textContent = 'انتهت مهلة الانتظار.'; return; }
-        try { const p = await api('/api/assistant/mail/oauth/poll?state=' + encodeURIComponent(r.state)); if (p.ok) { clearInterval(oaTimer); mailForm.style.display = 'none'; mailCard.status.textContent = 'تم ربط ' + p.email; loadMail(); } else if (p.error) { clearInterval(oaTimer); mailCard.status.textContent = p.error; } } catch (_) {}
+        try { const p = await api('/api/assistant/mail/oauth/poll?state=' + encodeURIComponent(r.state)); if (p.ok) { clearInterval(oaTimer); mailForm.style.display = 'none'; mailCard.status.textContent = 'تم ربط ' + p.email; loadMail(); } else if (p.error) { clearInterval(oaTimer); mailCard.status.textContent = p.error; } } catch (e) { if (e.message && e.message !== 'Load failed' && !/fetch|network/i.test(e.message)) { clearInterval(oaTimer); mailCard.status.textContent = e.message; } }
       }, 2000);
     };
     const oaSetupShow = async (prov) => {
@@ -6247,7 +6247,7 @@
       const cid = inp('Client ID'), sec = inp('Client Secret', 'password');
       const how = el('div', 'مرة واحدة فقط لكل مزوّد (تسجّل تطبيقك عند المزوّد ليسمح بالدخول الرسمي): ' + pr.howto, 'as-memory-desc');
       const open = btn('فتح صفحة التسجيل الرسمية ↗', () => api('/api/assistant/mail/oauth/open', { provider: prov, console: true }).catch(() => window.open(pr.console, '_blank')), 'btn');
-      const save = btn('حفظ ومتابعة', async () => { const x = await api('/api/assistant/mail/oauth/set', { provider: prov, client_id: cid.value, client_secret: sec.value }); if (x.error) { mailCard.status.textContent = x.error; return; } oaSetup.style.display = 'none'; oaStart(prov); }, 'btn pri');
+      const save = btn('حفظ ومتابعة', async () => { try { await api('/api/assistant/mail/oauth/set', { provider: prov, client_id: cid.value, client_secret: sec.value }); } catch (x) { mailCard.status.textContent = x.message; return; } oaSetup.style.display = 'none'; oaStart(prov); }, 'btn pri');
       oaSetup.append(el('b', pr.name), how, open, el('div', 'Redirect URI (انسخه كما هو):', 'as-memory-desc'), redir, cid); if (pr.needs_secret) oaSetup.append(sec); oaSetup.append(save);
     };
     [['google', 'جيميل'], ['microsoft', 'أوتلوك / هوتميل'], ['yahoo', 'ياهو']].forEach(([id, t]) => oaRow.append(btn('الدخول بحساب ' + t, () => oaStart(id), 'btn pri')));
