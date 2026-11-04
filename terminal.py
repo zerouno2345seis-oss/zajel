@@ -1122,3 +1122,16 @@ def council_set_profile(i, patch):
     if not isinstance(patch, dict):
         raise ValueError("التعديل غير صالح.")
     return {"profile": _ca().set_profile(i, patch)}
+
+
+def chat_ask(i, text, timeout=None):
+    """محادثة مباشرة مع جلسة وكيل واحد في الطرفية (تبقى الجلسة والسياق بين الرسائل). يعيد {"ok","text"|"error"}."""
+    if i not in BY_ID or not BY_ID[i]["cmd"]:
+        return {"ok": False, "error": "وكيل غير معروف."}
+    tok = secrets.token_hex(3)
+    entry = {"state": "starting", "answer": "", "live": ""}
+    rd = {"mode": "terminal", "stop": False, "tok": tok, "letters": {}, "agents": {i: entry}}
+    _ask(rd, i, entry, text, tok)
+    if entry.get("answer"):
+        return {"ok": True, "text": entry["answer"], "state": entry.get("state")}
+    return {"ok": False, "error": entry.get("error") or "لم يُرجع الوكيل إجابة (" + str(entry.get("state")) + ")."}

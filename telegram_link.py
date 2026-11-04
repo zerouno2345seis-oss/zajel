@@ -230,7 +230,7 @@ def notify_job(label, state, secs, error="", detail=""):
 
 
 # ================= الاستماع والتوجيه =================
-MAIN_KB = [["الرئيسية", "الأجهزة", "الوكلاء"], ["المجلس", "الطرفية", "واتساب"], ["العمليات", "الأتمتة", "بحث"], ["الذاكرة", "الأوامر", "المساعدة"], ["المزامنة", "التحديث"]]
+MAIN_KB = [["الرئيسية", "الأجهزة", "الوكلاء"], ["المجلس", "الطرفية", "واتساب"], ["العمليات", "الأتمتة", "بحث"], ["الذاكرة", "الأوامر", "المساعدة"], ["المزامنة", "التحديث", "حديث"]]
 ONESHOT = {"host": ""}
 
 
@@ -251,7 +251,7 @@ def _host_by_button(text):
         if t in (h.lower(), _alias(h).lower()):
             return h
     return ""
-BTN = {"الرئيسية": "home", "الأجهزة": "pc", "الوكلاء": "agents", "العمليات": "ops", "الأتمتة": "auto", "بحث": "findhelp",
+BTN = {"الرئيسية": "home", "الأجهزة": "pc", "حديث": "talk", "الوكلاء": "agents", "العمليات": "ops", "الأتمتة": "auto", "بحث": "findhelp",
        "الذاكرة": "mem", "الأوامر": "cmds", "المهام": "jobs", "المساعدة": "help",
        "المجلس": "council", "الطرفية": "term", "واتساب": "wa", "المزامنة": "sync", "التحديث": "update"}
 COMMANDS = [("home", "الرئيسية: ملخص الجهاز الحالي"), ("pc", "الأجهزة: بدّل بين الكمبيوترين"), ("agents", "الوكلاء: الحال وتبديل المساعد"),
@@ -261,7 +261,7 @@ COMMANDS = [("home", "الرئيسية: ملخص الجهاز الحالي"), ("
             ("council", "مجلس الوكلاء: اختيار الفريق وإرسال سؤال: /council سؤال"), ("cres", "نتيجة آخر مجلس"), ("cfollow", "متابعة على آخر حكم: /cfollow سؤال"),
             ("cstop", "إيقاف المجلس"), ("cweb", "رابط موقع تُرسل إليه النتيجة: /cweb رابط"), ("term", "الطرفية: جلسات الوكلاء"),
             ("tsend", "إرسال نص لطرفية وكيل: /tsend وكيل نص"), ("sync", "المزامنة بين الجهازين"), ("update", "فحص التحديث وتثبيته"), ("wa", "واتساب: الحال والملخص"),
-            ("mail", "البريد: الحسابات والبحث: /mail كلمة"), ("auth", "حالة دخول الوكلاء"), ("disks", "الأقراص ومساحتها"), ("clean", "التنظيف الكامل بخطة وموافقة")]
+            ("mail", "البريد: الحسابات والبحث: /mail كلمة"), ("auth", "حالة دخول الوكلاء"), ("disks", "الأقراص ومساحتها"), ("clean", "التنظيف الكامل بخطة وموافقة"), ("talk", "حديث مباشر مع وكيل في طرفيته"), ("endtalk", "إنهاء الحديث المباشر")]
 HOST = socket.gethostname().split(".")[0]
 FIND = {}
 OPTS = {}          # خيارات الأزرار المقترحة من المساعد: رقم ← نص
@@ -419,7 +419,13 @@ def _on_text(chat, text):
         except (IndexError, ValueError):
             raise ValueError("اكتب /run ثم رقم الأمر كما في قائمة الأوامر.")
         _ask(chat, p.get("text") or "")
+    elif name == "endtalk":
+        import telegram_new
+        telegram_new.talk_end(chat)
     else:
+        import telegram_new
+        if not word.startswith("/") and telegram_new.talk_message(chat, text):
+            return
         _ask_batched(chat, re.sub(r"^/ask\s*", "", text))
 
 
@@ -598,7 +604,7 @@ def _pending_loop():
 def _on_callback(chat, mid, data):
     import agent_server
     kind, _, rest = data.partition(":")
-    if kind in ("cg", "cr", "tm", "sy", "up", "wa", "ml", "au", "fc"):
+    if kind in ("cg", "cr", "tm", "sy", "up", "wa", "ml", "au", "fc", "tk"):
         import telegram_extras as X
         X.on_callback(chat, mid, kind, rest)
         return

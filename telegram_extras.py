@@ -15,7 +15,7 @@ from pathlib import Path
 
 import telegram_link as TL
 
-NAMES = ("council", "term", "sync", "update", "wa", "mail", "auth", "disks", "clean")
+NAMES = ("council", "term", "sync", "update", "wa", "mail", "auth", "disks", "clean", "talk")
 DEFAULTS = {"ids": ["claude", "hermes"], "main": "claude", "depth": "bal", "blind": True, "review": False, "verify": True, "webhook": "", "auto_web": False}
 DEPTH_LABEL = {"fast": "سريع", "bal": "متوازن", "deep": "عميق"}
 KEYS = {"Enter": "Enter", "Esc": "Escape", "Ctrl-C": "C-c", "Up": "Up", "Down": "Down", "Tab": "Tab"}
@@ -323,6 +323,7 @@ def _screen_term():
                 kb.append([_b("▶ شغّل " + a["name"], "tm:go:" + a["id"])])
         else:
             kb.append([_b("📺 " + a["name"], "tm:s:" + a["id"]), _b("⏹", "tm:x:" + a["id"])])
+    kb.append([_b("🗣 حديث مباشر مع وكيل", "scr:talk")])
     kb.append([_b("تحديث", "scr:term"), _b("رجوع", "scr:home")])
     return "الطرفية (جلسات الوكلاء):\n" + "\n".join(lines) + "\n\nالإدخال إلى أي جلسة يحتاج تأكيدًا برمز: /tsend وكيل نص", kb
 
@@ -427,7 +428,7 @@ def screen(name):
         return _screen_update()
     if name == "wa":
         return _screen_wa()
-    if name in ("mail", "auth", "disks", "clean"):
+    if name in ("mail", "auth", "disks", "clean", "talk"):
         import telegram_new
         return telegram_new.screen(name)
     return None
@@ -488,7 +489,7 @@ def on_special(chat, word, text):
 
 
 def on_callback(chat, mid, kind, rest):
-    if kind in ("ml", "au", "fc"):
+    if kind in ("ml", "au", "fc", "tk"):
         import telegram_new
         return telegram_new.on_callback(chat, mid, kind, rest)
     import terminal

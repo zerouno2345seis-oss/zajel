@@ -129,6 +129,11 @@ def _fc_plan(chat, fid, r):
 
 
 def on_callback(chat, mid, kind, rest):
+    if kind == "tk":
+        act, _, arg = rest.partition(":")
+        if act == "s":
+            talk_start(chat, arg, mid)
+        return
     if kind == "ml":
         mail_read(chat, int(rest.split(":")[1]))
     elif kind == "au":
@@ -156,4 +161,66 @@ def on_callback(chat, mid, kind, rest):
 
 
 def screen(name):
-    return {"mail": screen_mail, "auth": screen_auth, "disks": screen_disks, "clean": screen_clean}[name]()
+    return {"mail": screen_mail, "auth": screen_auth, "disks": screen_disks, "clean": screen_clean, "talk": screen_talk}[name]()
+
+
+# ---------- الحديث مع وكيل في طرفيته ----------
+TALK: dict = {}        # chat ← معرّف الوكيل
+_TLOCK: dict = {}
+
+
+def screen_talk():
+    import terminal
+    if not terminal.available():
+        return "tmux غير مثبت على هذا الجهاز.", [[_b("رجوع", "scr:home")]]
+    rows = [a for a in terminal.listing()["agents"] if a["installed"] and a["id"] in terminal.BY_ID and terminal.BY_ID[a["id"]]["cmd"]]
+    kb = [[_b(a["name"], "tk:s:" + a["id"])] for a in rows]
+    return "الحديث مع وكيل في طرفيته: اختر الوكيل، فأفتح جلسته وأوصل كل رسالة تكتبها إليه وأعيد لك إجابته.", kb + [[_b("رجوع", "scr:home")]]
+
+
+def talk_start(chat, aid, mid=None):
+    import terminal
+    name = terminal.BY_ID[aid]["name"]
+    TALK[chat] = aid
+    msg = f"🗣 أنت الآن تتحدث مع {name} مباشرة في طرفيته. اكتب رسالتك (أو سجّلها صوتًا) وسأوصلها وأعرض لك الإجابة.\nللخروج: /endtalk"
+    TL.send(msg, chat)
+    threading.Thread(target=lambda: _talk_warm(aid), daemon=True).start()
+
+
+def _talk_warm(aid):
+    try:
+        import terminal
+        terminal.start(aid)
+    except Exception:
+        pass
+
+
+def talk_end(chat):
+    a = TALK.pop(chat, None)
+    TL.send("انتهى الحديث المباشر؛ عدنا إلى المساعد العام." if a else "لا حديث مباشر مفتوح.", chat)
+
+
+def talk_message(chat, text):
+    """يعيد True إن كان الحديث المباشر مفتوحًا وأخذ الرسالة."""
+    aid = TALK.get(chat)
+    if not aid:
+        return False
+    import terminal
+    name = terminal.BY_ID[aid]["name"]
+    lock = _TLOCK.setdefault(aid, threading.Lock())
+    if lock.locked():
+        TL.send(f"{name} ما زال يجيب عن رسالتك السابقة؛ انتظر قليلًا.", chat)
+        return True
+
+    def run():
+        with lock:
+            note = TL.send(f"⏳ أرسلت إلى {name}…", chat)
+            r = terminal.chat_ask(aid, text)
+            out = r.get("text") if r.get("ok") else "⚠️ " + str(r.get("error"))
+            out = (out or "").strip() or "(بلا إجابة)"
+            parts = [out[i:i + 3500] for i in range(0, len(out), 3500)]
+            TL.send(f"🗣 {name}:\n" + parts[0], chat)
+            for p in parts[1:]:
+                TL.send(p, chat)
+    threading.Thread(target=run, daemon=True).start()
+    return True
