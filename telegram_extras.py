@@ -15,7 +15,7 @@ from pathlib import Path
 
 import telegram_link as TL
 
-NAMES = ("council", "term", "sync", "update", "wa")
+NAMES = ("council", "term", "sync", "update", "wa", "mail", "auth", "disks", "clean")
 DEFAULTS = {"ids": ["claude", "hermes"], "main": "claude", "depth": "bal", "blind": True, "review": False, "verify": True, "webhook": "", "auto_web": False}
 DEPTH_LABEL = {"fast": "سريع", "bal": "متوازن", "deep": "عميق"}
 KEYS = {"Enter": "Enter", "Esc": "Escape", "Ctrl-C": "C-c", "Up": "Up", "Down": "Down", "Tab": "Tab"}
@@ -427,12 +427,21 @@ def screen(name):
         return _screen_update()
     if name == "wa":
         return _screen_wa()
+    if name in ("mail", "auth", "disks", "clean"):
+        import telegram_new
+        return telegram_new.screen(name)
     return None
 
 
 # ================= الأوامر والأزرار =================
 def on_command(chat, name, text):
     """يعيد True إن عالج الأمر (الشاشات نفسها يعرضها telegram_link)."""
+    if name == "mail":
+        arg = re.sub(r"^/mail(@\w+)?\s*", "", text.strip())
+        if arg:
+            import telegram_new
+            telegram_new.mail_search(chat, arg)
+            return True
     if name == "council":
         m = re.match(r"^(?:/council(?:@\w+)?|مجلس)\s+(.+)$", text.strip(), flags=re.S)
         if m:
@@ -479,6 +488,9 @@ def on_special(chat, word, text):
 
 
 def on_callback(chat, mid, kind, rest):
+    if kind in ("ml", "au", "fc"):
+        import telegram_new
+        return telegram_new.on_callback(chat, mid, kind, rest)
     import terminal
     if kind == "cg":
         act, _, arg = rest.partition(":")

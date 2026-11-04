@@ -260,7 +260,8 @@ COMMANDS = [("home", "الرئيسية: ملخص الجهاز الحالي"), ("
             ("new", "محادثة جديدة مع المساعد"), ("chats", "تابع محادثة من زاجل"), ("settings", "الإعدادات"), ("help", "المساعدة"),
             ("council", "مجلس الوكلاء: اختيار الفريق وإرسال سؤال: /council سؤال"), ("cres", "نتيجة آخر مجلس"), ("cfollow", "متابعة على آخر حكم: /cfollow سؤال"),
             ("cstop", "إيقاف المجلس"), ("cweb", "رابط موقع تُرسل إليه النتيجة: /cweb رابط"), ("term", "الطرفية: جلسات الوكلاء"),
-            ("tsend", "إرسال نص لطرفية وكيل: /tsend وكيل نص"), ("sync", "المزامنة بين الجهازين"), ("update", "فحص التحديث وتثبيته"), ("wa", "واتساب: الحال والملخص")]
+            ("tsend", "إرسال نص لطرفية وكيل: /tsend وكيل نص"), ("sync", "المزامنة بين الجهازين"), ("update", "فحص التحديث وتثبيته"), ("wa", "واتساب: الحال والملخص"),
+            ("mail", "البريد: الحسابات والبحث: /mail كلمة"), ("auth", "حالة دخول الوكلاء"), ("disks", "الأقراص ومساحتها"), ("clean", "التنظيف الكامل بخطة وموافقة")]
 HOST = socket.gethostname().split(".")[0]
 FIND = {}
 OPTS = {}          # خيارات الأزرار المقترحة من المساعد: رقم ← نص
@@ -597,7 +598,7 @@ def _pending_loop():
 def _on_callback(chat, mid, data):
     import agent_server
     kind, _, rest = data.partition(":")
-    if kind in ("cg", "cr", "tm", "sy", "up", "wa"):
+    if kind in ("cg", "cr", "tm", "sy", "up", "wa", "ml", "au", "fc"):
         import telegram_extras as X
         X.on_callback(chat, mid, kind, rest)
         return
