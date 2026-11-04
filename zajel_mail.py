@@ -70,7 +70,7 @@ def _kc_del(addr):
 
 
 def public(a):
-    return {"email": a["email"], "host": a["host"], "label": a.get("label", ""), "gmail": a["host"] == "imap.gmail.com"}
+    return {"email": a["email"], "host": a["host"], "label": a.get("label", ""), "gmail": a["host"] == "imap.gmail.com", "oauth": a.get("auth") == "oauth"}
 
 
 def accounts():
@@ -85,6 +85,15 @@ def hint_for(addr):
 
 def _connect(a):
     socket.setdefaulttimeout(TIMEOUT)
+    if a.get("auth") == "oauth":
+        import zajel_oauth
+        tok = zajel_oauth.access_token(a["email"])
+        M = imaplib.IMAP4_SSL(a["host"], 993)
+        try:
+            M.authenticate("XOAUTH2", lambda _x: f"user={a['email']}\x01auth=Bearer {tok}\x01\x01".encode())
+        except imaplib.IMAP4.error as e:
+            raise ValueError("رفض الخادم الدخول بالرمز (فعّل IMAP في حسابك أو أعد الربط): " + str(e)[:120])
+        return M
     pw = _kc_get(a["email"])
     if not pw:
         raise ValueError("لا توجد كلمة مرور محفوظة لهذا الحساب؛ أعد ربطه.")

@@ -173,6 +173,8 @@ def start(i, cwd=""):
 
 
 def stop(i):
+    _PREV.pop(i, None)
+    _ARCH.pop(i, None)
     _t("kill-session", "-t", _name(i))
     MON.pop(i, None)
     return {"ok": True}
@@ -209,6 +211,32 @@ def resize(i, cols, rows):
     return {"ok": True, "cols": cols, "rows": rows}
 
 
+_PREV, _ARCH = {}, {}
+
+
+def _keep_history(i, cur):
+    """بعض واجهات الوكلاء ترسل ESC[3J عند كل إعادة رسم فيمحو tmux السجل؛ نحتفظ بآخر سجل معروف ونضمّه أمام الشاشة الجديدة."""
+    cl = cur.split("\n")
+    prev = _PREV.get(i)
+    arch = _ARCH.get(i, [])
+    if prev is not None and len(cl) < len(prev) - 3:
+        arch = arch + prev
+        _PREV[i] = cl
+    else:
+        _PREV[i] = cl
+    if not arch:
+        return cur
+    k = 0                                    # نزيل التكرار بين ذيل المحفوظ ورأس الشاشة الحالية
+    for n in range(min(len(arch), len(cl), 400), 0, -1):
+        if arch[-n:] == cl[:n]:
+            k = n
+            break
+    arch = arch[:len(arch) - k] if k else arch
+    arch = arch[-5000:]
+    _ARCH[i] = arch
+    return "\n".join(arch + cl)
+
+
 def screen(i, since="", hist=0):
     n = _name(i)
     args = ["capture-pane", "-p", "-e", "-J", "-t", n]
@@ -222,7 +250,13 @@ def screen(i, since="", hist=0):
     if since and since == h:
         return {"alive": True, "unchanged": True, "hash": h}
     cx, cy, w, hh, alt = (info + ["0"] * 5)[:5]
-    return {"alive": True, "hash": h, "text": r.stdout, "cursor": [int(cx), int(cy)], "cols": int(w), "rows": int(hh), "alt": alt == "1"}
+    text = r.stdout
+    if hist and alt != "1":
+        text = _keep_history(i, text)
+        h = hashlib.md5((text + " ".join(info)).encode("utf-8", "replace")).hexdigest()[:12]
+        if since and since == h:
+            return {"alive": True, "unchanged": True, "hash": h}
+    return {"alive": True, "hash": h, "text": text, "cursor": [int(cx), int(cy)], "cols": int(w), "rows": int(hh), "alt": alt == "1"}
 
 
 def set_notify(on):

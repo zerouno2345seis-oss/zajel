@@ -2234,8 +2234,11 @@ function openFullClean() {
     const watch = () => {
       const cancel = el('button', 'إلغاء', 'btn'); cancel.onclick = () => api('/api/clean/full/cancel', { id: fid }).catch(() => {});
       foot.replaceChildren(cancel);
+      let fails = 0;
       const tick = async () => {
-        let r; try { r = await api('/api/clean/full/job?id=' + fid); } catch (e) { stop(); body.replaceChildren(el('div', '⚠️ ' + e.message, 'warnbox')); foot.replaceChildren(close); return; }
+        let r; try { r = await api('/api/clean/full/job?id=' + fid); fails = 0; } catch (e) {
+          if (++fails < 8) return;     // انقطاع عابر (إعادة تشغيل الخادم أو انشغاله): نعيد المحاولة قبل أن نستسلم
+          stop(); body.replaceChildren(el('div', '⚠️ انقطع الاتصال بزاجل (' + e.message + '). إن أُعيد تشغيل التطبيق فأعد التنظيف الكامل.', 'warnbox')); foot.replaceChildren(close); return; }
         if (r.state === 'ready') { stop(); return plan(r); }
         if (r.state === 'done') { stop(); return finish(r); }
         if (r.state === 'error' || r.state === 'cancelled') { stop(); body.replaceChildren(el('div', r.state === 'error' ? '⚠️ ' + r.error : 'أُلغي التنظيف الكامل.', 'warnbox')); foot.replaceChildren(close); return; }

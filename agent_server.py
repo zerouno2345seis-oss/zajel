@@ -797,6 +797,39 @@ def handle(h, method):
             hrs = int((query.get("hours") or ["24"])[0] or 24)
             inst = {a["id"]: a["installed"] for a in agent_runner.agents()}
             h.send_json(agent_metrics.stats(hrs, inst, [a["id"] for a in agent_runner.agents()]) | {"names": {a["id"]: a["name"] for a in agent_runner.agents()}})
+        elif path == "/api/assistant/mail/oauth/callback" and method == "GET":
+            import zajel_oauth
+            ok, msg = zajel_oauth.callback(query)
+            import html as _h
+            page = ("<!doctype html><meta charset=utf-8><title>زاجل</title><body dir=rtl style='font-family:-apple-system,sans-serif;text-align:center;padding:60px'>"
+                    f"<h2>{'✅' if ok else '⚠️'} {_h.escape(msg)}</h2><p>{'ارجع إلى زاجل؛ يمكنك إغلاق هذه الصفحة.' if ok else 'ارجع إلى زاجل وأعد المحاولة.'}</p></body>").encode("utf-8")
+            h.send_response(200)
+            h.send_header("Content-Type", "text/html; charset=utf-8")
+            h.send_header("Content-Length", str(len(page)))
+            h.send_header("Cache-Control", "no-store")
+            h.end_headers()
+            h.wfile.write(page)
+        elif path.startswith("/api/assistant/mail/oauth/"):
+            import zajel_oauth
+            act = path.rsplit("/", 1)[1]
+            try:
+                if act == "config":
+                    h.send_json(zajel_oauth.config())
+                elif act == "poll":
+                    h.send_json(zajel_oauth.poll((query.get("state") or [""])[0]))
+                else:
+                    b = _body(h)
+                    if act == "set":
+                        h.send_json(zajel_oauth.set_client(str(b.get("provider", "")), str(b.get("client_id", "")), str(b.get("client_secret", ""))))
+                    elif act == "start":
+                        prov = str(b.get("provider", "")) or zajel_oauth.provider_for(str(b.get("email", "")))
+                        if not prov:
+                            raise ValueError("اختر المزوّد (جيميل / أوتلوك / ياهو).")
+                        h.send_json(zajel_oauth.start(prov, str(b.get("email", ""))) | {"provider": prov})
+                    else:
+                        h.send_json({"error": "طلب غير معروف."})
+            except ValueError as e:
+                h.send_json({"error": str(e)})
         elif path.startswith("/api/assistant/mail/"):
             import zajel_mail as mailbox
             act = path.rsplit("/", 1)[1]

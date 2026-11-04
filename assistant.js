@@ -6221,7 +6221,39 @@
         fPass.value = ''; fEmail.value = ''; fHost.value = ''; mailForm.style.display = 'none'; mailCard.status.textContent = 'تم ربط الحساب.'; loadMail();
       } catch (e) { mailCard.status.textContent = e.message || 'تعذر الربط'; } finally { addBtn.disabled = false; }
     }, 'btn pri');
-    mailForm.append(fEmail, fPass, fHost, fLabel, fHint, addBtn);
+    const pwBox = el('div', ''); pwBox.style.cssText = 'display:none;flex-direction:column;gap:5px';
+    pwBox.append(fEmail, fPass, fHost, fLabel, fHint, addBtn);
+    const oaBox = el('div', ''); oaBox.style.cssText = 'display:flex;flex-direction:column;gap:6px';
+    const oaRow = el('div', ''); oaRow.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap';
+    const oaSetup = el('div', ''); oaSetup.style.cssText = 'display:none;flex-direction:column;gap:5px;padding:8px;border:1px solid var(--line);border-radius:8px';
+    let oaTimer = null;
+    const oaStart = async (prov) => {
+      mailCard.status.textContent = 'يفتح صفحة الدخول الرسمية…';
+      let r; try { r = await api('/api/assistant/mail/oauth/start', { provider: prov }); } catch (e) { mailCard.status.textContent = e.message; return; }
+      if (r.error === 'NEED_CLIENT') { await oaSetupShow(prov); mailCard.status.textContent = 'أدخل معرّف التطبيق مرة واحدة ثم أعد الضغط.'; return; }
+      if (r.error) { mailCard.status.textContent = r.error; return; }
+      window.open(r.url, '_blank', 'noopener');
+      mailCard.status.textContent = 'سجّل الدخول في الصفحة التي فُتحت ثم ارجع هنا…';
+      clearInterval(oaTimer); let n = 0;
+      oaTimer = setInterval(async () => {
+        if (++n > 300) { clearInterval(oaTimer); mailCard.status.textContent = 'انتهت مهلة الانتظار.'; return; }
+        try { const p = await api('/api/assistant/mail/oauth/poll?state=' + encodeURIComponent(r.state)); if (p.ok) { clearInterval(oaTimer); mailForm.style.display = 'none'; mailCard.status.textContent = 'تم ربط ' + p.email; loadMail(); } else if (p.error) { clearInterval(oaTimer); mailCard.status.textContent = p.error; } } catch (_) {}
+      }, 2000);
+    };
+    const oaSetupShow = async (prov) => {
+      const cfg = await api('/api/assistant/mail/oauth/config'); const pr = (cfg.providers || []).find(x => x.id === prov); if (!pr) return;
+      oaSetup.replaceChildren(); oaSetup.style.display = 'flex';
+      const redir = inp(''); redir.value = cfg.redirect; redir.readOnly = true;
+      const cid = inp('Client ID'), sec = inp('Client Secret', 'password');
+      const how = el('div', 'مرة واحدة فقط لكل مزوّد (تسجّل تطبيقك عند المزوّد ليسمح بالدخول الرسمي): ' + pr.howto, 'as-memory-desc');
+      const open = btn('فتح صفحة التسجيل الرسمية ↗', () => window.open(pr.console, '_blank', 'noopener'), 'btn');
+      const save = btn('حفظ ومتابعة', async () => { const x = await api('/api/assistant/mail/oauth/set', { provider: prov, client_id: cid.value, client_secret: sec.value }); if (x.error) { mailCard.status.textContent = x.error; return; } oaSetup.style.display = 'none'; oaStart(prov); }, 'btn pri');
+      oaSetup.append(el('b', pr.name), how, open, el('div', 'Redirect URI (انسخه كما هو):', 'as-memory-desc'), redir, cid); if (pr.needs_secret) oaSetup.append(sec); oaSetup.append(save);
+    };
+    [['google', 'جيميل'], ['microsoft', 'أوتلوك / هوتميل'], ['yahoo', 'ياهو']].forEach(([id, t]) => oaRow.append(btn('الدخول بحساب ' + t, () => oaStart(id), 'btn pri')));
+    const pwToggle = btn('بريد آخر أو بكلمة مرور تطبيق (IMAP)', () => { pwBox.style.display = pwBox.style.display === 'none' ? 'flex' : 'none'; }, 'btn');
+    oaBox.append(el('div', 'تُفتح صفحة الدخول الرسمية للمزوّد في المتصفح، تسجّل الدخول، ثم تعود إلى زاجل وقد رُبط الحساب (للقراءة فقط، ولا يرى زاجل كلمة مرورك).', 'as-memory-desc'), oaRow, oaSetup, pwToggle, pwBox);
+    mailForm.append(oaBox);
     const sQ = inp('ابحث: كلمة أو عنوان أو اسم مرسل…'); sQ.dir = 'auto';
     const sAcc = el('select', '', 'as-select'), sWhere = el('select', '', 'as-select'), sDays = el('select', '', 'as-select');
     [['all', 'الوارد والصادر'], ['inbox', 'الوارد فقط'], ['sent', 'الصادر فقط']].forEach(([v, t]) => { const o = el('option', t); o.value = v; sWhere.append(o); });
