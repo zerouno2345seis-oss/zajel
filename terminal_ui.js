@@ -74,8 +74,10 @@
       slot.hash='';
       return true;
     };
-    pre.addEventListener('mousedown',()=>setTimeout(()=>{if(!getSelection().toString())focusIt();},0));
-    pre.addEventListener('focus',focusIt);
+    // التركيز على مربع الإدخال أثناء السحب كان يلغي التحديد؛ لذا نؤجله إلى رفع الزر، ولا نفعله إن وُجد تحديد
+    let down=false;
+    pre.addEventListener('mousedown',()=>{down=true;const up=()=>{document.removeEventListener('mouseup',up,true);down=false;setTimeout(()=>{if(!selInfo())focusIt();},0);};document.addEventListener('mouseup',up,true);});
+    pre.addEventListener('focus',()=>{if(!down)focusIt();});
     pre.addEventListener('keydown',e=>{
       if(e.metaKey||e.ctrlKey||e.altKey||!selInfo())return;
       if(e.key==='Backspace'||e.key==='Delete'){if(replaceSel())e.preventDefault();return;}
