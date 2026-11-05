@@ -52,8 +52,34 @@
     const flush=()=>{timer=null;if(!queue.length)return;const batch=queue;queue=[];let text='';for(const p of batch){if(p.text!=null)text+=p.text;else{if(text){send(slot,{text});text='';}send(slot,{keys:[p.key]});}}if(text)send(slot,{text});};
     const push=p=>{queue.push(p);if(!timer)timer=setTimeout(flush,30);};
     const focusIt=()=>{ta.focus({preventScroll:true});};
+    // تحديد جزء من السطر الحالي ثم الكتابة فوقه: نحرّك المؤشر إلى نهاية التحديد ونمسح ما حُدِّد ثم يصل الحرف الجديد
+    const selInfo=()=>{const s=getSelection();if(!s||!s.rangeCount||s.isCollapsed)return null;const r=s.getRangeAt(0);if(!pre.contains(r.startContainer)||!pre.contains(r.endContainer))return null;const off=(n,o)=>{const x=document.createRange();x.selectNodeContents(pre);x.setEnd(n,o);return x.toString().length;};const a=off(r.startContainer,r.startOffset),b=off(r.endContainer,r.endOffset);return a<b?{a,b}:null;};
+    slot.holdSel=()=>!!selInfo();
+    const replaceSel=()=>{
+      const info=selInfo(),cur=slot.cur;if(!info||!cur)return false;
+      const lines=pre.textContent.split('\n');if(lines[lines.length-1]==='')lines.pop();
+      const find=p=>{let pos=0;for(let i=0;i<lines.length;i++){if(p<=pos+lines[i].length)return [i,p-pos];pos+=lines[i].length+1;}return [-1,0];};
+      const [la,sc]=find(info.a),[lb,eb]=find(info.b);
+      if(la<0||la!==lb||la!==lines.length-cur.rows+cur.cy)return false;
+      const line=lines[la],trimmed=line.replace(/\s+$/,'').length,ec=Math.min(eb,trimmed);
+      if(sc>=ec)return false;
+      const at=line.length>cur.cols?trimmed:Math.min(cur.cx,line.length),d=ec-at,keys=[];
+      for(let i=0;i<Math.abs(d);i++)keys.push(d>0?'Right':'Left');
+      for(let i=0;i<ec-sc;i++)keys.push('BSpace');
+      clearTimeout(timer);flush();
+      if(keys.length)send(slot,{keys});
+      try{getSelection().removeAllRanges();}catch(_){}
+      slot.hash='';
+      return true;
+    };
     pre.addEventListener('mousedown',()=>setTimeout(()=>{if(!getSelection().toString())focusIt();},0));
     pre.addEventListener('focus',focusIt);
+    pre.addEventListener('keydown',e=>{
+      if(e.metaKey||e.ctrlKey||e.altKey||!selInfo())return;
+      if(e.key==='Backspace'||e.key==='Delete'){if(replaceSel())e.preventDefault();return;}
+      if(e.key.length===1||e.keyCode===229){replaceSel();focusIt();}
+    });
+    pre.addEventListener('paste',e=>{const t=e.clipboardData&&e.clipboardData.getData('text/plain');if(!t)return;e.preventDefault();replaceSel();send(slot,{text:t,paste:true});});
     ta.addEventListener('focus',()=>{activeSlot=slots.indexOf(slot);setMsg(slot,'اكتب الآن…');});
     ta.addEventListener('blur',()=>setMsg(slot,'اضغط داخل الشاشة ثم اكتب'));setMsg(slot,'اضغط داخل الشاشة ثم اكتب');
     ta.addEventListener('compositionstart',()=>{composing=true;});
@@ -76,7 +102,7 @@
   function showAgents(ids){if(!root)return false;ids=(ids||[]).filter(Boolean).slice(0,5);if(!ids.length)return false;layout=ids.length;slots=ids.map(id=>({id,hash:'',pre:null,select:null,card:null}));councilFolded=true;activeSlot=0;build();builtLayout=layout;refreshList();refreshScreens(true);return true;}
   function syncSelects(){slots.forEach((slot,i)=>{if(!slot.select)return;if(!slot.id&&agents[i])slot.id=agents[i].id||agents[0]?.id||'';if(!slot.id&&agents[0])slot.id=agents[0].id;const sel=slot.select;sel.replaceChildren();agents.forEach(a=>{const o=document.createElement('option');o.value=a.id;o.textContent=a.name+' · '+a.label;sel.appendChild(o);});if(slot.id)sel.value=slot.id;});}
   async function refreshList(){if(!root||listBusy)return;listBusy=true;try{const data=await req('list');agents=Array.isArray(data.agents)?data.agents:[];notify=!!data.notify;const hint=root.querySelector('.as-memory-hint'),app=root.querySelector('.as-terminal');if(data.available===false){hint.hidden=false;hint.textContent=data.hint||'الطرفية غير متاحة';app.hidden=true;}else{hint.hidden=true;app.hidden=false;if(builtLayout!==layout){build();builtLayout=layout;}else renderAgents();syncSelects();}}catch(e){const hint=root.querySelector('.as-memory-hint');hint.hidden=false;hint.textContent='تعذر تحميل قائمة الطرفيات: '+e.message;}finally{listBusy=false;}}
-  async function refreshScreens(force){if(!root||root.hidden)return;for(const slot of slots){if(!slot.id||!slot.pre)continue;try{const d=await req('screen?id='+encodeURIComponent(slot.id)+'&since='+encodeURIComponent(force?'':slot.hash)+'&hist='+hist);if(d.hash)slot.hash=d.hash;if(!d.unchanged&&typeof d.text==='string'){const pre=slot.pre,stick=pre.scrollHeight-pre.scrollTop-pre.clientHeight<40||!pre.dataset.init;pre.innerHTML=ansiHtml(d.text);pre.dataset.init='1';if(stick)pre.scrollTop=pre.scrollHeight;}if(d.alive===false)slot.pre.dataset.dead='true';}catch(_){}}}
+  async function refreshScreens(force){if(!root||root.hidden)return;for(const slot of slots){if(!slot.id||!slot.pre)continue;try{if(!force&&slot.holdSel&&slot.holdSel())continue;const d=await req('screen?id='+encodeURIComponent(slot.id)+'&since='+encodeURIComponent(force?'':slot.hash)+'&hist='+hist);if(d.hash)slot.hash=d.hash;if(!d.unchanged&&typeof d.text==='string'){slot.cur=d.cursor?{cx:d.cursor[0],cy:d.cursor[1],rows:d.rows,cols:d.cols,alt:!!d.alt}:null;const pre=slot.pre,stick=pre.scrollHeight-pre.scrollTop-pre.clientHeight<40||!pre.dataset.init;pre.innerHTML=ansiHtml(d.text);pre.dataset.init='1';if(stick)pre.scrollTop=pre.scrollHeight;}if(d.alive===false)slot.pre.dataset.dead='true';}catch(_){}}}
   const councilStateText = { restarting: 'يُعاد تشغيله', queued: 'في الانتظار', starting: 'يبدأ', asking: 'يجيب', reviewing: 'يراجع وينقد', done: 'انتهى', done_raw: 'انتهى بلا علامات', timeout: 'انتهت المهلة', error: 'خطأ', stopped: 'متوقف' };
   const councilStateColor = { restarting: '#a855f7', queued: '#a3a3a3', starting: '#eab308', asking: '#3b82f6', reviewing: '#8b5cf6', done: '#22c55e', done_raw: '#16a34a', timeout: '#f97316', error: '#ef4444', stopped: '#737373' };
   function councilButton(label, action, primary) { const b = document.createElement('button'); b.type = 'button'; b.className = 'btn' + (primary ? ' pri' : ''); b.textContent = label; b.onclick = action; return b; }
