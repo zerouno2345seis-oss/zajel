@@ -103,3 +103,18 @@ class CouncilAgentsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EventParseTests(unittest.TestCase):
+    def test_codex_and_agy_events(self):
+        import json as j, council_agents as c
+        ev = []
+        st = {"text": "", "raw": ""}
+        f = lambda k, d: ev.append((k, d))
+        c._event("codex", j.dumps({"type": "item.started", "item": {"type": "command_execution", "command": "/bin/zsh -lc \"ls\""}}), f, st)
+        c._event("codex", j.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "مرحبا"}}), f, st)
+        self.assertEqual(ev[0][0], "activity")
+        self.assertEqual(st["live"], "مرحبا")
+        st2 = {"text": "", "raw": ""}
+        c._event("agy", j.dumps({"event": "step_update", "step_update": {"conversation_id": "x", "step_type": "agent_response", "state": "ACTIVE", "text_delta": "ok"}}), f, st2)
+        self.assertEqual((st2["conv"], st2["live"]), ("x", "ok"))

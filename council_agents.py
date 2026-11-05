@@ -223,25 +223,45 @@ def _event(agent_id, line, on_event, state):
             on_event("activity", "يستخدم أداة: " + str(part.get("tool", "")))
     elif isinstance(obj, dict) and agent_id == "agy":
         ev = obj.get("event")
-        if ev == "result":
-            resp = str((obj.get("result") or {}).get("response") or "")
+        if obj.get("conversation_id"):
+            state["conv"] = obj["conversation_id"]
+        su = obj.get("step_update") if isinstance(obj.get("step_update"), dict) else None
+        if su:
+            state["conv"] = su.get("conversation_id") or state.get("conv", "")
+            if su.get("step_type") == "tool" and su.get("state") == "ACTIVE":
+                info = su.get("tool_info") or {}
+                params = info.get("parameters") if isinstance(info.get("parameters"), dict) else {}
+                on_event("activity", _activity(str(su.get("tool_name") or info.get("name") or ""),
+                                               {"file_path": params.get("Path") or params.get("AbsolutePath"), "query": params.get("Query") or params.get("query"),
+                                                "url": params.get("Url"), "command": params.get("CommandLine")}))
+            elif su.get("step_type") == "agent_response" and su.get("text_delta"):
+                state["live"] = state.get("live", "") + str(su["text_delta"])
+                on_event("text", state["live"])
+        elif ev == "result":
+            res = obj.get("result") or {}
+            state["conv"] = res.get("conversation_id") or state.get("conv", "")
+            state["denied"] = res.get("denied_actions") or []
+            resp = str(res.get("response") or "")
             if resp.strip():
                 state["text"] = resp
                 on_event("text", resp)
         elif ev in ("tool_call", "tool_use", "tool"):
             on_event("activity", _activity(str(obj.get("name") or obj.get("tool") or ""), obj.get("input") or obj.get("args")))
-        else:
-            msg = obj.get("text") or obj.get("delta") or obj.get("content")
-            if isinstance(msg, str) and msg and ev not in ("init",):
-                state["live"] = state.get("live", "") + msg
-                on_event("text", state["live"])
+    elif isinstance(obj, dict) and agent_id == "codex":
+        item = obj.get("item") if isinstance(obj.get("item"), dict) else {}
+        kind, itype = obj.get("type"), item.get("type")
+        if kind == "item.completed" and itype == "agent_message" and item.get("text"):
+            state["live"] = str(item["text"])                  # تعليق الوكيل أثناء العمل؛ الإجابة النهائية من ملف -o
+            on_event("text", state["live"])
+        elif kind == "item.started" and itype == "command_execution":
+            cmd = re.sub(r"^/bin/\w+ -lc ", "", str(item.get("command", ""))).strip("\"' ")
+            on_event("activity", "يشغّل أمرًا: " + cmd[:100])
+        elif kind == "item.started" and itype in ("web_search", "mcp_tool_call"):
+            on_event("activity", "يبحث في الويب" if itype == "web_search" else "يستخدم أداة MCP")
+        elif kind in ("turn.failed", "error"):
+            state["raw"] += json.dumps(obj, ensure_ascii=False)[:400] + "\n"
     elif line.strip() and agent_id in ("agy", "codex"):
         state["raw"] += line + "\n"
-        if isinstance(obj, dict):
-            msg = obj.get("message", obj.get("text", ""))
-            if isinstance(msg, str) and msg:
-                state["text"] += msg
-                on_event("text", state["text"])
 
 
 def run(agent_id, prompt, *, depth="bal", workdir=None, add_dirs=(), on_event=None, should_stop=None, timeout=900):
@@ -308,10 +328,22 @@ def run(agent_id, prompt, *, depth="bal", workdir=None, add_dirs=(), on_event=No
                 pending += tail.encode("utf-8")
                 if pending:
                     _event(agent_id, pending.decode("utf-8", "replace"), on_event, state)
+            if agent_id == "agy" and not state["text"] and state.get("conv") and not result["error"]:
+                # رُفض إذن أداة في الوضع الصامت فانتهى الدور بلا نص؛ نستأنف المحادثة ونطلب الإجابة بلا أدوات
+                resume = ["agy", "--mode", "plan", "--output-format", "stream-json", "--print-timeout", "5m", "--conversation", state["conv"],
+                          "-p", "تعذّر استعمال بعض الأدوات لأنها تحتاج إذنًا. لا تستعمل أدوات أخرى؛ أجب الآن عن السؤال الأصلي كاملًا بما لديك."]
+                resume[0] = shutil.which("agy", path=os.pathsep.join(EXTRA_PATH)) or "agy"
+                try:
+                    rp = subprocess.run(resume, cwd=str(workdir or Path.home()), stdin=subprocess.DEVNULL, capture_output=True, env=_env(),
+                                        timeout=max(60, min(600, timeout - (time.time() - start))))
+                    for ln in rp.stdout.decode("utf-8", "replace").splitlines():
+                        _event(agent_id, ln, on_event, state)
+                except (subprocess.TimeoutExpired, OSError):
+                    pass
             if agent_id == "codex" and answer.is_file():
                 state["text"] = answer.read_text(encoding="utf-8", errors="replace")
-            elif agent_id == "agy" and not state["text"]:
-                state["text"] = state.get("live", "")       # انتهت المهلة قبل حدث النتيجة: ما بُثّ حتى الآن
+            elif agent_id in ("agy", "codex") and not state["text"]:
+                state["text"] = state.get("live", "")       # انتهت المهلة قبل النتيجة: ما بُثّ حتى الآن (لا نُرجع JSON الخام أبدًا)
             elif agent_id == "hermes" or not state["text"]:
                 raw = stdout_path.read_text(encoding="utf-8", errors="replace")
                 state["text"] = raw.strip() if agent_id == "hermes" else (state["text"] or raw.strip())

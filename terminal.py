@@ -36,7 +36,8 @@ SHELLS = {"zsh", "-zsh", "bash", "-bash", "sh", "-sh", "fish", "login"}
 KEY_RE = re.compile(r"^(Enter|Tab|BTab|BSpace|Escape|Up|Down|Left|Right|Home|End|PgUp|PgDn|DC|Space|C-[a-z\\\]\[]|M-[a-z]|F([1-9]|1[0-2]))$")
 WAIT_RE = re.compile(r"(\(y/n\)|\[y/n\]|\[Y/n\]|\(yes/no\)|press enter to|do you want to|would you like to|allow (this|once|always)|approve this|esc to cancel|❯\s*1\.|^\s*[❯›]\s*1\.\s)", re.I | re.M)
 IDLE_SECS, WORK_SECS = 4, 3
-CFG = {"notify": True}
+CFG = {"notify": True, "guard": True, "guarded": []}
+GUARD = {}        # id ← {"bad": عدّاد قراءات سيئة متتالية، "tries": [أوقات محاولات الإنعاش]}
 MON = {}          # id ← {"state","worked_since","last_note"}
 _mon_thread = None
 
@@ -139,7 +140,7 @@ def listing():
         st, lab, idle = state_of(a["id"], live) if ok else ("stopped", "متوقف", 0)
         rows.append({"id": a["id"], "name": a["name"], "cmd": a["cmd"], "state": st, "label": lab, "idle": idle,
                      "installed": (not a["cmd"]) or bool(_which(a["cmd"])), "direct": bool(a["cmd"]) and can_direct(a["id"])})
-    return {"available": ok, "agents": rows, "notify": CFG["notify"],
+    return {"available": ok, "agents": rows, "notify": CFG["notify"], "guard": CFG["guard"], "guarded": list(CFG["guarded"]),
             "hint": "" if ok else "tmux غير مثبت على هذا الجهاز؛ ثبّته أولًا (brew install tmux)."}
 
 
@@ -169,10 +170,13 @@ def start(i, cwd=""):
             _t("send-keys", "-t", n, "-l", "--", cmd)
             _t("send-keys", "-t", n, "Enter")
     MON.pop(i, None)
+    _guard_add(i)
     return {"ok": True, "started": True}
 
 
-def stop(i):
+def stop(i, _keep_guard=False):
+    if not _keep_guard:
+        _guard_remove(i)         # إيقاف المستخدم المقصود لا يُنعَش
     _PREV.pop(i, None)
     _ARCH.pop(i, None)
     _t("kill-session", "-t", _name(i))
@@ -181,7 +185,7 @@ def stop(i):
 
 
 def restart(i):
-    stop(i)
+    stop(i, _keep_guard=True)
     time.sleep(0.3)
     return start(i)
 
@@ -296,6 +300,81 @@ def _notify(text):
         pass
 
 
+# ---------- جهاز التحكم: يراقب الوكلاء دائمًا وينعش من يخرج عن الخدمة ----------
+GUARD_MAX_TRIES, GUARD_WINDOW = 3, 600
+
+
+def _save_cfg():
+    try:
+        (DATA / "terminal.json").write_text(json.dumps(CFG), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _guard_add(i):
+    if i not in CFG["guarded"]:
+        CFG["guarded"].append(i)
+        _save_cfg()
+
+
+def _guard_remove(i):
+    GUARD.pop(i, None)
+    GUARD.pop("_seeded_" + i, None)
+    if i in CFG["guarded"]:
+        CFG["guarded"].remove(i)
+        _save_cfg()
+
+
+def set_guard(on):
+    CFG["guard"] = bool(on)
+    _save_cfg()
+    return {"ok": True, "guard": CFG["guard"]}
+
+
+def guard_status():
+    return {"on": CFG["guard"], "guarded": list(CFG["guarded"]),
+            "agents": {i: {"bad": g.get("bad", 0), "revived": len(g.get("tries", [])), "last": g.get("last", "")} for i, g in GUARD.items() if not i.startswith("_")}}
+
+
+def _guard_tick(live):
+    """يُنعش كل وكيل مفعَّل خرج إلى الطرفية أو ماتت جلسته: يعيد تشغيل أمره، وبعد محاولات فاشلة ينبّه المستخدم."""
+    if not CFG["guard"]:
+        return
+    now = time.time()
+    for i in list(CFG["guarded"]):
+        a = BY_ID.get(i)
+        if not a or not a["cmd"] or not _which(a["cmd"]):
+            continue
+        st, _, idle = state_of(i, live)
+        g = GUARD.setdefault(i, {"bad": 0, "tries": []})
+        if st not in ("shell", "stopped") or (st == "shell" and idle < 4):
+            g["bad"] = 0
+            continue
+        g["bad"] += 1
+        if g["bad"] < 2:                      # قراءتان متتاليتان (≈6 ث) حتى لا نُنعش عن وهم
+            continue
+        g["tries"] = [t for t in g["tries"] if now - t < GUARD_WINDOW]
+        if len(g["tries"]) >= GUARD_MAX_TRIES:
+            if g.get("last") != "gaveup":
+                g["last"] = "gaveup"
+                if CFG["notify"]:
+                    _notify(f"الوكيل {a['name']} يخرج عن الخدمة مرارًا ولم ينجح إنعاشه؛ افحصه يدويًا.")
+            continue
+        g["tries"].append(now)
+        g["bad"] = 0
+        try:
+            if st == "stopped":
+                start(i)
+            else:                              # الجلسة حيّة والوكيل خرج: أعد كتابة أمره في الطرفية نفسها
+                _t("send-keys", "-t", _name(i), "-l", "--", a["cmd"])
+                _t("send-keys", "-t", _name(i), "Enter")
+            g["last"] = "revived"
+            if CFG["notify"]:
+                _notify(f"أعاد جهاز التحكم تشغيل الوكيل {a['name']} بعد خروجه.")
+        except Exception as exc:
+            g["last"] = "failed: " + str(exc)[:80]
+
+
 def _monitor():
     while True:
         time.sleep(3)
@@ -303,6 +382,11 @@ def _monitor():
             if not available():
                 continue
             live = _live()
+            for k in live:                       # كل جلسة حيّة تدخل الحراسة تلقائيًا
+                if k in BY_ID and BY_ID[k]["cmd"] and k not in CFG["guarded"] and not GUARD.get("_seeded_" + k):
+                    GUARD["_seeded_" + k] = True
+                    _guard_add(k)
+            _guard_tick(live)
             for a in AGENTS:
                 i = a["id"]
                 st, lab, idle = state_of(i, live)

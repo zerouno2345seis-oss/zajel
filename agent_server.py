@@ -742,6 +742,8 @@ def handle(h, method):
                 h.send_json(terminal.resize(i, b.get("cols", 100), b.get("rows", 30)))
             elif act == "notify":
                 h.send_json(terminal.set_notify(b.get("on")))
+            elif act == "guard":
+                h.send_json(terminal.set_guard(b.get("on")) if "on" in b else terminal.guard_status())
             else:
                 h.send_json({"error": "غير موجود."}, 404)
         elif path == "/api/assistant/whatsapp/status":
