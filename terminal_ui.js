@@ -62,10 +62,12 @@
       const [la,sc]=find(info.a),[lb,eb]=find(info.b);
       if(la<0||la!==lb||la!==lines.length-cur.rows+cur.cy)return false;
       const line=lines[la],trimmed=line.replace(/\s+$/,'').length,ec=Math.min(eb,trimmed);
-      if(sc>=ec)return false;
+      const pm=line.match(/^\s*(?:[│|]\s*)?(?:[❯>$%#›»➜]\s+)/),pl=pm?pm[0].length:0;   // النقر الثلاثي يحدد السطر كله: لا نمس المحث
+      const sc2=Math.max(sc,pl);
+      if(sc2>=ec)return false;
       const at=line.length>cur.cols?trimmed:Math.min(cur.cx,line.length),d=ec-at,keys=[];
       for(let i=0;i<Math.abs(d);i++)keys.push(d>0?'Right':'Left');
-      for(let i=0;i<ec-sc;i++)keys.push('BSpace');
+      for(let i=0;i<ec-sc2;i++)keys.push('BSpace');
       clearTimeout(timer);flush();
       if(keys.length)send(slot,{keys});
       try{getSelection().removeAllRanges();}catch(_){}
