@@ -214,16 +214,33 @@ def resize(i, cols, rows):
 _PREV, _ARCH = {}, {}
 
 
+def _scrolled_off(prev, cl):
+    """كم سطرًا خرج من أعلى الشاشة السابقة؟ نبحث عن أصغر إزاحة s تجعل prev[s:] مطابقًا لرأس cl (تساهل: أسطر متغيرة قليلة كالمؤشر)."""
+    n = len(prev)
+    for s in range(1, n):
+        m = min(n - s, len(cl))
+        if m < 4:
+            break
+        same = sum(1 for a, b in zip(prev[s:s + m], cl[:m]) if a == b)
+        solid = sum(1 for a, b in zip(prev[s:s + m], cl[:m]) if a == b and a.strip())
+        if solid >= 3 and same >= m * 0.8:
+            return s
+    return 0
+
+
 def _keep_history(i, cur):
-    """بعض واجهات الوكلاء ترسل ESC[3J عند كل إعادة رسم فيمحو tmux السجل؛ نحتفظ بآخر سجل معروف ونضمّه أمام الشاشة الجديدة."""
+    """واجهات الوكلاء تعيد الرسم وتمحو السجل (ESC[3J) أو تعمل بشاشة كاملة؛ فنحفظ نحن كل سطر يخرج من أعلى الشاشة بين لقطتين،
+    وإذا امتُحيت الشاشة كلها حفظنا السابقة كاملة، ثم نضمّ المحفوظ أمام الشاشة الحالية دون تكرار."""
     cl = cur.split("\n")
     prev = _PREV.get(i)
     arch = _ARCH.get(i, [])
-    if prev is not None and len(cl) < len(prev) - 3:
-        arch = arch + prev
-        _PREV[i] = cl
-    else:
-        _PREV[i] = cl
+    if prev is not None and prev != cl:
+        s = _scrolled_off(prev, cl)
+        if s:
+            arch = arch + prev[:s]
+        elif len(cl) < len(prev) - 3 or sum(1 for a, b in zip(prev, cl) if a == b and a.strip()) < 2:
+            arch = arch + [x for x in prev]       # تغيّرت الشاشة كلها: نحفظ ما كان عليها
+    _PREV[i] = cl
     if not arch:
         return cur
     k = 0                                    # نزيل التكرار بين ذيل المحفوظ ورأس الشاشة الحالية
@@ -232,6 +249,8 @@ def _keep_history(i, cur):
             k = n
             break
     arch = arch[:len(arch) - k] if k else arch
+    while arch and not arch[-1].strip() and len(arch) > 1 and not arch[-2].strip():
+        arch.pop()                               # لا نكدّس أسطرًا فارغة متتالية
     arch = arch[-5000:]
     _ARCH[i] = arch
     return "\n".join(arch + cl)
