@@ -136,6 +136,8 @@ class DirectCouncil(unittest.TestCase):
         fake.can_run = lambda i: True
         fake.init = lambda d: None
         fake.check = lambda ids, force=False: {i: {"state": "ready", "note": "", "secs": 1.0} for i in ids}
+        self.cached = {}
+        fake.cached_check = lambda i, max_age=1800: self.cached.get(i)
         fake.profiles = lambda: {"claude": {"effort": "high"}}
         fake.set_profile = lambda i, patch: dict({"effort": "high"}, **patch)
         sys.modules["council_agents"] = fake
@@ -248,6 +250,43 @@ class DirectCouncil(unittest.TestCase):
         self.assertIn("منقّحة بعد النقد المتبادل", self.judge[0])
         self.assertNotIn("جواب كودكس", self.judge[0])
 
+    def test_slow_review_does_not_block_round(self):
+        saved = T.REVIEW_LIMIT
+        T.REVIEW_LIMIT = {"bal": 1}
+        self.addCleanup(setattr, T, "REVIEW_LIMIT", saved)
+        orig = sys.modules["council_agents"].run
+
+        def slow(agent_id, prompt, **kw):
+            if prompt.startswith("[جولة النقد المتبادل]") and agent_id == "hermes":
+                time.sleep(3)
+            return orig(agent_id, prompt, **kw)
+        sys.modules["council_agents"].run = slow
+        t0 = time.time()
+        rid = T.council_start(["codex", "hermes"], "سؤال", main="claude", review=True)["id"]
+        r = self.wait(rid)
+        self.assertLess(time.time() - t0, 3)
+        self.assertEqual(r["agents"]["hermes"]["revised"], "")
+        self.assertIn("تأخر النقد", r["agents"]["hermes"]["note"])
+        self.assertTrue(r["agents"]["codex"]["revised"])
+
+    def test_cached_off_agent_is_skipped(self):
+        self.cached["hermes"] = {"state": "off", "note": "خطأ خادم"}
+        rid = T.council_start(["codex", "hermes"], "سؤال", main="claude")["id"]
+        r = self.wait(rid)
+        self.assertEqual(r["agents"]["hermes"]["state"], "error")
+        self.assertIn("استُبعد", r["agents"]["hermes"]["error"])
+        self.assertFalse([c for c in self.calls if c[0] == "hermes"])
+        self.assertEqual(r["agents"]["codex"]["state"], "done")
+
+    def test_judge_neutrality_note(self):
+        rid = T.council_start(["codex", "claude"], "سؤال", main="claude")["id"]
+        self.wait(rid)
+        self.assertTrue(T.COUNCIL[rid]["judge_is_delegate"])
+        self.assertIn("تنبيه حياد", T._eval_prompt(T.COUNCIL[rid]))
+        rid2 = T.council_start(["codex"], "سؤال 2", main="claude")["id"]
+        self.wait(rid2)
+        self.assertNotIn("تنبيه حياد", T._eval_prompt(T.COUNCIL[rid2]))
+
     def test_verdict_prompt_headings(self):
         rid = T.council_start(["codex", "hermes"], "سؤال", main="claude", verify=True)["id"]
         self.wait(rid)
@@ -270,6 +309,25 @@ class DirectCouncil(unittest.TestCase):
         self.assertTrue(all(a["direct"] for a in T.council_agents()["agents"]))
         self.assertEqual(T.council_set_profile("codex", {"web": False})["profile"]["web"], False)
         self.assertIn("claude", T.council_profiles()["profiles"])
+
+
+class HealthHooks(unittest.TestCase):
+    def test_brief_and_gating(self):
+        import agent_health as H
+        tmp = tempfile.mkdtemp()
+        H.init(tmp)
+        self.assertEqual(T._health_brief("codex")["status"], "")
+        calls = []
+        saved = (H.check, H.due)
+        H.due = lambda i, force=False: False
+        H.check = lambda i, force=False: calls.append(i) or {"status": "ok"}
+        try:
+            self.assertFalse(T.health_check("codex")["started"])      # لم يحن موعده
+            self.assertFalse(T.health_check("nope")["started"])
+        finally:
+            H.check, H.due = saved
+        self.assertIn("agents", T.health_all())
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 if __name__ == "__main__":
