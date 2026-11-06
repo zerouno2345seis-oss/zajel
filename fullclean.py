@@ -22,7 +22,8 @@ CLOUD_STEPS = [("analyze", "تحليل المساحة", {}), ("large", "أكبر
 
 def public(f: dict) -> dict:
     return {"id": f["id"], "state": f["state"], "progress": f["progress"], "steps": f["steps"], "plan": f.get("plan"),
-            "ai": f.get("ai", ""), "report": f.get("report"), "error": f.get("error", ""), "seconds": round(time.time() - f["started"], 1)}
+            "ai": f.get("ai", ""), "report": f.get("report"), "error": f.get("error", ""), "health": f.get("health"),
+            "phone_health": f.get("phone_health", {}), "seconds": round(time.time() - f["started"], 1)}
 
 
 def _cancelled(f):
@@ -35,7 +36,8 @@ def start(targets: list[dict], resolver, rc_spec, agent: str = "") -> dict:
     if not targets:
         raise ValueError("اختر جهازًا أو قرصًا أو سحابة واحدة على الأقل.")
     f = {"id": uuid.uuid4().hex[:10], "state": "scanning", "progress": "يبدأ…", "steps": [], "cancel": False, "started": time.time(),
-         "jobs": {}, "plan": None, "ai": "", "report": None, "error": "", "targets": targets, "agent": agent}
+         "jobs": {}, "plan": None, "ai": "", "report": None, "error": "", "targets": targets, "agent": agent,
+         "health": None, "phone_health": {}}
     with LOCK:
         FULL[f["id"]] = f
         for k in sorted(FULL, key=lambda x: FULL[x]["started"])[:-4]:
@@ -76,6 +78,36 @@ def _run(f, resolver, rc_spec):
         for tg in f["targets"]:
             root, label = tg["root"], tg.get("label") or tg["root"]
             is_rc = root.startswith("rc:")
+            is_phone = root.startswith("dev:")
+            if is_phone:
+                serial = root[4:]
+                _cancelled(f)
+                s = _step(f, f"{label} — الكاش والسجلات")
+                job = _job(f, "caches", label)
+                job["serial"] = serial
+                w = _watch(f, job, s, f"{label} — الكاش والسجلات")
+                import adbclean
+                adbclean.run(job, "caches", serial, "/sdcard", {})
+                w.join(timeout=1)
+                if job["state"] == "cancelled":
+                    raise C.Cancelled()
+                s["state"] = "done" if job["state"] == "done" else "error"
+                if job["state"] == "error":
+                    s["detail"] = job["error"]
+                else:
+                    phone_result = job["result"] or {}
+                    f["phone_health"][label] = phone_result.get("health")
+                    results.append({"target": label, "root": root, "kind": "caches", "job": job["id"], "result": phone_result})
+                continue
+            if root == "home":
+                health_step = _step(f, f"{label} — صحة الجهاز")
+                try:
+                    import health
+                    f["health"] = health.scan()
+                    health_step["state"] = "done"
+                except Exception:  # noqa: BLE001
+                    f["health"] = None
+                    health_step["state"] = "error"
             try:
                 if is_rc:
                     spec, base = rc_spec(root), rc_spec(root)
@@ -123,13 +155,14 @@ def _chunks(paths):
 def build_plan(results: list[dict]) -> dict:
     items: list[dict] = []
     overview = []
+    advice = []
 
-    def add(group, title, desc, risk, size, paths, job, target, on, sample=None):
+    def add(group, title, desc, risk, size, paths, job, target, on, sample=None, **extra):
         if not paths:
             return
         items.append({"id": f"i{len(items)}", "group": group, "title": title, "desc": desc, "risk": risk, "size": size, "count": len(paths),
                       "paths": paths[:MAX_ITEM_PATHS], "job": job, "target": target, "default_on": on, "sample": (sample or paths)[:12],
-                      "truncated": len(paths) > MAX_ITEM_PATHS})
+                      "truncated": len(paths) > MAX_ITEM_PATHS, **extra})
 
     for r in results:
         res, kind, job, tg = r["result"] or {}, r["kind"], r["job"], r["target"]
@@ -137,10 +170,34 @@ def build_plan(results: list[dict]) -> dict:
             overview.append({"target": tg, "total": res.get("total", 0), "files": res.get("files", 0),
                              "types": (res.get("types") or [])[:5], "top": [{"name": c["name"], "size": c["size"]} for c in (res.get("children") or [])[:5]]})
         elif kind == "caches":
+            serial = bool((r.get("job_data") or {}).get("serial"))
+            # Job metadata is also available in cleaner.JOBS for actual scan results.
+            serial = serial or bool(C.JOBS.get(job, {}).get("serial"))
             for c in res.get("categories", []):
-                safe = c["risk"] in ("safe", "rebuild")
-                add("cache", c["title"], c["desc"], c["risk"], c["size"], [i["path"] for i in c["items"]], job, tg, safe,
-                    [f'{i["path"]} ({i["size"] >> 20} MB)' for i in c["items"][:12]])
+                if not c.get("selectable", True):
+                    advice.append({"target": tg, "title": c["title"], "desc": c["desc"], "risk": c["risk"], "size": c["size"],
+                                   "action": c.get("action"), "items": [{k: i[k] for k in ("path", "name", "size", "note") if k in i}
+                                                                          for i in c.get("items", [])[:12]]})
+                    continue
+                category_id = c.get("id")
+                unique = [{"path": i["path"], **{k: i["unique"].get(k) for k in ("count", "size", "complete")}}
+                          for i in c.get("items", []) if i.get("unique")]
+                desc = c["desc"]
+                # node_modules قد تكون في مجلدات عمل نشطة لوكلاء آخرين: للمراجعة لا تُحدَّد تلقائيًا
+                on = c["risk"] in ("safe", "rebuild") and category_id != "node-modules"
+                group = "cache"
+                extra = {"notes": [f'{i["path"]} — {i["note"]}' for i in c.get("items", []) if i.get("note")]}
+                if category_id == "icloud-archives":
+                    on = False
+                    extra["unique"] = unique
+                    complete = bool(unique) and all(u.get("complete") for u in unique)
+                    desc += " كل ملفاته موجودة في مكان آخر" if complete and all(u.get("count", 0) == 0 for u in unique) else " فيه ملفات غير موجودة في أي مكان آخر — انقلها أولًا"
+                if serial:
+                    group, on = "phone", category_id in ("app-caches", "thumbs", "device-logs")
+                    desc += " (يُحذف نهائيًا من الهاتف)"
+                    extra["device"] = True
+                add(group, c["title"], desc, c["risk"], c["size"], [i["path"] for i in c["items"]], job, tg, on,
+                    [f'{i["path"]} ({i["size"] >> 20} MB)' for i in c["items"][:12]], **extra)
         elif kind == "empty":
             paths = res.get("dirs") or []
             add("empty", "مجلدات فارغة", "مجلدات بلا أي ملف: حذفها آمن.", "safe", 0, paths, job, tg, True)
@@ -165,7 +222,7 @@ def build_plan(results: list[dict]) -> dict:
         g["count"] += it["count"]
         g["size"] += it["size"]
     safe_total = sum(i["size"] for i in items if i["default_on"])
-    return {"items": items, "overview": overview, "groups": groups, "recommended_size": safe_total,
+    return {"items": items, "overview": overview, "groups": groups, "advice": advice, "recommended_size": safe_total,
             "total_size": sum(i["size"] for i in items)}
 
 
@@ -181,9 +238,19 @@ def ask_ai(f, results, plan) -> str:
                          "؛ أكبر العناصر: " + "، ".join(f"{t['name']} {t['size'] >> 20}MB" for t in o["top"]))
         for it in plan["items"]:
             lines.append(f"* [{it['group']}/{it['risk']}] {it['target']} — {it['title']}: {it['count']} عنصر، {it['size'] >> 20} MB")
+        for card in ((f.get("health") or {}).get("cards") or []):
+            if card.get("status") != "ok":
+                lines.append(f"! صحة: {card.get('title', '')}: {card.get('summary', '')}")
+        for target, health_data in f.get("phone_health", {}).items():
+            for card in health_data.get("cards", []):
+                if card.get("status") != "ok":
+                    lines.append(f"! صحة: {target} — {card.get('title', '')}: {card.get('summary', '')}")
+        for entry in plan.get("advice", []):
+            lines.append(f"~ يحتاج خطوة من المستخدم: {entry['target']} — {entry['title']} {entry['size'] >> 20} MB")
         prompt = ("أنت مستشار تنظيف ملفات داخل برنامج زاجل. هذه نتيجة فحص آلي لأجهزة وأقراص وسحابات المستخدم (لا تخترع أي مسار أو رقم غير موجود هنا):\n"
                   + "\n".join(lines) +
-                  "\n\nاكتب بالعربية، في أقل من 180 كلمة وبنقاط قصيرة: (١) تقييمك للوضع العام وأين تضيع المساحة. (٢) ترتيب التنفيذ الأنسب ولماذا. "
+                  "\n\nلا تقترح حذف أي بند من بنود «يحتاج خطوة من المستخدم»؛ هذه معلومات أو خطوات إرشادية وليست عناصر حذف. "
+                  "اكتب بالعربية، في أقل من 180 كلمة وبنقاط قصيرة: (١) تقييمك للوضع العام وأين تضيع المساحة. (٢) ترتيب التنفيذ الأنسب ولماذا. "
                   "(٣) ما الذي يجب مراجعته يدويًا قبل الحذف، وأي مخاطر. (٤) اقتراحات تحسين دائمة (عادات أو أتمتة) تمنع عودة الفوضى. لا تنفّذ شيئًا ولا تستعمل أدوات.")
         res = council_agents.run(agent, prompt, depth="fast", timeout=120)
         return (res.get("text") or "").strip() if res.get("ok") else ""
@@ -215,7 +282,11 @@ def _apply(f, chosen):
                 if f["cancel"]:
                     break
                 try:
-                    rep = C.remove(it["job"], part, False)
+                    if C.JOBS.get(it["job"], {}).get("serial"):
+                        import adbclean
+                        rep = adbclean.remove(C.JOBS[it["job"]], part)
+                    else:
+                        rep = C.remove(it["job"], part, False)
                 except Exception as exc:  # noqa: BLE001
                     bad += len(part)
                     report["items"].append({"title": it["title"], "error": str(exc)})

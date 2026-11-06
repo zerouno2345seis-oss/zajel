@@ -2199,13 +2199,13 @@ $('#lbpic').onclick = e => { e.stopPropagation(); $('#lbimg').classList.toggle('
 const TOOLS = [['analyze', '📊', 'تحليل المساحة', 'أين تذهب مساحة هذا المجلد؟ أحجام المجلدات والأنواع وأكبر الملفات.'],
   ['duplicates', '🗂️', 'ملفات مكررة', 'ملفات متطابقة تمامًا في المحتوى (تُقارن بالبصمة)، ولو اختلفت أسماؤها.'],
   ['similar', '🖼️', 'ملفات متشابهة', 'صور متقاربة بصريًا (حجم أصغر أو ضغط مختلف أو تعديل خفيف)، وملفات بأسماء متشابهة مثل «(1)» و«نسخة».'],
-  ['caches', '🧹', 'الفحص الشامل', 'فحص كامل للجهاز: سرعة الاستيقاظ والذاكرة والبرامج المستهلكة، وما في «بيانات النظام» (نسخ السحابة، أرشيف iCloud، النماذج المحلية، بقايا الوكلاء)، والكاش والسجلات وسلة المهملات. في الجوال: واتساب وبيانات التطبيقات والسجلات والنسخ المكررة.'],
+  ['caches', '🧹', 'الكاش والنظام', 'فحص كامل للجهاز: سرعة الاستيقاظ والذاكرة والبرامج المستهلكة، وما في «بيانات النظام» (نسخ السحابة، أرشيف iCloud، النماذج المحلية، بقايا الوكلاء)، والكاش والسجلات وسلة المهملات. في الجوال: واتساب وبيانات التطبيقات والسجلات والنسخ المكررة.'],
   ['large', '📦', 'الملفات الكبيرة', 'أكبر ملفات المجلد، مع تمييز ما لم يُعدَّل منذ أكثر من سنة.'],
   ['empty', '📁', 'مجلدات فارغة', 'مجلدات لا تحتوي أي ملف.'],
   ['folders', '📂', 'مجلدات متشابهة', 'مجلدان تتطابق نسبة كبيرة من محتواهما (بالحجم والاسم)، فتختار أيهما تحذف.']];
 let cleanJob = null, cleanKind = '', cleanData = null, cleanTimer = null;
 const cleanSel = new Set(), cleanSizes = new Map(), cleanPerm = new Set(), cleanGroupOf = new Map();
-const SHORT = { analyze: 'المساحة', duplicates: 'المكرر', similar: 'المتشابه', caches: 'الشامل', large: 'الكبير', empty: 'الفارغ', folders: 'المجلدات' };
+const SHORT = { analyze: 'المساحة', duplicates: 'المكرر', similar: 'المتشابه', caches: 'الكاش', large: 'الكبير', empty: 'الفارغ', folders: 'المجلدات' };
 TOOLS.forEach(([k, ic, t, d]) => { const c = el('button', undefined, 'tbtn'); c.title = `${t}: ${d}`; c.append(el('span', ic, 'ti'), el('span', SHORT[k])); c.onclick = () => runScan(k); $('#ctools').append(c); });
 // ===== التنظيف الكامل: فحص شامل + خطة بمشاركة الذكاء الاصطناعي + تنفيذ بعد الموافقة =====
 {
@@ -2213,7 +2213,7 @@ TOOLS.forEach(([k, ic, t, d]) => { const c = el('button', undefined, 'tbtn'); c.
   b.append(el('span', '🧹', 'ti'), el('span', 'تنظيف كامل')); b.onclick = openFullClean; $('#ctools').prepend(b);
 }
 function openFullClean() {
-  const RISK = { safe: ['آمن', '#16a34a'], rebuild: ['يُعاد بناؤه', '#2563eb'], review: ['للمراجعة', '#d97706'] };
+  const RISK = { safe: ['آمن', '#16a34a'], rebuild: ['يُعاد بناؤه', '#2563eb'], review: ['للمراجعة', '#d97706'], info: ['للعلم', '#64748b'], keep: ['لا تلمسه', '#dc2626'] };
   let fid = '', timer = null;
   const stop = () => { if (timer) clearInterval(timer); timer = null; };
   openModal(m => {
@@ -2235,6 +2235,12 @@ function openFullClean() {
         const info = r.total ? ` · ${fsize(r.total)}` : '';
         row.append(cb, el('b', label), el('small', (supported ? '' : 'غير مدعوم هنا ') + info, 'muted')); boxes.push([cb, r, label]); body.append(row);
       });
+      sources.filter(s => s.type === 'adb' && s.online).forEach(s => {
+        const row = el('label'); row.style.cssText = 'display:flex;gap:8px;align-items:center;padding:6px 8px;border:1px solid var(--line);border-radius:8px;cursor:pointer';
+        const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = false;
+        row.append(cb, el('b', `📱 ${s.label}`)); boxes.push([cb, { id: 'dev:' + s.serial }, `📱 ${s.label}`]); body.append(row);
+      });
+      body.append(el('small', 'يُحذف من الهاتف نهائيًا ما توافق عليه فقط', 'muted'));
       foot.replaceChildren(close);
       const go = el('button', 'ابدأ التحليل', 'btn pri'); go.onclick = async () => {
         const targets = boxes.filter(([c]) => c.checked).map(([, r, label]) => ({ root: r.id, label }));
@@ -2268,6 +2274,8 @@ function openFullClean() {
       body.replaceChildren();
       if (r.ai) { const ai = el('div'); ai.style.cssText = 'white-space:pre-wrap;line-height:1.7;border:1px solid var(--acc);border-radius:10px;padding:10px 12px;background:var(--accp)'; ai.append(el('b', '🤖 رؤية الذكاء الاصطناعي\n'), document.createTextNode(r.ai)); body.append(ai); }
       else body.append(el('div', 'تعذّر الحصول على رأي الذكاء الاصطناعي الآن؛ هذه الخطة من التحليل الآلي وحده.', 'muted'));
+      if (r.health) body.append(healthBox(r.health));
+      Object.entries(r.phone_health || {}).forEach(([label, h]) => { const box = healthBox(h); box.querySelector('h4').textContent = `🩺 صحة الجهاز — ${label}`; body.append(box); });
       (P.overview || []).forEach(o => body.append(el('div', `📊 ${o.target}: ${fsize(o.total)} في ${o.files.toLocaleString()} ملف — الأكبر: ${o.top.map(t => t.name + ' ' + fsize(t.size)).join('، ')}`, 'muted')));
       if (!P.items.length) body.append(el('div', '✨ لا شيء يستحق التنظيف في ما اخترته.'));
       P.items.forEach(it => {
@@ -2276,9 +2284,31 @@ function openFullClean() {
         const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = sel.has(it.id); cb.onchange = () => { cb.checked ? sel.add(it.id) : sel.delete(it.id); sum(); };
         const [rt, rc] = RISK[it.risk] || ['', 'inherit']; const pill = el('small', rt); pill.style.cssText = `color:${rc};border:1px solid ${rc};border-radius:99px;padding:0 7px`;
         top.append(cb, el('b', `${it.target} — ${it.title}`), pill, el('span', `${it.count.toLocaleString()} عنصر${it.size ? ' · ' + fsize(it.size) : ''}`, 'muted'));
-        const det = el('details'); det.append(el('summary', it.desc)); const ul = el('div'); ul.style.cssText = 'font-size:11.5px;direction:ltr;text-align:left;color:var(--mut);overflow-wrap:anywhere'; it.sample.forEach(x => ul.append(el('div', x))); if (it.count > it.sample.length) ul.append(el('div', `… و${(it.count - it.sample.length).toLocaleString()} غيرها`)); det.append(ul);
+        if (it.device) top.append(el('small', 'نهائي من الهاتف', 'rk keep'));
+        const det = el('details'); det.append(el('summary', it.desc)); const ul = el('div'); ul.style.cssText = 'font-size:11.5px;direction:ltr;text-align:left;color:var(--mut);overflow-wrap:anywhere'; (it.sample || []).forEach(x => ul.append(el('div', x))); if (it.count > (it.sample || []).length) ul.append(el('div', `… و${(it.count - it.sample.length).toLocaleString()} غيرها`));
+        if ((it.notes || []).length) { const notes = el('div'); notes.style.cssText = 'direction:rtl;text-align:right;color:var(--mut);font-size:12px'; it.notes.forEach(n => notes.append(el('div', 'ℹ️ ' + n))); ul.append(notes); }
+        (it.unique || []).forEach(u => {
+          const n = Number(u.count || 0), line = el('div', `فريد هنا: ${n} ملف (${fsize(u.size || 0)})`); line.style.cssText = 'direction:rtl;text-align:right;color:var(--mut);font-size:12px'; ul.append(line);
+          if (n > 0) { const move = btn('⇢ انقل الفريد إلى المستندات', async () => {
+            if (!confirm(`سيُنقل ${n} ملف (${fsize(u.size || 0)}) إلى المستندات مع الحفاظ على المجلدات. متابعة؟`)) return;
+            try { const result = await api('/api/clean/move_unique', { job: it.job, archive: u.path, confirm: true }); note(`نُقل ${result.moved} ملف (${fsize(result.size)}) إلى ${result.dest}${result.skipped ? ` · تُرك ${result.skipped}` : ''}.`); }
+            catch (e) { note(e.message); }
+          }); ul.append(move); }
+        });
+        det.append(ul);
         row.append(top, det); body.append(row);
       });
+      if ((P.advice || []).length) {
+        const section = el('div', undefined, 'box'); section.append(el('h4', '📌 يحتاج خطوة منك (لا يُحذف شيء هنا)'));
+        P.advice.forEach(a => {
+          const card = el('div', undefined, 'hcard'); card.style.padding = '8px'; const h = el('b', `${a.target} — ${a.title}  `), [label, color] = RISK[a.risk] || [a.risk || '', '#64748b'];
+          const pill = el('small', label, 'rk'); pill.style.color = color; pill.style.borderColor = color; h.append(pill, document.createTextNode('  ' + fsize(a.size || 0))); card.append(h, el('p', a.desc || '', 'muted'));
+          if ((a.action?.steps || []).length) { const ol = el('ol', undefined, 'hadv'); a.action.steps.forEach(s => ol.append(el('li', s))); card.append(ol); }
+          if (a.action?.command) card.append(cmdLine(a.action.label, a.action.command));
+          (a.items || []).forEach(i => card.append(el('div', `${i.name} · ${fsize(i.size || 0)}${i.note ? ' · ' + i.note : ''}`, 'muted'))); section.append(card);
+        });
+        body.append(section);
+      }
       sum(); btn.onclick = async () => {
         if (!confirm(`سيُنقل ${sel.size} بند إلى السلة (نحو ${fsize(total())}). متابعة؟`)) return;
         try { await api('/api/clean/full/apply', { id: fid, items: [...sel], confirm: true }); } catch (e) { note(e.message); return; }
