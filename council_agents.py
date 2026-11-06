@@ -215,6 +215,9 @@ def _event(agent_id, line, on_event, state):
             state["text"] = str(obj.get("result", state["text"]))
             on_event("text", state["text"])
     elif isinstance(obj, dict) and agent_id == "opencode":
+        if obj.get("type") == "error":
+            e = obj.get("error") or {}
+            state["error"] = str((e.get("data") or {}).get("message") or e.get("name") or "خطأ من الوكيل")[:200]
         part = obj.get("part", {})
         if part.get("type") == "text":
             state["text"] += str(part.get("text", ""))
@@ -344,10 +347,15 @@ def run(agent_id, prompt, *, depth="bal", workdir=None, add_dirs=(), on_event=No
                 state["text"] = answer.read_text(encoding="utf-8", errors="replace")
             elif agent_id in ("agy", "codex") and not state["text"]:
                 state["text"] = state.get("live", "")       # انتهت المهلة قبل النتيجة: ما بُثّ حتى الآن (لا نُرجع JSON الخام أبدًا)
+            elif agent_id == "opencode" and not state["text"]:
+                if not state.get("error"):          # لا نُرجع JSON الخام نصًّا أبدًا
+                    state["error"] = "لم يُرجع الوكيل نصًّا"
             elif agent_id == "hermes" or not state["text"]:
                 raw = stdout_path.read_text(encoding="utf-8", errors="replace")
                 state["text"] = raw.strip() if agent_id == "hermes" else (state["text"] or raw.strip())
             result["text"] = state["text"].strip()
+            if state.get("error") and not result["text"]:
+                result["error"] = state["error"]
             if len(result["text"]) < 300 and re.search(r"hit your .*limit|usage limit|quota|rate limit|resets \d", result["text"], re.I):
                 result["error"] = "بلغ الوكيل حدّ استخدامه: " + result["text"]     # رسالة الحصة ليست إجابة
                 result["text"] = ""
