@@ -295,7 +295,7 @@ def set_notify(on):
 def _notify(text):
     try:
         import telegram_link
-        telegram_link.notify("done", text)
+        telegram_link.notify("term", text)
     except Exception:
         pass
 

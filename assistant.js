@@ -6408,6 +6408,9 @@
       telegramBody.appendChild(telegramToggle('إشعار عند فشل وكيل', 'notify_error', telegramStatus.notify_error, renderTelegram));
       telegramBody.appendChild(telegramToggle('إشعار عند اكتمال ردّ طويل', 'notify_long', telegramStatus.notify_long, renderTelegram));
       telegramBody.appendChild(telegramToggle('إشعار عند اكتمال تحليل أو تنظيف أو تفريغ', 'notify_done', telegramStatus.notify_done, renderTelegram));
+      telegramBody.appendChild(telegramToggle('إشعارات الطرفيات (انتظار/انتهاء/إنعاش وكيل)', 'notify_term', telegramStatus.notify_term, renderTelegram));
+      telegramBody.appendChild(telegramToggle('السماح بتكرار الإشعار نفسه (افتراضيًا يُكتم المتكرر كمزامنة كل 20 دقيقة)', 'notify_repeat', telegramStatus.notify_repeat, renderTelegram));
+      telegramBody.appendChild(telegramToggle('ساعات الهدوء (11 مساءً–7 صباحًا: الأخطاء والردود فقط)', 'quiet_on', telegramStatus.quiet_on, renderTelegram));
       telegramBody.appendChild(telegramToggle('إشعار عند توفر تحديث', 'notify_update', telegramStatus.notify_update, renderTelegram));
       telegramBody.appendChild(telegramToggle('السماح باعتماد العمليات الحمراء من Telegram (ضغطتان ورمز؛ الحذف النهائي لا يتم من هناك أبدًا)', 'approve_red', telegramStatus.approve_red, renderTelegram));
       telegramBody.appendChild(el('div', 'أوامر المساعد والأوامر الجاهزة تُكتب للبوت مباشرة، والعمليات الحمراء تنتظر موافقتك داخل زاجل.'));

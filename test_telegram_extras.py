@@ -194,3 +194,17 @@ class Terminal(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NotifyRepeatTests(unittest.TestCase):
+    def test_repeat_suppressed_errors_pass(self):
+        import telegram_link as t
+        from unittest import mock
+        t._SEEN.clear()
+        cfg = dict(t.DEFAULTS, enabled=True, chat_id=1)
+        with mock.patch.object(t, "_cfg", return_value=cfg), mock.patch.object(t, "send") as sd, mock.patch("threading.Thread") as th:
+            t.notify("done", "اكتمل التحليل بعد 30 ثانية")
+            t.notify("done", "اكتمل التحليل بعد 41 ثانية")
+            self.assertEqual(th.call_count, 1)
+            t.notify("error", "فشل"); t.notify("error", "فشل")
+            self.assertEqual(th.call_count, 3)
