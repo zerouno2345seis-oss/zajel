@@ -89,6 +89,8 @@ def init(data_dir, port):
     whatsapp_watch.init(data_dir)
     import terminal
     terminal.init(data_dir)
+    import history
+    history.init(data_dir)
 
 
 _LOGIN_PATH = None

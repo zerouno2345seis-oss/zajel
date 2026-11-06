@@ -172,6 +172,7 @@ function renderSources() {
       row.append(el('span', s.icon, 'ic'), tx);
       const usage = sourceUsage(s); if (usage) row.title += `\n${usage.text}`;
       if (hasSub) { const cv = el('span', open ? '▾' : '▸', 'devcaret'); cv.title = open ? 'طيّ الأقسام' : 'إظهار الأقسام'; cv.onclick = ev => { ev.stopPropagation(); toggleDev(s.id); }; row.append(cv); }
+      if (s.type === 'adb' && !s.acct && s.kind !== 'disk') { const mb = el('button', '⋯', 'mb'); mb.title = 'خيارات هذا الجهاز'; mb.onclick = ev => { ev.stopPropagation(); ev.preventDefault(); const r = mb.getBoundingClientRect(); cleanMenu({ clientX: r.left, clientY: r.bottom + 4 }, s); }; row.append(mb); }
       if (s.acct || s.kind === 'disk') {
         const mb = el('button', '⋯', 'mb'); mb.title = 'خيارات هذا المصدر';
         mb.onclick = ev => { ev.stopPropagation(); ev.preventDefault(); const r = mb.getBoundingClientRect(), pos = { clientX: r.left, clientY: r.bottom + 4 }; s.acct ? acctMenu(pos, s) : diskMenu(pos, s); };
@@ -272,9 +273,20 @@ async function ejectDisk(s) {
   try { const r = await api('/api/eject', { name }); note('⏏ ' + r.message); } catch (e) { note(e.message); }
   refreshRoots();
 }
+function cleanSource(s) {
+  initCleanRoots();
+  const val = s.type === 'adb' ? 'dev:' + s.id : [...croot.options].some(o => o.value === s.id) ? s.id : (cloudRoots.find(r => r.label === s.label || r.id === 'rc:' + s.acct) || {}).id;
+  if (!val || ![...croot.options].some(o => o.value === val)) { note('تعذّر تحديد هذا المصدر للتنظيف.'); return; }
+  setTarget(val, val.startsWith('dev:') ? '/sdcard' : ''); document.querySelector('[data-v="clean"]').click(); runScan('analyze');
+}
+function cleanMenu(ev, s) {
+  closeCtx(); const m = el('div', undefined, 'ctx'), d = el('div', '🧹 تنظيف هذا القسم'); d.onclick = () => { closeCtx(); cleanSource(s); }; m.append(d);
+  document.body.append(m); m.style.left = Math.min(ev.clientX, innerWidth - 220) + 'px'; m.style.top = Math.min(ev.clientY, innerHeight - 80) + 'px';
+}
 function diskMenu(ev, s) {
   closeCtx(); const m = el('div', undefined, 'ctx'), name = s.id.slice(4);
   const add = (t, f, cls) => { const d = el('div', t, cls); d.onclick = () => { closeCtx(); f(); }; m.append(d); };
+  add('🧹 تنظيف هذا القسم', () => cleanSource(s)); m.append(el('hr'));
   add('⏏ إخراج بأمان', () => ejectDisk(s));
   if (s.kind === 'disk') { add('✏️ إعادة تسمية القرص…', () => renameDisk(s)); m.append(el('hr')); add('🧹 فرمتة القرص…', () => eraseDisk(s), 'dg'); }
   document.body.append(m); m.style.left = Math.min(ev.clientX, innerWidth - 220) + 'px'; m.style.top = Math.min(ev.clientY, innerHeight - 160) + 'px';
@@ -282,6 +294,7 @@ function diskMenu(ev, s) {
 function acctMenu(ev, s) {
   closeCtx(); const m = el('div', undefined, 'ctx');
   const add = (t, f, cls) => { const d = el('div', t, cls); d.onclick = () => { closeCtx(); f(); }; m.append(d); };
+  add('🧹 تنظيف هذا القسم', () => cleanSource(s)); m.append(el('hr'));
   add('ⓘ خصائص الحساب', () => acctInfo(s)); add('✏️ إعادة تسمية…', () => acctRename(s)); add('🔄 إعادة تسجيل الدخول', async () => { try { await api('/api/cloud/account', { action: 'reconnect', name: s.acct }); note('فُتح المتصفح لإعادة التفويض.'); } catch (e) { note(e.message); } });
   m.append(el('hr')); add('🗑 إزالة الحساب من الأداة…', () => acctRemove(s), 'dg');
   document.body.append(m); m.style.left = Math.min(ev.clientX, innerWidth - 230) + 'px'; m.style.top = Math.min(ev.clientY, innerHeight - 190) + 'px';
@@ -2749,3 +2762,44 @@ async function runOpWait(body) {
 $('#atoolsbtn').onclick = ev => { ev.stopPropagation(); const p = $('.atoolspop'); p.hidden = !p.hidden; };
 document.addEventListener('click', ev => { const p = $('.atoolspop'); if (p && !p.hidden && !ev.target.closest('.atoolspop')) p.hidden = true; });
 $('.atoolspop').addEventListener('click', ev => { if (ev.target.closest('button')) setTimeout(() => { $('.atoolspop').hidden = true; }, 0); });
+
+/* ---------- سجلّ النتائج: قائمة منسدلة لاستعادة بحث أو تنظيف سابق بدل البدء من جديد ---------- */
+(function () {
+  const tab = document.querySelector('.tab[data-v="files"]'); if (!tab) return;
+  const sel = document.createElement('select'); sel.id = 'histsel'; sel.title = 'النتائج السابقة للبحث والتنظيف';
+  sel.style.cssText = 'margin-inline-start:auto;max-width:210px;font-size:12px;opacity:.75;padding:3px 6px;border-radius:7px;border:1px solid var(--line,#ccc);background:transparent;color:inherit';
+  tab.parentElement.appendChild(sel);
+  const ago = t => { const m = Math.max(0, Math.round((Date.now() / 1000 - t) / 60)); return m < 60 ? `قبل ${m} د` : m < 1440 ? `قبل ${Math.round(m / 60)} س` : `قبل ${Math.round(m / 1440)} يوم`; };
+  async function fill() {
+    let s, c; try { [s, c] = await Promise.all([api('/api/history/list?kind=search'), api('/api/history/list?kind=clean')]); } catch (_) { return; }
+    sel.replaceChildren(new Option('🕘 النتائج السابقة…', ''));
+    for (const [lab, d] of [['البحث', s], ['التنظيف', c]]) {
+      if (!d.items.length) continue;
+      const g = document.createElement('optgroup'); g.label = lab;
+      d.items.forEach(i => g.appendChild(new Option(`${i.title} · ${ago(i.time)}`, i.id)));
+      sel.appendChild(g);
+    }
+  }
+  async function open(id) {
+    let r; try { r = await api('/api/history/get?id=' + encodeURIComponent(id)); } catch (e) { note(e.message); return; }
+    if (r.kind === 'clean') {
+      document.querySelector('[data-v="clean"]').click();
+      cleanJob = r.job.id; cleanKind = r.job.kind; cleanData = r.job.result; cleanSel.clear(); cleanSizes.clear(); cleanPerm.clear(); cleanGroupOf.clear();
+      $('#cprog').hidden = true; $('#cfoot').hidden = false; renderClean(); note('نتيجة محفوظة: ' + r.title + ' — يمكنك المتابعة منها.'); return;
+    }
+    const job = { id: 'saved', state: 'done', entries: r.entries || [], count: (r.entries || []).length, truncated: !!r.truncated, sources: r.sources, error: '', seconds: 0 };
+    if (r.scope === 'multi') {
+      const ids = new Set((r.entries || []).map(e => e.sid)); const list = sources.filter(s => ids.has(s.id) || (r.srcs || []).length === 0);
+      const g = openGallery(r.q, r.exts || [], list.length ? list : sources.filter(s => s.online)); g.update(job); return;
+    }
+    document.querySelector('[data-v="files"]').click();
+    const p = P; if (!p) return; p.cancelSearch();
+    p.prevView = p.viewMode; if (p.viewMode === 'cols') { p.viewMode = 'list'; p.applyView(); }
+    p.search = { id: 'saved', q: r.q, exts: r.exts || [], scope: r.scope, state: 'done', count: job.count, truncated: job.truncated, before: { id: p.src?.id, path: p.cur } };
+    p.srch_sort = store.get('srch_sort', 'mod'); p.srch_desc = store.get('srch_desc', '1') === '1'; p.entries = job.entries; p.cursor = null; p.hideState(); p.rerender();
+    note('نتيجة بحث محفوظة: ' + r.title);
+  }
+  sel.onchange = () => { const v = sel.value; sel.value = ''; if (v) open(v); };
+  sel.onfocus = sel.onmousedown = fill;
+  fill(); setInterval(fill, 60000);
+})();

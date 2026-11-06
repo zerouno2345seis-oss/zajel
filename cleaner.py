@@ -112,6 +112,24 @@ def new_job(kind: str, target: str) -> dict:
         loose = [k for k in sorted(JOBS, key=lambda x: JOBS[x]["started"]) if not JOBS[k].get("keep")]
         for k in loose[:-12]:
             JOBS.pop(k, None)
+    if kind in KIND_AR:
+        import history
+        history.watch("clean", job, lambda j: KIND_AR[j["kind"]] + " — " + str(j["target"])[-60:], lambda j: {"kind": j["kind"], "target": j["target"]},
+                      lambda j: {"kind": j["kind"], "target": j["target"], "result": j["result"], "allowed": sorted(j["allowed"]), "perm_ok": sorted(j["perm_ok"]),
+                                 "base": j.get("base"), "serial": j.get("serial")} if j.get("result") is not None else None)
+    return job
+
+
+def restore(payload: dict) -> dict:
+    """يعيد نتيجة تنظيف محفوظة كمهمة منتهية حتى تعمل معاينتها وحذفها كما لو كانت جديدة."""
+    job = {"id": uuid.uuid4().hex[:10], "kind": payload["kind"], "target": payload["target"], "state": "done", "progress": "اكتمل (نتيجة محفوظة)", "scanned": 0,
+           "result": payload["result"], "error": "", "cancel": False, "allowed": set(payload.get("allowed") or []), "perm_ok": set(payload.get("perm_ok") or []),
+           "started": time.time(), "keep": True}
+    for k in ("base", "serial"):
+        if payload.get(k):
+            job[k] = payload[k]
+    with LOCK:
+        JOBS[job["id"]] = job
     return job
 
 

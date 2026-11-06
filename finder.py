@@ -33,6 +33,15 @@ def public(job, full=False):
             "seconds": round(time.time() - job["started"], 1), "scanned": job.get("scanned"), "to_scan": job.get("to_scan"), "sources": job.get("sources"), "entries": ents if (full or job["state"] != "running") else ents[:300]}
 
 
+def _remember(job, q, exts, content, scope, srcs):
+    """يحفظ البحث المكتمل في سجل النتائج ليُستعاد لاحقًا من القائمة."""
+    import history
+    what = " ".join(x for x in [q] + ["." + e for e in exts[:3]] + content[:2] if x)[:60] or "بحث"
+    history.watch("search", job, lambda j: f"{what} ({len(j['entries'])} نتيجة)", {"q": q, "exts": exts, "content": content, "scope": scope},
+                  lambda j: {"q": q, "exts": exts, "content": content, "scope": scope, "srcs": srcs, "truncated": j["truncated"], "sources": j.get("sources"),
+                             "entries": j["entries"]} if j["entries"] else None)
+
+
 def start(body):
     src = body.get("src") or {}
     q = str(body.get("q") or "").strip()
@@ -51,6 +60,7 @@ def start(body):
     if len(JOBS) > 10:
         for k in sorted(JOBS, key=lambda x: JOBS[x]["started"])[:-10]:
             JOBS.pop(k, None)
+    _remember(job, q, exts, content, scope, [src])
     threading.Thread(target=run, args=(job, src, path, q, exts, scope, content), daemon=True).start()
     return public(job)
 
@@ -486,6 +496,7 @@ def start_multi(body):
         for k in sorted(JOBS, key=lambda x: JOBS[x]["started"])[:-10]:
             if JOBS[k]["state"] != "running":
                 JOBS.pop(k, None)
+    _remember(job, q, exts, content, "multi", [it.get("src") or {} for it in lst])
     lock = threading.Lock()
 
     def one(it):

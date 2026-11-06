@@ -2196,6 +2196,19 @@ class Handler(BaseHTTPRequestHandler):
                     self.wfile.write(data)
             elif url.path == "/api/network/discover":
                 self.send_json({"hosts": discover_hosts()})
+            elif url.path == "/api/history/list":
+                import history
+                self.send_json({"items": history.listing("clean" if query.get("kind", [""])[0] == "clean" else "search")})
+            elif url.path == "/api/history/get":
+                import history
+                rec = history.load(query.get("id", [""])[0])
+                if not rec:
+                    raise ValueError("السجل غير موجود (حُذف أو قُدّم عليه).")
+                if rec["kind"] == "clean":
+                    job = cleaner.restore(rec["payload"])
+                    self.send_json({"kind": "clean", "title": rec["title"], "job": cleaner.public(job)})
+                else:
+                    self.send_json({"kind": "search", "title": rec["title"], **rec["payload"]})
             elif url.path == "/api/search/job":
                 job = finder.JOBS.get(query.get("id", [""])[0])
                 if not job:
