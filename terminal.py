@@ -395,8 +395,8 @@ def _monitor():
                 now = time.time()
                 if st == "working" and prev != "working":
                     m["worked"] = now
-                if CFG["notify"] and st != prev and now - m["note"] > 60:
-                    long_work = prev == "working" and m["worked"] and now - m["worked"] >= 10
+                if CFG["notify"] and st != prev and now - m["note"] > 900:
+                    long_work = prev == "working" and m["worked"] and now - m["worked"] >= 90      # أقصر من ذلك تذبذب شاشة لا عمل حقيقي
                     if st == "waiting" and prev in ("working", "idle"):
                         _notify(f"الوكيل {a['name']} ينتظر ردّك.")
                         m["note"] = now

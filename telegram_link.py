@@ -212,7 +212,7 @@ def _quiet(method, params):
 
 
 _SEEN = {}
-REPEAT_SECS = {"done": 4 * 3600, "update": 12 * 3600, "term": 20 * 60}     # الفشل والردود الطويلة لا تُكتم أبدًا
+REPEAT_SECS = {"done": 4 * 3600, "update": 12 * 3600, "term": 3 * 3600}     # الفشل والردود الطويلة لا تُكتم أبدًا
 
 
 def _quiet_now(c):
