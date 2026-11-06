@@ -2199,13 +2199,13 @@ $('#lbpic').onclick = e => { e.stopPropagation(); $('#lbimg').classList.toggle('
 const TOOLS = [['analyze', '📊', 'تحليل المساحة', 'أين تذهب مساحة هذا المجلد؟ أحجام المجلدات والأنواع وأكبر الملفات.'],
   ['duplicates', '🗂️', 'ملفات مكررة', 'ملفات متطابقة تمامًا في المحتوى (تُقارن بالبصمة)، ولو اختلفت أسماؤها.'],
   ['similar', '🖼️', 'ملفات متشابهة', 'صور متقاربة بصريًا (حجم أصغر أو ضغط مختلف أو تعديل خفيف)، وملفات بأسماء متشابهة مثل «(1)» و«نسخة».'],
-  ['caches', '🧹', 'الكاش والنظام', 'كاش التطبيقات والسجلات وسلة المهملات وأدوات المطورين وnode_modules.'],
+  ['caches', '🧹', 'الفحص الشامل', 'فحص كامل للجهاز: سرعة الاستيقاظ والذاكرة والبرامج المستهلكة، وما في «بيانات النظام» (نسخ السحابة، أرشيف iCloud، النماذج المحلية، بقايا الوكلاء)، والكاش والسجلات وسلة المهملات. في الجوال: واتساب وبيانات التطبيقات والسجلات والنسخ المكررة.'],
   ['large', '📦', 'الملفات الكبيرة', 'أكبر ملفات المجلد، مع تمييز ما لم يُعدَّل منذ أكثر من سنة.'],
   ['empty', '📁', 'مجلدات فارغة', 'مجلدات لا تحتوي أي ملف.'],
   ['folders', '📂', 'مجلدات متشابهة', 'مجلدان تتطابق نسبة كبيرة من محتواهما (بالحجم والاسم)، فتختار أيهما تحذف.']];
 let cleanJob = null, cleanKind = '', cleanData = null, cleanTimer = null;
 const cleanSel = new Set(), cleanSizes = new Map(), cleanPerm = new Set(), cleanGroupOf = new Map();
-const SHORT = { analyze: 'المساحة', duplicates: 'المكرر', similar: 'المتشابه', caches: 'الكاش', large: 'الكبير', empty: 'الفارغ', folders: 'المجلدات' };
+const SHORT = { analyze: 'المساحة', duplicates: 'المكرر', similar: 'المتشابه', caches: 'الشامل', large: 'الكبير', empty: 'الفارغ', folders: 'المجلدات' };
 TOOLS.forEach(([k, ic, t, d]) => { const c = el('button', undefined, 'tbtn'); c.title = `${t}: ${d}`; c.append(el('span', ic, 'ti'), el('span', SHORT[k])); c.onclick = () => runScan(k); $('#ctools').append(c); });
 // ===== التنظيف الكامل: فحص شامل + خطة بمشاركة الذكاء الاصطناعي + تنفيذ بعد الموافقة =====
 {
@@ -2399,6 +2399,54 @@ function cthumb(path, mtime, group) {
   box.ondblclick = () => { const items = group.files.map(f => ({ title: f.path.split('/').pop(), url: `/api/clean/thumb?job=${cleanJob}&path=${encodeURIComponent(f.path)}&v=${f.mtime}&s=2000`, fallback: `/api/clean/thumb?job=${cleanJob}&path=${encodeURIComponent(f.path)}&v=${f.mtime}` })); openLightbox(items, group.files.findIndex(f => f.path === path)); };
   box.title = 'انقر مرتين للمعاينة'; return box;
 }
+// ---------- الفحص الشامل: بطاقات الصحة وفئات المعرفة ----------
+const RISK_AR = { safe: 'آمن', rebuild: 'يُعاد بناؤه', review: 'راجعه', info: 'للعلم', keep: 'لا تلمسه' };
+function copyBtn(txt) { const b = btn('📋 نسخ', () => { navigator.clipboard?.writeText(txt).then(() => note('نُسخ الأمر. الصقه في الطرفية.')).catch(() => note(txt)); }); b.style.marginInlineStart = '8px'; return b; }
+function cmdLine(label, cmd) { const r = el('div', undefined, 'hcmd'); if (label) r.append(el('small', label, 'muted')); const c = el('code', cmd); c.dir = 'ltr'; r.append(c, copyBtn(cmd)); return r; }
+function healthBox(h) {
+  const wrap = el('div', undefined, 'box hbox'); wrap.append(el('h4', '🩺 صحة الجهاز'));
+  (h.cards || []).forEach(c => {
+    const card = el('details', undefined, 'hcard ' + (c.status || 'ok')); if (c.status && c.status !== 'ok') card.open = true;
+    const sm = el('summary'); sm.append(el('span', { ok: '✓', warn: '⚠️', bad: '⛔' }[c.status] || '•', 'hst'), el('b', c.title), el('span', '  ' + (c.summary || ''), 'muted')); card.append(sm);
+    (c.details || []).forEach(t => card.append(el('div', t, 'hdet')));
+    if ((c.advice || []).length) { const ul = el('ol', undefined, 'hadv'); c.advice.forEach(a => ul.append(el('li', a))); card.append(ul); }
+    (c.commands || []).forEach(k => card.append(cmdLine(k.label, k.cmd)));
+    wrap.append(card);
+  });
+  const apps = h.apps || [];
+  if (apps.length) {
+    const t = el('details', undefined, 'hcard ok'), sm = el('summary'); sm.append(el('span', '📦', 'hst'), el('b', 'أكبر التطبيقات في الجوال'), el('span', '  التطبيق + بياناته', 'muted')); t.append(sm);
+    apps.forEach(a => { const r = el('div', undefined, 'crow'), g = el('div', undefined, 'grow'); g.append(el('b', a.label || a.pkg), el('small', (a.note ? a.note + ' · ' : '') + `التطبيق ${fsize(a.app)} · البيانات ${fsize(a.data)} · الكاش ${fsize(a.cache)}`)); r.append(g, el('span', fsize((a.app || 0) + (a.data || 0)), 'sz')); t.append(r); });
+    wrap.append(t);
+  }
+  return wrap;
+}
+function cleanCatBox(c) {
+  const sel = c.selectable !== false, card = el('div', undefined, 'box' + (sel ? '' : ' cinfo')), h4 = el('h4');
+  h4.append(c.title + '  ', el('span', RISK_AR[c.risk] || c.risk, 'rk ' + c.risk), '  ' + fsize(c.size));
+  if (sel) { const all = btn('تحديد الكل', () => { c.items.forEach(i => cleanSel.add(i.path)); renderClean(true); }); all.style.marginInlineStart = '10px'; h4.append(all); }
+  card.append(h4, el('p', c.desc, 'muted'));
+  const a = c.action;
+  if (a && (a.steps || []).length) { const ol = el('ol', undefined, 'hadv'); a.steps.forEach(t => ol.append(el('li', t))); if (a.label) card.append(el('b', a.label)); card.append(ol); }
+  if (a && a.kind === 'command' && a.command) card.append(cmdLine(a.label, a.command));
+  c.items.forEach(i => {
+    let sub = (i.note ? i.note + '  ·  ' : '') + i.path, extra;
+    if (i.unique) {
+      sub = (i.unique.complete === false ? '⚠️ المقارنة ناقصة — لا تحذفه الآن  ·  ' : i.unique.count ? '' : '✓ كل ملفاته موجودة في مكان آخر، فهو مكرر بالكامل  ·  ') + `فريد هنا: ${i.unique.count} ملف (${fsize(i.unique.size)}) غير موجود في iCloud أو OneDrive أو المستندات  ·  ` + sub;
+      if (i.unique.count) extra = btn('⇢ انقل الفريد إلى المستندات', ev => { ev.stopPropagation(); moveUnique(i.path, i.unique); });
+    }
+    if (sel) { if (c.permanent_ok) cleanPerm.add(i.path); card.append(crow(i.path, i.name, sub, i.size, extra)); }
+    else { const r = el('div', undefined, 'crow'), g = el('div', undefined, 'grow'); g.append(el('b', i.name), el('small', sub)); r.append(g); if (extra) r.append(extra); r.append(el('span', fsize(i.size), 'sz'));
+      if (i.path.startsWith('/')) { const f = el('button', '🔍', 'cfind'); f.title = 'إظهار في Finder'; f.onclick = () => api('/api/clean/reveal', { job: cleanJob, path: i.path }).catch(x => note(x.message)); r.append(f); }
+      card.append(r); }
+  });
+  return card;
+}
+async function moveUnique(path, u) {
+  if (!confirm(`سيُنقل ${u.count} ملف (${fsize(u.size)}) موجود في هذا الأرشيف وحده إلى:\nالمستندات / من أرشيف iCloud\nبنفس ترتيب المجلدات، دون الكتابة فوق أي ملف. متابعة؟`)) return;
+  try { const r = await api('/api/clean/move_unique', { job: cleanJob, archive: path, confirm: true }); note(`نُقل ${r.moved} ملف (${fsize(r.size)}) إلى ${r.dest}${r.skipped ? ` · تُرك ${r.skipped}` : ''}. صار الأرشيف مكررًا ويمكن نقله إلى السلة.`); runScan('caches'); }
+  catch (e) { cleanError(e.message); }
+}
 function renderClean(keepScroll) {
   const d = cleanData, box = $('#cres'), y = window.scrollY; if (!d) return; box.replaceChildren();
   if (cleanKind === 'analyze') {
@@ -2445,14 +2493,12 @@ function renderClean(keepScroll) {
       box.append(card);
     });
   } else if (cleanKind === 'caches') {
-    const head = el('div', undefined, 'sumh'), x = el('div'); x.append(el('b', fsize(d.total)), el('span', 'يمكن تحريره', 'muted')); head.append(x); box.append(head);
-    d.categories.forEach(c => {
-      const card = el('div', undefined, 'box'), h4 = el('h4'); h4.append(c.title + '  ', el('span', { safe: 'آمن', rebuild: 'يُعاد بناؤه', review: 'راجعه' }[c.risk], 'rk ' + c.risk), '  ' + fsize(c.size));
-      const all = btn('تحديد الكل', () => { c.items.forEach(i => cleanSel.add(i.path)); renderClean(true); }); all.style.marginInlineStart = '10px'; h4.append(all);
-      card.append(h4, el('p', c.desc, 'muted'));
-      c.items.forEach(i => { if (c.permanent_ok) cleanPerm.add(i.path); card.append(crow(i.path, i.name, i.path, i.size)); });
-      box.append(card);
-    });
+    const head = el('div', undefined, 'sumh'), x = el('div'); x.append(el('b', fsize(d.total)), el('span', 'يمكن تحريره بالتحديد', 'muted')); head.append(x);
+    const info = (d.categories || []).filter(c => c.selectable === false && c.risk !== 'keep').reduce((a, c) => a + (c.size || 0), 0);
+    if (info) { const y2 = el('div'); y2.append(el('b', fsize(info)), el('span', 'يحتاج خطوة منك (انظر الشرح)', 'muted')); head.append(y2); }
+    box.append(head);
+    if (d.health) box.append(healthBox(d.health));
+    d.categories.forEach(c => box.append(cleanCatBox(c)));
     if (!d.categories.length) box.append(el('div', '✓ لا ملفات كاش تُذكر.', 'warnbox'));
   } else if (cleanKind === 'large') {
     const head = el('div', undefined, 'sumh'), x = el('div'); x.append(el('b', fsize(d.total)), el('span', `أكبر ${d.files.length} ملف`, 'muted')); head.append(x); box.append(head);

@@ -260,6 +260,40 @@ def t_disk_space(a, H):
     return out
 
 
+@tool("device_health", "فحص صحة الماك للقراءة فقط: بطء الاستيقاظ من النوم، البرامج التي تمنع النوم، الذاكرة والذاكرة الإضافية، أكثر البرامج استهلاكًا للرام والمعالج، والمساحة الحرة، مع نصائح وأوامر يشغّلها المستخدم بنفسه. لا يغيّر شيئًا.")
+def _device_health(a, H):
+    import health
+    return health.scan()
+
+
+@tool("full_scan", "ابدأ «الفحص الشامل» (زر 🧹 في قسم التنظيف) للقراءة فقط: device=mac للكمبيوتر (الكاش، بيانات النظام، نسخ السحابة، أرشيف iCloud، النماذج المحلية، بقايا الوكلاء، مع صحة الجهاز) أو device=phone للجوال المتصل (واتساب، بيانات التطبيقات، السجلات، النسخ المكررة). يعيد معرّف المهمة؛ اجلب النتيجة بـ full_scan_result. الحذف لا يتم من هنا: وجّه المستخدم إلى قسم التنظيف ▸ الفحص الشامل ليحدد بنفسه.",
+      {"device": S("mac أو phone")})
+def _full_scan(a, H):
+    body = {"kind": "caches"}
+    if str(a.get("device", "mac")).lower() in ("phone", "android", "الجوال", "الهاتف"):
+        body["src"] = {"type": "adb"}
+    return H.http("POST", "/api/clean/start", body)
+
+
+@tool("full_scan_result", "نتيجة الفحص الشامل بمعرّفه: الفئات بأحجامها ودرجة أمانها (آمن/يُعاد بناؤه/راجعه/للعلم/لا تلمسه) وهل تُحدَّد للحذف، وأكبر العناصر في كل فئة، وبطاقات صحة الجهاز.",
+      {"id": S("معرّف المهمة من full_scan")}, ["id"])
+def _full_scan_result(a, H):
+    job = H.http("GET", "/api/clean/job?id=" + H.q(str(a.get("id", ""))))
+    out = {"state": job.get("state"), "progress": job.get("progress")}
+    r = job.get("result") or {}
+    if r:
+        out["total_selectable"] = r.get("total")
+        out["categories"] = [{"title": c.get("title"), "risk": c.get("risk"), "size": c.get("size"), "selectable": c.get("selectable", True),
+                              "desc": c.get("desc"), "action": c.get("action"),
+                              "top": [{k: i.get(k) for k in ("path", "size", "note", "unique") if i.get(k) is not None} for i in (c.get("items") or [])[:8]]}
+                             for c in r.get("categories") or []]
+        h = r.get("health") or {}
+        out["health"] = [{k: c.get(k) for k in ("title", "status", "summary", "advice", "commands")} for c in h.get("cards") or []]
+        if h.get("apps"):
+            out["phone_apps"] = h["apps"][:15]
+    return out
+
+
 @tool("list_ops", "العمليات الجارية والأخيرة (نسخ/نقل/حذف…) مع التقدم.")
 def t_list_ops(a, H):
     return H.http("GET", "/api/ops/list")

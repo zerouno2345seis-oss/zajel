@@ -14,12 +14,14 @@ import time
 import json
 import re
 import uuid
+import glob
 from collections import Counter
 from pathlib import Path
 
 HOME = Path.home()
 JOBS: dict[str, dict] = {}
 LOCK = threading.Lock()
+UNIQUE_LIMIT_S = 600  # مقارنة الأرشيف لا تُقطع إلا بعد عشر دقائق، وتُعلَّم ناقصة إن قُطعت
 LOG = Path(os.environ.get("PB_DATA") or Path(__file__).resolve().parent) / "cleaning.log"
 
 TYPES = {
@@ -543,19 +545,24 @@ def find_named(job, top: Path, name: str, limit_seconds=45, max_depth=7):
 
 
 def caches(job):
+    import clean_knowledge
     cats = []
 
-    def add(cid, title, desc, risk, paths, permanent_ok=True):
+    def add(cid, title, desc, risk, paths, permanent_ok=True, selectable=True, action=None, notes=None, min_size=0):
         paths = [p for p in paths if os.path.exists(p)]
         if not paths:
             return
         items = sized(job, paths)
         total = sum(i["size"] for i in items)
-        if total <= 0:
+        if total <= 0 or total < min_size:
             return
-        cats.append({"id": cid, "title": title, "desc": desc, "risk": risk, "size": total, "permanent_ok": permanent_ok, "items": items[:60]})
+        for item in items:
+            if notes:
+                item["note"] = notes(os.path.basename(item["path"]))
+        cats.append({"id": cid, "title": title, "desc": desc, "risk": risk, "size": total, "permanent_ok": permanent_ok, "selectable": selectable, "action": action, "items": items[:60]})
         for i in items:
-            job["allowed"].add(i["path"])
+            if selectable:
+                job["allowed"].add(i["path"])
             if permanent_ok:
                 job["perm_ok"].add(i["path"])
 
@@ -578,8 +585,118 @@ def caches(job):
     job["progress"] = "البحث عن node_modules…"
     nm = find_named(job, HOME, "node_modules")
     add("node-modules", "مجلدات node_modules", "مكتبات مشاريع JavaScript. تُعاد بأمر npm install. احذف ما في مشاريع قديمة.", "rebuild", nm, permanent_ok=False)
+
+    def matches(pattern):
+        return sorted(set(glob.glob(str(HOME / pattern))))
+
+    for spec in clean_knowledge.LOCATIONS:
+        check(job)
+        if spec["id"] == "icloud-archives":
+            paths = matches("*iCloud Drive*") + matches("Library/CloudStorage/*iCloud Drive*")
+            paths = sorted({p for p in paths if os.path.isdir(p)})
+        else:
+            paths = matches(spec["pattern"])
+        paths = [p for p in paths if not clean_knowledge.matches_keep(p, HOME)]
+        if not paths:
+            continue
+        # Cloud-provider roots are informational and should be listed even when small.
+        threshold = 0 if not spec["selectable"] else 50 * 1024 * 1024
+        add(spec["id"], spec["title"], spec["desc"], spec["risk"], paths,
+            permanent_ok=False, selectable=spec["selectable"], action=spec.get("action"), min_size=threshold)
+
+    # Compare archive contents by (filename, byte size), matching the Phase 3 reference.
+    archives = [c for c in cats if c["id"] == "icloud-archives"]
+    if archives:
+        job.setdefault("unique_ok", set())
+        job.setdefault("unique", {})
+        roots = [HOME / "Library/Mobile Documents", HOME / "Documents", HOME / "Desktop", HOME / "Downloads"]
+        roots += [Path(p) for pat in ("Library/CloudStorage/OneDrive*", "Library/CloudStorage/GoogleDrive*") for p in matches(pat)]
+        have, names = set(), set()
+        started, visited = time.monotonic(), 0
+        index_complete = True
+        for root in roots:
+            if not root.is_dir():
+                continue
+            for dp, dns, fns in os.walk(root):
+                check(job)
+                dns[:] = [d for d in dns if not d.startswith(".")]
+                for name in fns:
+                    if name.startswith("."):
+                        continue
+                    try:
+                        st = os.lstat(os.path.join(dp, name))
+                        have.add((name, st.st_size)); names.add(name)
+                    except OSError:
+                        pass
+                    visited += 1
+                    if visited % 1000 == 0:
+                        job["progress"] = f"مقارنة نسخ iCloud… {visited:,} ملف"
+                    if time.monotonic() - started > UNIQUE_LIMIT_S:
+                        break
+                if time.monotonic() - started > UNIQUE_LIMIT_S:
+                    break
+            if time.monotonic() - started > UNIQUE_LIMIT_S:
+                index_complete = False
+                break
+        for item in archives[0]["items"]:
+            check(job)
+            unique, started_scan, complete = [], time.monotonic(), index_complete
+            for dp, dns, fns in os.walk(item["path"]):
+                check(job)
+                dns[:] = [d for d in dns if not d.startswith(".")]
+                for name in fns:
+                    if name.startswith("."):
+                        continue
+                    path = os.path.join(dp, name)
+                    try:
+                        st = os.lstat(path)
+                        if (name, st.st_size) not in have:
+                            unique.append(os.path.relpath(path, item["path"]))
+                    except OSError:
+                        pass
+                    if len(unique) % 1000 == 0:
+                        job["progress"] = f"فحص ملفات الأرشيف… {len(unique):,} ملف فريد"
+                    if time.monotonic() - started_scan > UNIQUE_LIMIT_S:
+                        break
+                if time.monotonic() - started_scan > UNIQUE_LIMIT_S:
+                    complete = False
+                    break
+            archive = item["path"]
+            job["unique_ok"].add(archive)
+            job["unique"][archive] = unique
+            sizes = []
+            for rel in unique:
+                try:
+                    sizes.append(os.path.getsize(os.path.join(archive, rel)))
+                except OSError:
+                    pass
+            item["unique"] = {"count": len(unique), "size": sum(sizes), "sample": unique[:10], "complete": complete}
+            if not complete:
+                item["note"] = "المقارنة لم تكتمل في الوقت المحدد؛ لا تحذف هذا الأرشيف قبل إعادة الفحص."
+
+    # Large Application Support children are informative; never add them to removal allowlist.
+    app_support = HOME / "Library/Application Support"
+    large_apps = []
+    known_notes = clean_knowledge.APP_NOTES
+    for path in children(app_support):
+        check(job)
+        try:
+            size = du_kb(path)
+        except Exception:
+            size = 0
+        if size > (1 << 30):
+            large_apps.append(path)
+    add("large-app-support", "بيانات التطبيقات الكبيرة", "بيانات التطبيقات قد تشمل إعدادات أو ملفات عمل؛ لا تحذفها دون مراجعة.", "info", large_apps,
+        permanent_ok=False, selectable=False, notes=lambda n: next((v for k, v in known_notes.items() if k.lower() in n.lower()), "بيانات تطبيق كبيرة؛ راجعها قبل اتخاذ قرار."))
+    # Protect keychains and password manager data even if another scan category found them.
+    job["allowed"] = {p for p in job["allowed"] if not clean_knowledge.matches_keep(p, HOME)}
     cats.sort(key=lambda c: -c["size"])
-    return {"categories": cats, "total": sum(c["size"] for c in cats)}
+    try:
+        import health
+        health_result = health.scan()
+    except Exception:
+        health_result = None
+    return {"categories": cats, "total": sum(c["size"] for c in cats if c.get("selectable", True)), "health": health_result}
 
 
 # ---------------- الكبير والفارغ ----------------
@@ -711,11 +828,50 @@ def log(kind, items, ok):
         fh.write(f'{dt.datetime.now().isoformat(timespec="seconds")}\t{kind}\t{ok}\t{len(items)}\t{items[:5]}\n')
 
 
+def move_unique(job_id: str, archive: str, dest: str | None = None) -> dict:
+    job = JOBS.get(job_id)
+    if not job:
+        raise ValueError("نتيجة الفحص انتهت صلاحيتها؛ أعد الفحص.")
+    if archive not in job.get("unique_ok", set()):
+        raise ValueError("هذا الأرشيف لم يُعتمد في نتيجة المقارنة.")
+    target = Path(dest) if dest else HOME / "Documents" / "من أرشيف iCloud"
+    moved = size = skipped = 0
+    moved_paths = []
+    for rel in job.get("unique", {}).get(archive, []):
+        source = Path(archive) / rel
+        try:
+            check(job)
+            # Refuse traversal and recheck that the source remains under this archive.
+            if Path(rel).is_absolute() or ".." in Path(rel).parts or not source.resolve().is_relative_to(Path(archive).resolve()):
+                skipped += 1
+                continue
+            if not source.exists() or source.is_symlink():
+                skipped += 1
+                continue
+            output = target / rel
+            if output.exists() or output.is_symlink():
+                skipped += 1
+                continue
+            output.parent.mkdir(parents=True, exist_ok=True)
+            file_size = source.stat().st_size if source.is_file() else 0
+            shutil.move(str(source), str(output))
+            moved += 1
+            size += file_size
+            moved_paths.append(str(output))
+        except Cancelled:
+            raise
+        except Exception:
+            skipped += 1
+    log("move_unique", moved_paths, skipped == 0)
+    return {"moved": moved, "size": size, "skipped": skipped, "dest": str(target)}
+
+
 def kind_is_dir(job, raw):
     return job.get("kind") == "empty"
 
 
 def remove(job_id: str, paths: list[str], permanent: bool) -> list[dict]:
+    import clean_knowledge
     job = JOBS.get(job_id)
     if not job:
         raise ValueError("نتيجة الفحص انتهت صلاحيتها؛ أعد الفحص.")
@@ -725,6 +881,8 @@ def remove(job_id: str, paths: list[str], permanent: bool) -> list[dict]:
         try:
             if raw not in job["allowed"]:
                 raise ValueError("ليس ضمن نتائج الفحص.")
+            if clean_knowledge.matches_keep(raw, HOME):
+                raise ValueError("هذا عنصر محفوظ ولا يُسمح بإزالته.")
             if job.get("base", "").find(":") > 0 and not job["base"].startswith("/"):  # حساب rclone: إلى سلة الخدمة
                 import rclone_src as R
                 R._run(["rmdir" if raw.endswith("/") or kind_is_dir(job, raw) else "deletefile", raw], 600)
@@ -739,6 +897,11 @@ def remove(job_id: str, paths: list[str], permanent: bool) -> list[dict]:
             if permanent:
                 shutil.rmtree(p) if p.is_dir() and not p.is_symlink() else p.unlink()
             else:
+                if p.is_dir() and not p.is_symlink():
+                    try:
+                        os.chmod(p, p.stat().st_mode | 0o200)
+                    except OSError:
+                        pass
                 dest_dir = trash_dir_for(p)
                 dest = dest_dir / p.name
                 i = 1

@@ -2511,6 +2511,12 @@ class Handler(BaseHTTPRequestHandler):
             elif self.path == "/api/clean/rules":
                 size = int(self.headers.get("Content-Length", "0"))
                 self.send_json({"rules": cleaner.save_rules(json.loads(self.rfile.read(size)))})
+            elif self.path == "/api/clean/move_unique":
+                size = int(self.headers.get("Content-Length", "0"))
+                body = json.loads(self.rfile.read(size))
+                if body.get("confirm") is not True:
+                    raise ValueError("يلزم تأكيد صريح من المستخدم.")
+                self.send_json(cleaner.move_unique(str(body.get("job", "")), str(body.get("archive", "")), body.get("dest") or None))
             elif self.path in ("/api/clean/start", "/api/clean/cancel", "/api/clean/remove"):
                 size = int(self.headers.get("Content-Length", "0"))
                 body = json.loads(self.rfile.read(size))

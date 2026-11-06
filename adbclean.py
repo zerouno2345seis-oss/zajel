@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import heapq
+import json
 import os
 import posixpath
+import re
 import shlex
 import threading
 import time
@@ -159,28 +161,188 @@ def du_items(serial, shell_glob):
 def caches(job, serial):
     cats = []
 
-    def add(cid, title, desc, risk, items, perm=True):
+    def add(cid, title, desc, risk, items, perm=True, selectable=True, action=None):
         if not items:
             return
-        cats.append({"id": cid, "title": title, "desc": desc, "risk": risk, "size": sum(i["size"] for i in items), "permanent_ok": perm, "items": items[:80]})
-        for i in items:
-            job["allowed"].add(i["path"])
-            if perm:
-                job["perm_ok"].add(i["path"])
+        cat = {"id": cid, "title": title, "desc": desc, "risk": risk, "size": sum(i["size"] for i in items), "permanent_ok": perm, "selectable": selectable, "items": items[:80]}
+        if action:
+            cat["action"] = action
+        cats.append(cat)
+        if selectable:
+            for i in items:
+                job["allowed"].add(i["path"])
+                if perm:
+                    job["perm_ok"].add(i["path"])
     job["progress"] = "فحص كاش التطبيقات…"
-    add("app-caches", "كاش التطبيقات", "ملفات مؤقتة تعيد التطبيقات بناءها (آمنة). قد يبطؤ أول تشغيل لكل تطبيق.", "safe", du_items(serial, "/sdcard/Android/data/*/cache"))
+    try: add("app-caches", "كاش التطبيقات", "ملفات مؤقتة تعيد التطبيقات بناءها (آمنة). قد يبطؤ أول تشغيل لكل تطبيق.", "safe", du_items(serial, "/sdcard/Android/data/*/cache"))
+    except Exception: pass
     job["progress"] = "فحص المصغّرات وسلة المهملات…"
-    add("thumbs", "المصغّرات المخزّنة", "صور مصغّرة يعيد المعرض بناءها. آمنة.", "safe", du_items(serial, "/sdcard/DCIM/.thumbnails /sdcard/Pictures/.thumbnails /sdcard/.thumbnails"))
-    add("trash", "سلة المهملات", "ملفات حُذفت سابقًا من تطبيقات (المعرض وغيره). إفراغها نهائي.", "safe", du_items(serial, "/sdcard/.Trash /sdcard/.trash /sdcard/.Trash-* /sdcard/.recycle_bin '/sdcard/.$recycle_bin$' /sdcard/Android/.Trash"))
-    r = M.shell("find /sdcard/Download/ -maxdepth 1 -type f \\( -iname '*.apk' -o -iname '*.xapk' -o -iname '*.apks' \\) -exec stat -c '%s|%n' {} + 2>/dev/null", serial, 120)
-    inst = []
-    for line in r.stdout.splitlines():
-        s, sep, n = line.partition("|")
-        if sep and s.isdigit():
-            inst.append({"path": n, "name": posixpath.basename(n), "size": int(s)})
-    add("installers", "ملفات تثبيت تطبيقات (APK) في التنزيلات", "ملفات تثبيت استعملتها غالبًا ولم تعد تحتاجها. راجعها قبل الحذف.", "review", sorted(inst, key=lambda i: -i["size"]), perm=False)
+    try: add("thumbs", "المصغّرات المخزّنة", "صور مصغّرة يعيد المعرض بناءها. آمنة.", "safe", du_items(serial, "/sdcard/DCIM/.thumbnails /sdcard/Pictures/.thumbnails /sdcard/.thumbnails"))
+    except Exception: pass
+    try: add("trash", "سلة المهملات", "ملفات حُذفت سابقًا من تطبيقات (المعرض وغيره). إفراغها نهائي.", "safe", du_items(serial, "/sdcard/.Trash /sdcard/.trash /sdcard/.Trash-* /sdcard/.recycle_bin '/sdcard/.$recycle_bin$' /sdcard/Android/.Trash"))
+    except Exception: pass
+    try:
+        r = M.shell("find /sdcard/Download/ -maxdepth 1 -type f \\( -iname '*.apk' -o -iname '*.xapk' -o -iname '*.apks' \\) -exec stat -c '%s|%n' {} + 2>/dev/null", serial, 120)
+        inst = []
+        for line in r.stdout.splitlines():
+            s, sep, n = line.partition("|")
+            if sep and s.isdigit(): inst.append({"path": n, "name": posixpath.basename(n), "size": int(s)})
+        add("installers", "ملفات تثبيت تطبيقات (APK) في التنزيلات", "ملفات تثبيت استعملتها غالبًا ولم تعد تحتاجها. راجعها قبل الحذف.", "review", sorted(inst, key=lambda i: -i["size"]), perm=False)
+    except Exception: pass
+    # Each independent phone section is isolated: unavailable adb commands must not hide other findings.
+    try:
+        health = _phone_health(serial)
+    except Exception:
+        health = None
+    try:
+        media = []
+        for folder in ("/sdcard/Android/media/com.whatsapp/WhatsApp/Media", "/sdcard/Android/media/com.whatsapp.w4b/WhatsApp/Media"):
+            media.extend(du_items(serial, q(folder) + "/*"))
+            for item in media:
+                item["name"] = posixpath.basename(item["path"])
+        add("whatsapp-media", "وسائط واتساب", "مجلدات الوسائط؛ راجعها من واتساب قبل إزالة أي ملف.", "review", media,
+            perm=False, selectable=False,
+            action={"kind": "howto", "label": "إدارة الوسائط في واتساب", "steps": ["واتساب ▸ الإعدادات ▸ التخزين والبيانات ▸ إدارة التخزين", "أوقف تنزيل الفيديو تلقائيًا من التخزين والبيانات"]})
+    except Exception: pass
+    try:
+        apps = (health or {}).get("apps", [])
+        data_items = []
+        for app in apps:
+            if app.get("data", 0) > 1 << 30:
+                label = app.get("label") or app["pkg"]
+                data_items.append({"path": app["pkg"], "name": label, "size": app["data"], "note": app.get("note", "راجع بيانات التطبيق قبل مسحها.")})
+        add("app-data", "بيانات تطبيقات كبيرة", "بيانات محفوظة داخل التطبيقات؛ مسحها قد يزيل ملفات أو إعدادات محلية.", "info", data_items,
+            perm=False, selectable=False,
+            action={"kind": "howto", "label": "فتح مساحة التطبيق", "steps": ["الإعدادات ▸ التطبيقات ▸ <التطبيق> ▸ التخزين"]})
+    except Exception:
+        pass
+    try:
+        logs = du_items(serial, "/sdcard/log/*")
+        add("device-logs", "سجلات الجهاز", "سجلات داخلية يعيد النظام إنشاءها بحجم صغير.", "safe", logs, perm=True)
+    except Exception:
+        pass
+    try:
+        r = M.shell("find /sdcard/Download/ -maxdepth 2 -type f -exec stat -c '%s|%n' {} + 2>/dev/null", serial, 120)
+        files = []
+        for line in r.stdout.splitlines():
+            size, sep, path = line.partition("|")
+            if sep and size.isdigit() and re.search(r" \([1-9][0-9]*\)(?=\.[^.]+$|$)", posixpath.basename(path)):
+                files.append((int(size), path))
+        originals = {}
+        for size, path in files:
+            name = posixpath.basename(path)
+            original = re.sub(r" \([1-9][0-9]*\)(?=(\.[^.]+)?$)", "", name)
+            originals[path] = posixpath.join(posixpath.dirname(path), original)
+        candidates = [p for _, p in files] + [p for p in originals.values()]
+        sizes = {p: s for s, p in files}
+        # Stat originals that weren't duplicates too; hashing is only useful for equal-size pairs.
+        missing = sorted({p for p in originals.values() if p not in sizes})
+        if missing:
+            for start in range(0, len(missing), CHUNK):
+                sr = M.shell("stat -c '%s|%n' " + " ".join(q(p) for p in missing[start:start+CHUNK]) + " 2>/dev/null", serial, 120)
+                for ln in sr.stdout.splitlines():
+                    sz, sep, p = ln.partition("|")
+                    if sep and sz.isdigit(): sizes[p] = int(sz)
+        matched = []
+        for size, path in files:
+            original = originals[path]
+            if sizes.get(original) == size:
+                matched.append((path, original, size))
+        hashes = sha_many(serial, [p for pair in matched for p in pair[:2]]) if matched else {}
+        copies = [{"path": path, "name": posixpath.basename(path), "size": size, "note": "نسخة مطابقة لـ " + posixpath.basename(original)}
+                  for path, original, size in matched if hashes.get(path) and hashes.get(path) == hashes.get(original)]
+        add("download-copies", "نسخ مطابقة في التنزيلات", "نسخ مطابقة للمحتوى والأصل موجود في المجلد نفسه.", "review", copies, perm=True)
+    except Exception:
+        pass
     cats.sort(key=lambda c: -c["size"])
-    return {"categories": cats, "total": sum(c["size"] for c in cats)}
+    return {"categories": cats, "total": sum(c["size"] for c in cats if c.get("selectable", True)), "health": health}
+
+
+def _diskstats_value(text, label):
+    """dumpsys diskstats يكتب «Label: [..]» أو «Label: رقم» (وأحيانًا ["Label", ...] في نسخ أخرى)."""
+    m = re.search(r"^\s*" + re.escape(label) + r"\s*:\s*(\[.*?\]|-?\d+)", text, re.M)
+    if not m:
+        m = re.search(r'\[\s*["\']' + re.escape(label) + r'["\']\s*,\s*(\[[^\]]*\]|-?\d+)\s*\]', text)
+    if not m:
+        return None
+    value = m.group(1)
+    try:
+        return json.loads(value)
+    except Exception:
+        return int(value) if value.lstrip("-").isdigit() else None
+
+
+APP_LABELS = {"com.whatsapp": "واتساب", "com.whatsapp.w4b": "واتساب للأعمال", "com.sec.android.easyMover": "Smart Switch (نقل البيانات)",
+              "com.google.android.apps.labs.language.tailwind": "NotebookLM", "com.readdle.spark": "Spark (البريد)", "com.google.android.youtube": "YouTube",
+              "com.microsoft.skydrive": "OneDrive", "com.google.android.apps.photos": "صور Google", "com.google.android.gms": "خدمات Google",
+              "com.google.android.apps.maps": "خرائط Google", "com.facebook.katana": "Facebook", "com.instagram.android": "Instagram",
+              "com.adobe.reader": "Adobe Acrobat", "com.google.android.apps.docs": "Google Drive", "com.virtualmaze.offlinemapnavigationtracker": "خرائط بلا إنترنت",
+              "com.samsung.android.intellivoiceservice": "خدمة الصوت الذكية من سامسونج", "com.google.android.tts": "النطق من Google",
+              "com.samsung.android.offline.languagemodel": "نموذج اللغة المحلي من سامسونج", "com.mohamad.smartnotehub": "SmartNoteHub"}
+
+
+def _gb(n):
+    return f"{(n or 0) / 1e9:.1f} غيغابايت"
+
+
+def _phone_health(serial):
+    facts = {}
+    try:
+        r = M.shell("df -k /data", serial, 30)
+        rows = r.stdout.splitlines()
+        for row in rows[1:]:
+            cols = row.split()
+            if len(cols) >= 5 and cols[1].isdigit() and cols[2].isdigit():
+                facts.update(total=int(cols[1]) * 1024, used=int(cols[2]) * 1024, free=int(cols[3]) * 1024)
+                break
+    except Exception: pass
+    try:
+        facts["model"] = M.shell("getprop ro.product.model", serial, 20).stdout.strip()
+    except Exception: pass
+    apps = []
+    totals = {}
+    try:
+        raw = M.shell("dumpsys diskstats", serial, 60).stdout
+        names = _diskstats_value(raw, "Package Names") or []
+        app_sizes = _diskstats_value(raw, "App Sizes") or []
+        data_sizes = _diskstats_value(raw, "App Data Sizes") or []
+        cache_sizes = _diskstats_value(raw, "Cache Sizes") or []
+        notes = {
+            "com.whatsapp": "الوسائط غالبًا في /sdcard/Android/media/؛ راجع إدارة التخزين.",
+            "com.whatsapp.w4b": "الوسائط غالبًا في /sdcard/Android/media/؛ راجع إدارة التخزين.",
+            "com.sec.android.easyMover": "بقايا نقل مكتمل عبر Smart Switch؛ امسح بياناته من إعدادات التطبيق إن لم تعد تحتاجها.",
+            "com.google.android.apps.labs.language.tailwind": "قد تشمل صوت NotebookLM المنزّل للاستماع دون اتصال.",
+            "com.google.android.youtube": "قد تشمل تنزيلات YouTube للمشاهدة دون اتصال.",
+            "com.google.android.apps.photos": "قد تشمل كاشًا ومصغّرات؛ استخدم «إخلاء مساحة» بعد التأكد من النسخ الاحتياطي.",
+            "com.microsoft.skydrive": "قد تشمل ملفات OneDrive المتاحة دون اتصال.",
+            "com.readdle.spark": "قد تشمل نسخًا محلية من البريد.",
+            "com.google.android.apps.maps": "قد تشمل خرائط محفوظة دون اتصال.",
+        }
+        for i, pkg in enumerate(names):
+            vals = [app_sizes, data_sizes, cache_sizes]
+            if i >= min(map(len, vals), default=0): continue
+            try: app, data, cache = (int(v[i]) for v in vals)
+            except (TypeError, ValueError): continue
+            apps.append({"pkg": str(pkg), "label": APP_LABELS.get(str(pkg), str(pkg).split(".")[-1]), "app": app, "data": data, "cache": cache, **({"note": notes[pkg]} if pkg in notes else {})})
+        apps.sort(key=lambda a: -(a["app"] + a["data"]))
+        for label in ("Photos Size", "Videos Size", "Audio Size", "Other Size", "System Size", "App Size", "App Data Size"):
+            val = _diskstats_value(raw, label)
+            key = label.lower().replace(" size", "")
+            if isinstance(val, int): totals[key] = val
+            elif isinstance(val, list) and val and isinstance(val[0], int): totals[key] = val[0]
+    except Exception: pass
+    cards = []
+    total, used, free = facts.get("total"), facts.get("used"), facts.get("free")
+    if total:
+        pct = free * 100 / total
+        cards.append({"id": "storage", "title": "مساحة الهاتف", "status": "warn" if pct < 20 else "ok", "summary": f"المتاح {pct:.0f}% من مساحة البيانات", "details": [f"الإجمالي {_gb(total)}", f"المستخدم {_gb(used)}", f"المتاح {_gb(free)}"], "advice": ["حافظ على 20% مساحة متاحة على الأقل."] if pct < 20 else [], "commands": []})
+    breakdown = [("الصور", "photos"), ("الفيديوهات", "videos"), ("الصوت", "audio"), ("برامج التطبيقات", "app"), ("بيانات التطبيقات (ومنها وسائط واتساب)", "app data"), ("النظام", "system"), ("أخرى", "other")]
+    details = [f"{label}: {_gb(totals.get(key, 0) if key else sum(a['app'] + a['data'] for a in apps))}" for label, key in breakdown]
+    cards.append({"id": "breakdown", "title": "تفصيل المساحة", "status": "ok", "summary": "توزيع المساحة حسب نوع المحتوى", "details": details, "advice": [], "commands": []})
+    top = apps[0] if apps else None
+    summary = f"أكبر تطبيق هو {top['label']} ({top['pkg']})" if top else "لم تتوفر تفاصيل أحجام التطبيقات"
+    cards.append({"id": "apps", "title": "التطبيقات", "status": "ok", "summary": summary, "details": [], "advice": [], "commands": []})
+    return {"cards": cards, "facts": facts, "apps": apps[:25]}
 
 
 def run(job, kind, serial, path, options):
