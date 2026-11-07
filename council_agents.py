@@ -384,6 +384,13 @@ def _check_one(agent_id):
     return {"state": "off", "note": note, "secs": secs}
 
 
+def cached_check(agent_id, max_age=1800):
+    """آخر فحص جاهزية حديث للوكيل (بلا تشغيل جديد) أو None."""
+    with _LOCK:
+        v = _CHECKS.get(agent_id)
+    return dict(v[1]) if v and time.time() - v[0] < max_age else None
+
+
 def check(agent_ids, force=False):
     now = time.time()
     with _LOCK:

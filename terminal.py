@@ -54,6 +54,11 @@ def init(data_dir):
         _ca().init(str(DATA))
     except Exception:
         pass
+    try:
+        import agent_health
+        agent_health.init(str(DATA))
+    except Exception:
+        pass
     if not (_mon_thread and _mon_thread.is_alive()):
         _mon_thread = threading.Thread(target=_monitor, daemon=True)
         _mon_thread.start()
@@ -139,7 +144,8 @@ def listing():
     for a in AGENTS:
         st, lab, idle = state_of(a["id"], live) if ok else ("stopped", "متوقف", 0)
         rows.append({"id": a["id"], "name": a["name"], "cmd": a["cmd"], "state": st, "label": lab, "idle": idle,
-                     "installed": (not a["cmd"]) or bool(_which(a["cmd"])), "direct": bool(a["cmd"]) and can_direct(a["id"])})
+                     "installed": (not a["cmd"]) or bool(_which(a["cmd"])), "direct": bool(a["cmd"]) and can_direct(a["id"]),
+                     "health": _health_brief(a["id"])})
     return {"available": ok, "agents": rows, "notify": CFG["notify"], "guard": CFG["guard"], "guarded": list(CFG["guarded"]),
             "hint": "" if ok else "tmux غير مثبت على هذا الجهاز؛ ثبّته أولًا (brew install tmux)."}
 
@@ -171,6 +177,7 @@ def start(i, cwd=""):
             _t("send-keys", "-t", n, "Enter")
     MON.pop(i, None)
     _guard_add(i)
+    health_check(i)
     return {"ok": True, "started": True}
 
 
@@ -300,6 +307,76 @@ def _notify(text):
         pass
 
 
+# ---------- ترميم الوكلاء: فحص يومي وعند البطء أو العطل، وسلّم إصلاح ----------
+HEALTH_RUNNING = set()
+HEALTH_AR = {"ok": "سليم", "slow": "بطيء", "outdated": "يحتاج تحديثًا", "broken": "معطّل", "missing": "غير مثبّت"}
+
+
+def _hm():
+    try:
+        import agent_health
+        return agent_health
+    except ImportError:
+        return None
+
+
+def _health_brief(i):
+    h = _hm()
+    c = (h.status().get(i) if h else None) or {}
+    return {"status": c.get("status", ""), "label": HEALTH_AR.get(c.get("status"), ""), "version": c.get("version"), "latest": c.get("latest"),
+            "at": c.get("at", 0), "checking": i in HEALTH_RUNNING} if c or i in HEALTH_RUNNING else {"status": "", "label": "", "checking": False}
+
+
+def health_check(i, force=False, repair=False, confirm=False):
+    """يفحص وكيلًا في الخلفية (مرة يوميًا ما لم يُجبَر)؛ عند العطل يجرّب سلّم الإصلاح ويُنبّه بتغيّر الحال فقط."""
+    h = _hm()
+    a = BY_ID.get(i)
+    if not h or not a or not a["cmd"] or i in HEALTH_RUNNING:
+        return {"ok": bool(h), "started": False}
+    if not force and not h.due(i):
+        return {"ok": True, "started": False}
+
+    def work():
+        HEALTH_RUNNING.add(i)
+        try:
+            before = (h.status().get(i) or {}).get("status", "")
+            c = h.check(i, force=True)
+            steps = []
+            if repair and c["status"] in ("broken", "slow"):
+                steps = h.repair(i, ["restart", "smoke"] if c["status"] == "broken" else ["smoke"], confirm=confirm, restart=lambda x: restart(x) if _t("has-session", "-t", _name(x)).returncode == 0 else True)
+                c = h.check(i, force=True)
+            if repair and c["status"] == "outdated" and confirm:
+                steps += h.repair(i, ["update"], confirm=True)
+                c = h.check(i, force=True)
+            if CFG["notify"] and c["status"] != before and c["status"] in ("broken", "outdated", "missing"):
+                _notify(f"فحص الوكيل {a['name']}: {HEALTH_AR.get(c['status'])}" + (f" ({c.get('error')})" if c.get("error") else "")
+                        + (f" — الإصدار {c.get('version')} والأحدث {c.get('latest')}" if c["status"] == "outdated" else ""))
+        except Exception:
+            pass
+        finally:
+            HEALTH_RUNNING.discard(i)
+    threading.Thread(target=work, daemon=True).start()
+    return {"ok": True, "started": True}
+
+
+def health_mark(i, kind, why=""):
+    h = _hm()
+    if not h or i not in BY_ID:
+        return
+    try:
+        (h.mark_slow if kind == "slow" else h.mark_failure)(i, why)
+        if len(h._recent_marks(i)) >= 2:
+            health_check(i, force=True, repair=True)
+    except Exception:
+        pass
+
+
+def health_all():
+    h = _hm()
+    return {"ok": True, "agents": {a["id"]: _health_brief(a["id"]) for a in AGENTS if a["cmd"]},
+            "history": h.history()[-20:] if h else []}
+
+
 # ---------- جهاز التحكم: يراقب الوكلاء دائمًا وينعش من يخرج عن الخدمة ----------
 GUARD_MAX_TRIES, GUARD_WINDOW = 3, 600
 
@@ -359,6 +436,7 @@ def _guard_tick(live):
                 g["last"] = "gaveup"
                 if CFG["notify"]:
                     _notify(f"الوكيل {a['name']} يخرج عن الخدمة مرارًا ولم ينجح إنعاشه؛ افحصه يدويًا.")
+                health_mark(i, "failure", "خروج متكرر من الطرفية")
             continue
         g["tries"].append(now)
         g["bad"] = 0
@@ -426,6 +504,9 @@ LETTERS = ["أ", "ب", "ج", "د", "هـ", "و"]
 DEPTHS = ("fast", "bal", "deep")
 DEPTH_LIMIT = {"fast": 180, "bal": 300, "deep": 0}
 DEPTH_TIMEOUT = {"fast": 600, "bal": 900, "deep": 1800}
+GRACE = {"fast": 30, "bal": 90, "deep": 150}            # بعد القطع: مهلة قصيرة لمن اقترب قبل جولة النقد
+REVIEW_LOCK = threading.Lock()
+REVIEW_LIMIT = {"fast": 120, "bal": 240, "deep": 420}   # أقصى زمن لجولة النقد؛ من تأخر يُعتمد جوابه الأول
 VERDICT_HEADS = ["الخلاصة", "الاتفاق", "الاختلاف ومن الأصح", "خريطة الأقوال", "المصادر", "الترتيب", "الحكم النهائي"]
 ANSWER_TEMPLATE = ("\n\n[طريقة العمل] اعمل بكامل أدواتك (قراءة الملفات، البحث، الشاملة إن كانت متاحة) ولا تعدّل أي ملف ولا تنفّذ أمرًا يغيّر شيئًا.\n"
                    "[قالب الإجابة] اكتب إجابتك بصيغة Markdown بهذه العناوين بالضبط وبهذا الترتيب:\n"
@@ -648,6 +729,7 @@ def _ask(rd, i, entry, question, tok, add_dirs=()):
                 entry.update(state="done", answer=txt, partial=bool(r.get("partial")), model=r.get("model") or "", finished_at=time.time())
             else:
                 why = r.get("error") or "لم يُرجع الوكيل إجابة"
+                health_mark(i, "failure", str(why)[:120])
                 entry.update(state="timeout" if "timeout" in str(why).lower() else "error",
                              error=f"{why} (تحقق من تسجيل دخوله أو مفتاحه، أو أن المهمة تجاوزت المهلة)."[:300], finished_at=time.time())
         except Exception as exc:
@@ -842,6 +924,8 @@ def _eval_prompt(rd):
         else:
             parts.append(f"\n===== {tag}: لم تصل إجابة ({e.get('state')}) =====")
     cols = " | ".join(lt.get(i, i) for i in order)
+    if rd["main"] in rd["delegates"]:
+        parts.append("\n\n[تنبيه حياد] أنت نفسك أحد المفوَّضين، وإحدى الإجابات إجابتك؛ لا تحابِها لأنها تشبه أسلوبك، وانقدها كما تنقد غيرها.")
     parts.append("\n\nأنت الحكم. احكم على المضمون فقط، وابنِ حكمك على الإجابات الحقيقية، واقرأ المرفقات بنفسك إن احتجت.\n"
                  "اكتب حكمك بصيغة Markdown بهذه العناوين بالضبط وبهذا الترتيب:\n" + "\n".join("## " + h for h in VERDICT_HEADS) + "\n"
                  "- «الخلاصة»: سطرها الأول بالضبط واحد من: «الثقة: عالية» أو «الثقة: متوسطة» أو «الثقة: منخفضة»، ثم سطران أو ثلاثة.\n"
@@ -972,12 +1056,16 @@ def _review_one(rd, i, prompt):
             txt = tmp.get("answer", "") if tmp.get("state") == "done" else ""
     except Exception:
         txt = ""
-    if txt and _meaningful(txt) >= 2 and not rd.get("stop"):
-        e["revised"] = txt
-        _write(_ans_file(rd, i, True), txt)
-    else:
-        e["note"] = "لم تصل إجابة منقّحة؛ يُعتمد الجواب الأول"
-    e.update(state="stopped" if rd.get("stop") else "done", live="", activity="")
+    with REVIEW_LOCK:      # الإغلاق والكتابة ذريّان: لا نقد يصل بعد أن بُني الحكم على غيره
+        if rd.get("review_closed"):
+            e["note"] = "تأخر النقد عن مهلته؛ يُعتمد الجواب الأول"
+        elif txt and _meaningful(txt) >= 2 and not rd.get("stop"):
+            e["revised"] = txt
+            _write(_ans_file(rd, i, True), txt)
+        else:
+            e["note"] = "لم تصل إجابة منقّحة؛ يُعتمد الجواب الأول"
+        if not rd.get("review_closed"):
+            e.update(state="stopped" if rd.get("stop") else "done", live="", activity="")
     _save_council()
 
 
@@ -989,11 +1077,21 @@ def _run_review(rd):
     rd["phase"] = "review"
     _save_council()
     # التعليمات تُبنى قبل البدء: حالة كل وكيل تصير «reviewing» فلا يُعدّ جوابه حقيقيًا أثناءها
+    rd["review_closed"] = False
     ts = [threading.Thread(target=_review_one, args=(rd, i, _review_prompt(rd, i, real)), daemon=True) for i in real]
     for t in ts:
         t.start()
-    for t in ts:
-        t.join()
+    end = time.time() + REVIEW_LIMIT.get(rd.get("depth"), 240)
+    while any(t.is_alive() for t in ts) and not rd["stop"] and time.time() < end:
+        time.sleep(0.5)
+    if any(t.is_alive() for t in ts) and not rd["stop"]:
+        with REVIEW_LOCK:
+            rd["review_closed"] = True      # من لم ينقّح في المهلة لا يعطّل الجولة
+            for i in real:
+                e = rd["agents"][i]
+                if e.get("state") == "reviewing":
+                    e.update(state="done", live="", activity="", note="تأخر النقد عن مهلته؛ يُعتمد الجواب الأول")
+        _save_council()
 
 
 def _run_round(rd):
@@ -1015,6 +1113,14 @@ def _round(rd):
     threads = {}
     tmax = max(ANSWER_TIMEOUT, DEPTH_TIMEOUT.get(rd.get("depth"), 0)) if rd.get("mode") == "direct" else ANSWER_TIMEOUT
     for i in rd["delegates"]:
+        try:
+            chk = _ca().cached_check(i, 600) if rd.get("mode", "direct") == "direct" and can_direct(i) else None
+        except Exception:
+            chk = None
+        if chk and chk.get("state") == "off":      # فحص حديث يقول إنه معطّل: لا نُضيّع الجولة عليه
+            rd["agents"][i].update(state="error", error="استُبعد من الجولة: فشل فحص جاهزيته (" + str(chk.get("note", ""))[:150] + ")",
+                                   finished_at=time.time())
+            continue
         t = threading.Thread(target=_ask_delegate, args=(rd, i), daemon=True)
         t.start()
         threads[i] = t
@@ -1044,6 +1150,18 @@ def _round(rd):
     wait(True)
     if rd["stop"]:
         rd["phase"] = "stopped"; return
+    if rd.get("cut"):
+        for i, t in threads.items():
+            if t.is_alive():
+                health_mark(i, "slow", "تأخر عن مهلة المجلس")
+    if rd.get("review") and rd.get("cut"):
+        # قُطع الانتظار لتأخر بعضهم: مهلة قصيرة لمن اقترب حتى لا يُستبعد من النقد المتبادل
+        end = time.time() + GRACE.get(rd.get("depth"), 60)
+        while any(t.is_alive() for t in threads.values()) and not rd["stop"] and time.time() < end:
+            time.sleep(0.5)
+            supervise()
+    if rd["stop"]:
+        rd["phase"] = "stopped"; return
     if rd.get("review"):
         _run_review(rd)
         if rd["stop"]:
@@ -1058,7 +1176,7 @@ def _round(rd):
     want = _run_eval(rd)
     # الحَكَم طلب إعادة وكلاء، أو هناك بطيئون لم يصلوا بعد: ننتظرهم ثم نحدّث الحكم مرة واحدة
     for i in want:
-        if rd["agents"][i].get("retries", 0) < MAX_RETRY + 1 and not threads[i].is_alive():
+        if i in threads and rd["agents"][i].get("retries", 0) < MAX_RETRY + 1 and not threads[i].is_alive():
             threads[i] = threading.Thread(target=_retry, args=(rd, i, "أعاده الحَكَم: إجابته ناقصة أو غير منطقية"), daemon=True)
             threads[i].start()
     if any(t.is_alive() for t in threads.values()) and not rd["stop"]:
@@ -1125,7 +1243,7 @@ def council_start(ids, text, main="", evaluate=True, attachments=None, parent=""
     rd = {"id": rid, "mode": mode, "depth": depth, "blind": bool(blind), "review": bool(review), "verify": bool(verify),
           "limit": limit, "cut": False, "attachments": atts, "parent": parent if parent in COUNCIL else "", "tok": secrets.token_hex(3),
           "question": text, "main": main or "", "delegates": ids, "letters": dict(zip(ids, pool)), "evaluate": bool(evaluate and main),
-          "created": time.time(), "phase": "asking", "stop": False,
+          "created": time.time(), "phase": "asking", "stop": False, "judge_is_delegate": bool(main and main in ids),
           "agents": {i: {"name": BY_ID[i]["name"], "state": "queued", "answer": "", "revised": "", "live": "", "activity": ""} for i in ids},
           "eval": {"name": BY_ID[main]["name"] if main else "", "state": "queued", "answer": ""}}
     with COUNCIL_LOCK:
