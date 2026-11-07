@@ -173,6 +173,14 @@ def set_settings(b):
         s["default_agent"] = b["default_agent"]
     if "auto_learn" in b:
         s["auto_learn"] = bool(b["auto_learn"])
+    if isinstance(b.get("term_theme"), dict):
+        t = b["term_theme"]
+        custom = t.get("custom") if isinstance(t.get("custom"), dict) else {}
+        s["term_theme"] = {
+            "preset": str(t.get("preset")) if re.match(r"^[a-z-]{1,32}$", str(t.get("preset") or "")) else "calm-dark",
+            "custom": {k: v for k, v in custom.items() if k in ("bg", "fg", "a", "q", "qborder") and isinstance(v, str) and re.match(r"^#[0-9a-fA-F]{6}$", v)},
+            "keep": bool(t.get("keep", True)),
+        }
     if agent and "model" in b:
         m = str(b["model"] or "").strip()
         if m and not MODEL_RE.match(m):

@@ -2340,8 +2340,8 @@ class Handler(BaseHTTPRequestHandler):
             elif url.path == "/api/images":
                 serial = connected_device(query.get("serial", [None])[0])
                 self.send_json(images(serial))
-            elif url.path in ("/", "/index.html", "/app.js", "/ui.js", "/assistant.js", "/assistant_nav.js", "/terminal_ui.js", "/sections.js"):
-                js = url.path in ("/app.js", "/ui.js", "/assistant.js", "/assistant_nav.js", "/terminal_ui.js", "/sections.js")
+            elif url.path in ("/", "/index.html", "/app.js", "/ui.js", "/assistant.js", "/assistant_nav.js", "/terminal_ui.js", "/terminal_theme.js", "/sections.js"):
+                js = url.path in ("/app.js", "/ui.js", "/assistant.js", "/assistant_nav.js", "/terminal_ui.js", "/terminal_theme.js", "/sections.js")
                 body = (ROOT / (url.path[1:] if js else "samsung_backup.html")).read_bytes()
                 self.send_response(200)
                 self.send_header("Content-Type", "text/javascript; charset=utf-8" if js else "text/html; charset=utf-8")
