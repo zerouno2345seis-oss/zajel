@@ -62,5 +62,17 @@ class Verify(unittest.TestCase):
         self.assertFalse(verify(sign(self.fields(auth_date=str(int(time.time()) + 4000))), int(time.time()))["ok"])
 
 
+
+class HubRouting(unittest.TestCase):
+    def test_request_without_device_is_routed_to_connected_mac(self):
+        import subprocess
+        from pathlib import Path
+        r = subprocess.run(["node", "hub_test.mjs"], cwd=str(Path(__file__).parent / "relay"), capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("no-device 503", r.stdout)
+        self.assertIn("routed-to Mac-A device.list", r.stdout)
+        self.assertIn('reply {"devices":[]}', r.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
