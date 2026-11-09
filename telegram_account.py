@@ -455,12 +455,21 @@ def suggestions(q):
     async def go():
         from telethon import functions
         c = await client()
-        r = await call(lambda: c(functions.contacts.SearchRequest(q=q, limit=12)))
-        return [{"id": ch.id, "name": ch.title, "username": getattr(ch, "username", None), "who": f"{getattr(ch, 'participants_count', 0) or 0} مشترك"}
-                for ch in r.chats if getattr(ch, "broadcast", False) or getattr(ch, "megagroup", False)]
+        out, seen = [], set()
+        # بحث تيليجرام العام لا يعيد شيئًا غالبًا لكلمة واحدة قصيرة، فنجرّب صيغًا قريبة حتى تتوفر نتائج
+        for qq in (q, "كتب " + q, q + " قناة"):
+            r = await call(lambda qq=qq: c(functions.contacts.SearchRequest(q=qq, limit=12)))
+            for ch in r.chats:
+                if ch.id in seen or not (getattr(ch, "broadcast", False) or getattr(ch, "megagroup", False)):
+                    continue
+                seen.add(ch.id)
+                out.append({"id": ch.id, "name": ch.title, "username": getattr(ch, "username", None), "who": f"{getattr(ch, 'participants_count', 0) or 0} مشترك"})
+            if len(out) >= 6:
+                break
+        return out
 
     have = {l["id"] for l in libs()} | set(_cfg()["dismissed"])
-    return [s for s in run(go(), 40) if s["id"] not in have and s["username"]]
+    return [s for s in run(go(), 90) if s["id"] not in have and s["username"]]
 
 
 # ================= البحث =================
