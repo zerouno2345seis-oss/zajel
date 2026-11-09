@@ -850,7 +850,8 @@
     });
     panel.appendChild(resetBtn);
 
-    document.body.appendChild(panel);
+    // داخل نافذة الطرفية: في «طرفية زاجل» يُخفى كل ما خارجها
+    (document.getElementById('zajel-term-window') || document.body).appendChild(panel);
     positionPanel(panel, anchorEl);
 
     // Refresh inputs & presets when config changes

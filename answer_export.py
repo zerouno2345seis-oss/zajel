@@ -375,12 +375,31 @@ def build_many(title, items, out_path):
     return out_path
 
 
-def export_many(entries, out_dir=None):
+def export_text(agent_name, question, answer, out_dir=None):
+    """سؤال وجواب جاهزان (من صفحة Perplexity مثلًا) ← مستند Word."""
+    if not (question or "").strip() or not (answer or "").strip():
+        raise ValueError("لم أجد سؤالًا وجوابًا في الصفحة بعد.")
+    title = short_title(question, agent_name)
+    out_dir = Path(out_dir or HOME / "Downloads")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    base, n = _safe(title), 1
+    path = out_dir / f"{base}.docx"
+    while path.exists():
+        n += 1
+        path = out_dir / f"{base} ({n}).docx"
+    build_docx(title, question.strip(), answer.strip(), agent_name, path)
+    return {"ok": True, "path": str(path), "title": title}
+
+
+def export_many(entries, out_dir=None, extra=()):
     """entries: [(agent_id, agent_name, screen_text, cwd)]. يجمع ما اكتمل من أجوبة في ملف واحد ويذكر من لم يكتمل."""
     items, missing = [], []
     for aid, name, text, cwd in entries:
         q, a = last_exchange(aid, text, cwd)
         (items.append((name, q, a)) if q and a.strip() else missing.append(name))
+    for name, q, a in extra:          # أجوبة من خارج الطرفيات (نافذة Perplexity)
+        if (q or "").strip() and (a or "").strip():
+            items.append((name, q.strip(), a.strip()))
     if not items:
         raise ValueError("لم يكتمل جواب أي وكيل من الوكلاء المعروضين بعد.")
     title = short_title(items[0][1], "").strip() + " — " + "، ".join(n for n, _, _ in items)

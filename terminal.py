@@ -1082,7 +1082,7 @@ def export_answer(i):
     return r
 
 
-def export_all(ids):
+def export_all(ids, extra=None):
     """أجوبة الوكلاء المعروضين الآن ← مستند Word واحد."""
     import answer_export
     entries = []
@@ -1092,9 +1092,28 @@ def export_all(ids):
             continue
         text = _t("capture-pane", "-p", "-J", "-S", "-5000", "-t", n, timeout=15).stdout
         entries.append((i, BY_ID[i]["name"], text, cwd(i).get("path", "")))
-    if not entries:
+    extra = [(str(x.get("name") or "Perplexity"), str(x.get("question") or ""), str(x.get("answer") or "")) for x in (extra or []) if isinstance(x, dict)]
+    if not entries and not extra:
         raise ValueError("لا وكيل يعمل في الشاشات المعروضة.")
-    r = answer_export.export_many(entries)
+    r = answer_export.export_many(entries, extra=extra)
+    subprocess.Popen(["open", r["path"]], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return r
+
+
+def last_answer(i):
+    """آخر سؤال وجوابه كاملين للقراءة (من سجلّ الوكيل؛ Claude وCodex لا يُبقيان أول الجواب على الشاشة)."""
+    if i not in BY_ID:
+        raise ValueError("وكيل غير معروف.")
+    n = _name(i)
+    text = _t("capture-pane", "-p", "-J", "-S", "-5000", "-t", n, timeout=15).stdout if _t("has-session", "-t", n).returncode == 0 else ""
+    import answer_export
+    q, a = answer_export.last_exchange(i, text, cwd(i).get("path", "") if text else "")
+    return {"ok": True, "question": q, "answer": a, "name": BY_ID[i]["name"]}
+
+
+def export_text(b):
+    import answer_export
+    r = answer_export.export_text(str(b.get("name") or "Perplexity"), str(b.get("question") or ""), str(b.get("answer") or ""))
     subprocess.Popen(["open", r["path"]], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return r
 

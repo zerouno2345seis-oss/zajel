@@ -684,6 +684,12 @@ def handle(h, method):
         elif path == "/api/term/list":
             import terminal
             h.send_json(terminal.listing())
+        elif path == "/api/term/last_answer":
+            import terminal
+            try:
+                h.send_json(terminal.last_answer(query.get("id", [""])[0]))
+            except ValueError as e:
+                h.send_json({"error": str(e)}, 400)
         elif path == "/api/term/broadcast_status":
             import terminal
             h.send_json(terminal.broadcast_status(query.get("ids", [""])[0]))
@@ -702,7 +708,9 @@ def handle(h, method):
             i, act = str(b.get("id", "")), path.rsplit("/", 1)[1]
             try:
                 if act == "export_all":
-                    h.send_json(terminal.export_all(b.get("ids") or []))
+                    h.send_json(terminal.export_all(b.get("ids") or [], b.get("extra") or []))
+                elif act == "export_text":
+                    h.send_json(terminal.export_text(b))
                 elif act == "export_answer":
                     h.send_json(terminal.export_answer(i))
                 elif act == "broadcast":

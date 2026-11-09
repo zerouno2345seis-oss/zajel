@@ -70,6 +70,7 @@ final class WebWindow: NSObject, WKUIDelegate, WKNavigationDelegate {
     static var shared: WebWindow?
     let window: NSWindow
     let web: WKWebView
+    var wordButton: NSButton?
     override init() {
         let cfg = WKWebViewConfiguration()
         cfg.websiteDataStore = .default()
@@ -80,10 +81,64 @@ final class WebWindow: NSObject, WKUIDelegate, WKNavigationDelegate {
         web.uiDelegate = self; web.navigationDelegate = self
         window.title = "Perplexity"
         window.contentView = web
+        // زر «📄 Word» في شريط عنوان النافذة: آخر سؤال وجوابه في مستند منسّق
+        let b = NSButton(title: "📄 Word", target: nil, action: nil)
+        b.bezelStyle = .rounded
+        let acc = NSTitlebarAccessoryViewController(); acc.view = NSView(frame: NSRect(x: 0, y: 0, width: 96, height: 28))
+        b.frame = NSRect(x: 4, y: 0, width: 88, height: 28); acc.view.addSubview(b); acc.layoutAttribute = .trailing
+        window.addTitlebarAccessoryViewController(acc)
+        wordButton = b
         window.isReleasedWhenClosed = false
         window.setFrameAutosaveName("ZajelWebWindow")
         if !window.setFrameUsingName("ZajelWebWindow") { window.center() }
+        wordButton?.target = self; wordButton?.action = #selector(saveWord(_:))
     }
+    /// آخر سؤال وجوابه من الصفحة، والجواب بعناوينه ونقاطه وجداوله (Markdown بسيط)
+    static let extractJS = """
+    (() => {
+      const md = el => { let out = [];
+        const walk = n => { for (const c of n.children) { const t = c.tagName;
+          if (/^H[1-6]$/.test(t)) out.push('#'.repeat(Math.min(3, +t[1])) + ' ' + c.innerText.trim());
+          else if (t === 'UL' || t === 'OL') [...c.children].forEach((li, k) => out.push((t === 'OL' ? (k + 1) + '. ' : '- ') + li.innerText.trim().replace(/\\n+/g, ' ')));
+          else if (t === 'TABLE') [...c.querySelectorAll('tr')].forEach(tr => out.push('| ' + [...tr.children].map(td => td.innerText.trim().replace(/\\|/g, '/')).join(' | ') + ' |'));
+          else if (t === 'PRE') out.push('```\\n' + c.innerText + '\\n```');
+          else if (t === 'P' || t === 'BLOCKQUOTE') out.push(c.innerText.trim());
+          else if (c.children.length) walk(c); else if (c.innerText && c.innerText.trim()) out.push(c.innerText.trim());
+          out.push(''); } };
+        walk(el); return out.join('\\n').replace(/\\n{3,}/g, '\\n\\n').trim(); };
+      const pr = [...document.querySelectorAll('[class*="prose"]')].filter(e => e.innerText.trim().length > 20);
+      const ans = pr.length ? md(pr[pr.length - 1]) : '';
+      const qs = [...document.querySelectorAll('h1, [class*="query"], [data-testid*="query"]')].map(e => e.innerText.trim()).filter(Boolean);
+      let q = qs.length ? qs[qs.length - 1] : '';
+      if (!q) q = (document.title || '').replace(/\\s*[-|·]\\s*Perplexity.*$/i, '');
+      if (!q) { try { q = new URL(location.href).searchParams.get('q') || ''; } catch (e) {} }
+      return JSON.stringify({ name: 'Perplexity', question: q, answer: ans });
+    })()
+    """
+
+    func extract(_ done: @escaping ([String: Any]?) -> Void) {
+        web.evaluateJavaScript(WebWindow.extractJS) { r, _ in
+            guard let s = r as? String, let d = s.data(using: .utf8), let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { done(nil); return }
+            done(j)
+        }
+    }
+
+    @objc func saveWord(_ s: Any?) {
+        extract { j in
+            guard let j = j else { return }
+            var req = URLRequest(url: BASE.appendingPathComponent("api/term/export_text")); req.httpMethod = "POST"; req.timeoutInterval = 60
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.setValue("http://127.0.0.1:\(PORT)", forHTTPHeaderField: "Origin")
+            req.httpBody = try? JSONSerialization.data(withJSONObject: j)
+            URLSession.shared.dataTask(with: req) { d, _, _ in
+                let r = (d.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }) ?? [:]
+                if let err = r["error"] as? String {
+                    DispatchQueue.main.async { let a = NSAlert(); a.messageText = err; a.addButton(withTitle: "حسنًا"); a.beginSheetModal(for: self.window, completionHandler: nil) }
+                }
+            }.resume()
+        }
+    }
+
     static func open(_ url: URL) {
         let w = shared ?? WebWindow(); shared = w
         w.web.load(URLRequest(url: url))
@@ -286,6 +341,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
     func userContentController(_ c: WKUserContentController, didReceive m: WKScriptMessage) {
         guard let d = m.body as? [String: Any] else { return }
         if let s = d["web"] as? String, let u = URL(string: s), u.scheme == "https" { WebWindow.open(u); return }
+        if d["getWeb"] != nil {
+            guard let w = WebWindow.shared, w.window.isVisible else { web.evaluateJavaScript("window.__zajelWeb && window.__zajelWeb(null)", completionHandler: nil); return }
+            w.extract { j in
+                let json = j.flatMap { try? JSONSerialization.data(withJSONObject: $0) }.flatMap { String(data: $0, encoding: .utf8) } ?? "null"
+                self.web.evaluateJavaScript("window.__zajelWeb && window.__zajelWeb(\(json))", completionHandler: nil)
+            }
+            return
+        }
         guard let hk = d["hotkey"] as? [String: Any] else { return }
         let code = (hk["key"] as? Int) ?? -1, mods = (hk["mods"] as? Int) ?? 0
         UserDefaults.standard.set(code, forKey: "HotKeyCode")
