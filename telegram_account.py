@@ -553,45 +553,50 @@ def fuzzy_rank(items, q, min_score=0.5):
 
 
 # ================= البحث بالموضوع (دون اشتراك) =================
-def discover(topic, n=15):
-    """قنوات عامة عن موضوع، الأكبر مشتركين أولًا. لا اشتراك ولا انضمام: بحث تيليجرام العام فقط."""
-    topic = str(topic or "").strip()
+def discover(topic, n=25, query="", exclude=()):
+    """قنوات عامة عن موضوع، الأكبر مشتركين أولًا، وتتقدّمها القنوات التي يطابق اسمُها ما تبحث عنه. لا اشتراك ولا انضمام."""
+    topic, query = str(topic or "").strip(), str(query or "").strip()
+    skip = set(exclude)
 
     async def go():
         from telethon import functions
         c = await client()
-        out, seen = [], set()
-        for qq in (topic, topic + " قناة", "قنوات " + topic):
+        out, seen = [], set(skip)
+        # بحث تيليجرام العام يعيد قليلًا لكل صيغة (نحو ٧)، فنجرّب صيغًا متنوعة حتى نبلغ العدد المطلوب
+        ws = [w for w in re.findall(r"\w+", topic) if len(w) >= 3]
+        variants = [(topic, False)] + ([(query, True)] if query else []) + [(topic + x, False) for x in (" قناة", " pdf", " books", " gratis", " descargar", " free", " library")] \
+            + [("قنوات " + topic, False)] + [(w, False) for w in ws] + [(t, True) for t in fuzzy_terms(query)[:2]]
+        for qq, by_query in variants:
+            if len(out) >= n * 2:
+                break
             r = await call(lambda qq=qq: c(functions.contacts.SearchRequest(q=qq, limit=20)))
             for ch in r.chats:
                 if ch.id in seen or not getattr(ch, "broadcast", False) or not getattr(ch, "username", None):
                     continue
                 seen.add(ch.id)
-                out.append({"id": ch.id, "name": ch.title, "username": ch.username, "count": getattr(ch, "participants_count", 0) or 0})
-            if len(out) >= n:
-                break
+                out.append({"id": ch.id, "name": ch.title, "username": ch.username, "count": getattr(ch, "participants_count", 0) or 0, "q": by_query})
         return out
 
-    res = run(go(), 120)
-    res.sort(key=lambda x: -x["count"])
+    res = run(go(), 240)
+    res.sort(key=lambda x: (not x["q"], -x["count"]))
     return res[:n]
 
 
-def search_scoped(topic, query, type_="all", n=15, progress=None):
+def search_scoped(topic, query, type_="all", n=25, progress=None, exclude=()):
     """«أفلام: اسم الفيلم»: إن كان «أفلام» قائمة موجودة بحثنا فيها، وإلا اكتشفنا أكبر القنوات العامة عنه وبحثنا فيها دون اشتراك."""
     k = find_list(topic)
     if k:
-        chosen = pick_libs(k)
+        chosen = [l for l in pick_libs(k) if l["id"] not in set(exclude)]
         if not chosen:
             raise ValueError(f"قائمة «{list_name(k)}» ليس فيها قنوات مفعّلة.")
     else:
-        found = discover(topic, n)
+        found = discover(topic, n, query, exclude)
         if not found:
-            raise ValueError(f"لم أجد قنوات عامة عن «{topic}». جرّب كلمة أخرى.")
+            raise ValueError(f"لم أجد قنوات عامة أخرى عن «{topic}». جرّب نوعًا أو كلمة أخرى.")
         chosen = [{"id": x["id"], "name": x["name"], "username": x["username"], "list": "tmp", "on": True, "count": x["count"]} for x in found]
         for l in chosen:
             TMP_LIBS[l["id"]] = l
-    r = search(query, type_=type_, per_lib=15, libs_override=chosen, progress=progress)
+    r = search(query, type_=type_, per_lib=15, libs_override=chosen, progress=progress)   # ٢٥ قناة × (عبارة + كلمتان) ≈ حتى ٧٥ طلبًا بفواصل بشرية
     r.update(topic=topic, libs=chosen, discovered=k is None)
     return r
 
@@ -681,7 +686,7 @@ def search(q, scope="all", type_="all", per_lib=25, libs_override=None, progress
                     await one(lib, t)
         return items
 
-    items = fuzzy_rank(run(go(), 600), q)
+    items = fuzzy_rank(run(go(), 900), q)
     counts = {k: sum(1 for i in items if i["t"] == k) for k in TYPES if k not in ("all",)}
     counts["all"] = len(items)
     if type_ != "all":

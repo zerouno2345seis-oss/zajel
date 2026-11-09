@@ -474,6 +474,24 @@ class BotScreens(Base):
         datas = [b["callback_data"] for r in AB.screen_search()[1] for b in r]
         self.assertIn("ta:gs", datas)
 
+    def test_more_channels_excludes_tried_and_merges(self):
+        first = {"items": [], "counts": {"all": 0}, "libs": [{"id": 1, "name": "أ", "username": "a", "list": "tmp", "on": True}], "discovered": True, "topic": "كتب"}
+        second = {"items": [{"title": "Elizabeth Clapes", "t": "book", "ref": "2:1", "size_h": "1 MB", "views": 3, "date": "2020"}], "counts": {"all": 1},
+                  "libs": [{"id": 2, "name": "ب", "username": "b", "list": "tmp", "on": True}], "discovered": True, "topic": "كتب"}
+        calls = []
+
+        def ss(topic, q, progress=None, exclude=()):
+            calls.append(set(exclude))
+            return first if not exclude else second
+        with mock.patch.object(AB.TL, "send", lambda t, c, **k: 1), mock.patch.object(AB.TL, "edit", lambda *a, **k: None), \
+                mock.patch.object(AB.A, "search_scoped", ss), mock.patch.object(AB.threading, "Thread", lambda target, daemon=None: types.SimpleNamespace(start=target)):
+            AB.do_search(4, "Elizabeth Clapes", topic="كتب")
+            self.assertIn("جرّب قنوات أخرى", " ".join(b["text"] for r in AB.screen_results(4)[1] for b in r))
+            AB.on_callback(4, 1, "gm")
+        self.assertEqual(calls, [set(), {1}])
+        self.assertEqual(len(AB.RES[4]["items"]), 1)
+        self.assertEqual(len(AB.RES[4]["scoped"]["libs"]), 2)
+
     def test_commands(self):
         with mock.patch.object(AB, "do_search") as ds:
             self.assertTrue(AB.on_command(7, "search", "المغني"))

@@ -63,9 +63,13 @@ def screen_results(chat, type_="all"):
     if sc:
         names = "، ".join(l["name"][:18] for l in sc["libs"][:6]) + (" …" if len(sc["libs"]) > 6 else "")
         head += f"\nبحثتُ في {len(sc['libs'])} قناة عامة دون اشتراك: {names}"
+        if not items:
+            head += "\nلم أجده في هذه القنوات؛ قد لا يكون فيها. «جرّب قنوات أخرى» يبحث في قنوات جديدة، أو غيّر النوع."
     kb = dl + [[_b("حمّل الكل", "ta:ga", "success")] if len(top) > 1 else [], types]
     if sc and sc["discovered"]:
         kb.append([_b(f"💾 احفظ هذه القنوات في قائمة «{sc['topic'][:16]}»", "ta:sl", "primary")])
+    if sc and sc["discovered"] and len(items) < 4:
+        kb.append([_b("🔄 جرّب قنوات أخرى", "ta:gm", "success")])
     if sc:
         kb.append([_b(f"🔎 بحث آخر في «{sc['topic'][:14]}»", "ta:gq"), _b("غيّر النوع", "ta:gs")])
     kb.append(HOME)
@@ -126,7 +130,7 @@ def _notify_to(chat):
     return n
 
 
-def do_search(chat, q, topic=None):
+def do_search(chat, q, topic=None, more=False):
     sc = (topic, q) if topic else A.parse_scoped(q)
     note = TL.send(f"أبحث عن «{sc[1] if sc else q}»" + (f" في قنوات «{sc[0]}»…" if sc else " في قوائمك…"), chat)
 
@@ -140,8 +144,14 @@ def do_search(chat, q, topic=None):
                         last[0] = time.time()
                         TL.edit(chat, note, f"أبحث عن «{sc[1]}» في قنوات «{sc[0]}»… {i}/{n}\n{name[:40]}", [])
                 TOPIC[chat] = sc[0]
-                r = A.search_scoped(sc[0], sc[1], progress=prog)
-                RES[chat] = {"q": sc[1], "items": r["items"], "counts": r["counts"], "scoped": {"topic": sc[0], "libs": r["libs"], "discovered": r["discovered"]}}
+                old = RES.get(chat) if more else None
+                tried = {l["id"] for l in ((old or {}).get("scoped") or {}).get("libs", [])}
+                r = A.search_scoped(sc[0], sc[1], progress=prog, exclude=tried)
+                items = A.fuzzy_rank((old["items"] if old else []) + r["items"], sc[1]) if old else r["items"]
+                libs = (((old or {}).get("scoped") or {}).get("libs", []) + r["libs"]) if old else r["libs"]
+                counts = {k: sum(1 for i in items if i["t"] == k) for k in A.TYPES if k != "all"}
+                counts["all"] = len(items)
+                RES[chat] = {"q": sc[1], "items": items, "counts": counts, "scoped": {"topic": sc[0], "libs": libs, "discovered": r["discovered"]}}
             else:
                 r = A.search(q)
                 RES[chat] = {"q": q, "items": r["items"], "counts": r["counts"]}
@@ -283,6 +293,10 @@ def on_callback(chat, mid, rest):
                 TOPIC[chat] = name
                 AWAIT[chat] = "gquery"
                 TL.send(f"النوع: «{name}» ✓\nالخطوة ٢ من ٢: اكتب ما تبحث عنه.", chat, kb=[[_b("غيّر النوع", "ta:gs")], HOME])
+        elif act == "gm":
+            r = RES.get(chat)
+            if r and r.get("scoped"):
+                do_search(chat, r["q"], topic=r["scoped"]["topic"], more=True)
         elif act == "gq":
             if TOPIC.get(chat):
                 AWAIT[chat] = "gquery"
