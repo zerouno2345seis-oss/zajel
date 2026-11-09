@@ -65,6 +65,39 @@ final class DropWebView: WKWebView {
     }
 }
 
+/// نافذة مواقع داخل زاجل (مثل Perplexity): تبقى في البرنامج بدل المتصفح، وتتذكر تسجيل الدخول (مخزن WebKit الدائم).
+final class WebWindow: NSObject, WKUIDelegate, WKNavigationDelegate {
+    static var shared: WebWindow?
+    let window: NSWindow
+    let web: WKWebView
+    override init() {
+        let cfg = WKWebViewConfiguration()
+        cfg.websiteDataStore = .default()
+        web = WKWebView(frame: .zero, configuration: cfg)
+        web.allowsBackForwardNavigationGestures = true
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 980, height: 760), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+        super.init()
+        web.uiDelegate = self; web.navigationDelegate = self
+        window.title = "Perplexity"
+        window.contentView = web
+        window.isReleasedWhenClosed = false
+        window.setFrameAutosaveName("ZajelWebWindow")
+        if !window.setFrameUsingName("ZajelWebWindow") { window.center() }
+    }
+    static func open(_ url: URL) {
+        let w = shared ?? WebWindow(); shared = w
+        w.web.load(URLRequest(url: url))
+        w.window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+    // نوافذ الدخول المنبثقة (Google وApple) تُفتح في النافذة نفسها
+    func webView(_ w: WKWebView, createWebViewWith c: WKWebViewConfiguration, for a: WKNavigationAction, windowFeatures f: WKWindowFeatures) -> WKWebView? {
+        if let u = a.request.url { w.load(URLRequest(url: u)) }
+        return nil
+    }
+    func webView(_ w: WKWebView, didFinish n: WKNavigation!) { window.title = w.title?.isEmpty == false ? w.title! : "Perplexity" }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNavigationDelegate, WKScriptMessageHandler {
     var window: NSWindow!
     var web: WKWebView!
@@ -251,7 +284,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
     }
 
     func userContentController(_ c: WKUserContentController, didReceive m: WKScriptMessage) {
-        guard let d = m.body as? [String: Any], let hk = d["hotkey"] as? [String: Any] else { return }
+        guard let d = m.body as? [String: Any] else { return }
+        if let s = d["web"] as? String, let u = URL(string: s), u.scheme == "https" { WebWindow.open(u); return }
+        guard let hk = d["hotkey"] as? [String: Any] else { return }
         let code = (hk["key"] as? Int) ?? -1, mods = (hk["mods"] as? Int) ?? 0
         UserDefaults.standard.set(code, forKey: "HotKeyCode")
         UserDefaults.standard.set(mods, forKey: "HotKeyMods")
@@ -410,7 +445,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
             let i = NSMenuItem(title: t, action: #selector(dockAction(_:)), keyEquivalent: ""); i.target = self; i.representedObject = [act, "", ""]; m.addItem(i)
         }
         m.addItem(.separator())
-        for (t, act) in [("أرسل لعدة وكلاء", "broadcast"), ("افتح زاجل الكامل", "main")] {
+        for (t, act) in [("أرسل لعدة وكلاء", "broadcast"), ("Perplexity", "pplx"), ("افتح زاجل الكامل", "main")] {
             let i = NSMenuItem(title: t, action: #selector(dockAction(_:)), keyEquivalent: ""); i.target = self; i.representedObject = [act, "", ""]; m.addItem(i)
         }
         return m
@@ -433,6 +468,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
                 for a in runnable { if let i = a["id"] as? String { post("restart", ["id": i]) } }
             }
         case "broadcast": js("ZajelTermApp.broadcast()")
+        case "pplx": if let u = URL(string: "https://www.perplexity.ai/") { WebWindow.open(u) }
         case "main":
             if let u = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.mohamad.phonebackup") {
                 NSWorkspace.shared.openApplication(at: u, configuration: NSWorkspace.OpenConfiguration(), completionHandler: nil)

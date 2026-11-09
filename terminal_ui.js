@@ -1337,7 +1337,7 @@
 
       try {
         if (includePerplexity) {
-          window.open('https://www.perplexity.ai/search?q=' + encodeURIComponent(text), '_blank');
+          openPerplexity(text);
         }
 
         if (ids.length > 0) {
@@ -1434,7 +1434,7 @@
           exportAllBtn.disabled=false;
         }
       };
-      controls.appendChild(exportAllBtn);
+      controls.appendChild(exportAllBtn);const pxBtn=document.createElement('button');pxBtn.type='button';pxBtn.className='btn';pxBtn.textContent='🔎 Perplexity';pxBtn.title='افتح Perplexity داخل زاجل';pxBtn.onclick=()=>openPerplexity('');controls.appendChild(pxBtn);
 
       const hotkeyBtn=document.createElement('button');
       hotkeyBtn.type='button';
@@ -1879,7 +1879,15 @@
     return true;
   }
 
+  // داخل البرنامج: نافذة Perplexity تابعة لزاجل (تتذكر الدخول)؛ في المتصفح العادي: تبويب جديد
+  function openPerplexity(text) {
+    const url = 'https://www.perplexity.ai/' + (text ? 'search?q=' + encodeURIComponent(text) : '');
+    const h = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.zajel;
+    if (h) h.postMessage({ web: url }); else window.open(url, '_blank');
+  }
+
   window.ZajelTermApp = {
+    perplexity: openPerplexity,
     dropPaths,
     async open(id) {
       const isApp = new URLSearchParams(location.search).get('mode') === 'terminal';
