@@ -472,6 +472,55 @@ def suggestions(q):
     return [s for s in run(go(), 90) if s["id"] not in have and s["username"]]
 
 
+# ================= البحث التقريبي =================
+STOP = {"de", "la", "el", "los", "las", "of", "the", "and", "al", "في", "من", "على", "عن", "ال", "و", "pdf", "mp3", "mp4"}
+
+
+def fz_norm(s):
+    """تطبيع للمقارنة التقريبية: يزيل التشكيل والحركات اللاتينية (é→e) ويوحّد الهمزات والتاء المربوطة وحالة الأحرف."""
+    import unicodedata
+    s = unicodedata.normalize("NFKD", str(s or ""))
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    return norm(s)
+
+
+def fuzzy_terms(q):
+    """الكلمات المهمة في الاستعلام (٣ أحرف فأكثر وليست أدوات ربط)، الأطول أولًا."""
+    ws = [w for w in re.findall(r"\w+", fz_norm(q)) if len(w) >= 3 and w not in STOP]
+    return sorted(dict.fromkeys(ws), key=lambda w: -len(w))
+
+
+def _word_score(term, words):
+    import difflib
+    best = 0.0
+    for w in words:
+        if term == w:
+            return 1.0
+        if len(term) >= 4 and (term in w or w in term) and min(len(term), len(w)) >= 4:
+            best = max(best, 0.9)
+        best = max(best, difflib.SequenceMatcher(None, term, w).ratio())
+    return best
+
+
+def fuzzy_score(item, q):
+    terms = fuzzy_terms(q)
+    if not terms:
+        return 1.0
+    words = re.findall(r"\w+", fz_norm(str(item.get("title", "")) + " " + str(item.get("meta", ""))))
+    scores = [_word_score(t, words) for t in terms]
+    return sum(s if s >= 0.75 else 0.0 for s in scores) / len(scores)
+
+
+def fuzzy_rank(items, q, min_score=0.5):
+    """يرتّب النتائج بالتشابه ويستبعد الضعيف جدًا. الاستعلام بلا كلمات مهمة يُبقى كما هو."""
+    if not fuzzy_terms(q):
+        return items
+    scored = [(fuzzy_score(i, q), i) for i in items]
+    scored = [x for x in scored if x[0] >= min_score]
+    scored.sort(key=lambda x: (-x[0], str(x[1].get("date", ""))), reverse=False)
+    return [i for _, i in scored]
+
+
 # ================= البحث =================
 def _filter_for(t):
     from telethon import types as tt
@@ -502,12 +551,13 @@ def search(q, scope="all", type_="all", per_lib=25):
 
     async def go():
         c = await client()
-        items = []
-        for lib in chosen:
+        items, seen = [], set()
+
+        async def one(lib, text):
             try:
                 ent = await call(lambda: c.get_entity(lib["username"] or lib["id"]))
                 flt = _filter_for(type_) if type_ != "all" else None
-                kw = {"search": q, "limit": per_lib}
+                kw = {"search": text, "limit": per_lib}
                 if flt:
                     kw["filter"] = flt()
 
@@ -516,16 +566,29 @@ def search(q, scope="all", type_="all", per_lib=25):
                 for m in await call(grab):
                     if classify(m) in ("text",):
                         continue
-                    items.append(to_item(m, lib))
+                    it = to_item(m, lib)
+                    if it["ref"] not in seen:
+                        seen.add(it["ref"])
+                        items.append(it)
             except ValueError:
                 raise
             except Exception as e:
                 if type(e).__name__ in ("FloodWaitError", "SlowModeWaitError"):
                     raise
-                continue            # قناة محظورة أو محذوفة: لا نوقف البحث كله
+                # قناة محظورة أو محذوفة: لا نوقف البحث كله
+
+        for lib in chosen:
+            await one(lib, q)
+        # تقريبي: إن قلّت النتائج الحرفية نبحث بكل كلمة مهمة على حدة (يصلح مع الأخطاء الإملائية والترتيب المختلف) ثم نرتّب بالتشابه
+        if len(items) < 8:
+            for t in fuzzy_terms(q)[:3]:
+                if t == fz_norm(q):
+                    continue
+                for lib in chosen:
+                    await one(lib, t)
         return items
 
-    items = run(go(), 180)
+    items = fuzzy_rank(run(go(), 300), q)
     counts = {k: sum(1 for i in items if i["t"] == k) for k in TYPES if k not in ("all",)}
     counts["all"] = len(items)
     if type_ != "all":

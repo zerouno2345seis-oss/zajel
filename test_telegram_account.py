@@ -115,6 +115,32 @@ class Pure(unittest.TestCase):
         self.assertIn("م.ب", A.human_size(5 * 1024 ** 2))
 
 
+class Fuzzy(unittest.TestCase):
+    def test_terms_drop_stopwords_and_accents(self):
+        self.assertEqual(A.fuzzy_terms("El secreto de sus ojos"), ["secreto", "ojos", "sus"])
+        self.assertIn("peliculas", A.fuzzy_terms("Películas"))
+        self.assertEqual(A.fuzzy_terms("pdf"), [])
+
+    def test_misspelling_still_matches(self):
+        it = {"title": "El secreto de sus ojos (2009)", "meta": ""}
+        self.assertGreaterEqual(A.fuzzy_score(it, "secreto de los hojos"), 0.5)
+        far = {"title": "كتاب المغني لابن قدامة", "meta": ""}
+        self.assertEqual(A.fuzzy_score(far, "secreto de los hojos"), 0.0)
+
+    def test_arabic_variants(self):
+        it = {"title": "الأَشباه والنظائر", "meta": ""}
+        self.assertGreaterEqual(A.fuzzy_score(it, "الاشباه والنظائر"), 0.99)
+        it2 = {"title": "مدرسة الفقه", "meta": ""}
+        self.assertGreaterEqual(A.fuzzy_score(it2, "مدرسه الفقه"), 0.99)
+
+    def test_rank_orders_and_filters(self):
+        items = [{"title": "كتاب آخر", "date": "2020"}, {"title": "El secreto de sus ojos", "date": "2021"}, {"title": "secreto", "date": "2022"}]
+        r = A.fuzzy_rank(items, "secreto de sus hojos")
+        self.assertEqual(r[0]["title"], "El secreto de sus ojos")
+        self.assertNotIn("كتاب آخر", [i["title"] for i in r])
+        self.assertEqual(A.fuzzy_rank(items, "pdf"), items)       # بلا كلمات مهمة: لا تصفية
+
+
 class Pacing(unittest.TestCase):
     def test_pacer_spaces_requests_and_obeys_flood(self):
         t = [100.0]
