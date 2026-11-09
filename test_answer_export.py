@@ -1,4 +1,5 @@
 import tempfile
+import os
 import unittest
 from pathlib import Path
 
@@ -71,6 +72,18 @@ class Docx(unittest.TestCase):
             r2 = A.export("fake", "Fake", out_dir=d)
             self.assertNotEqual(r1["path"], r2["path"])
             self.assertTrue(r2["path"].endswith("(2).docx"))
+
+    def test_mermaid_becomes_picture(self):
+        import mermaid_render
+        from docx import Document
+        self.assertTrue(mermaid_render.is_mermaid("", "flowchart TD\nA-->B"))
+        self.assertFalse(mermaid_render.is_mermaid("python", "print(1)"))
+        if not mermaid_render.find_mmdc():
+            self.skipTest("no mmdc")
+        with tempfile.TemporaryDirectory() as d:
+            os.environ["PB_DATA"] = d
+            p = A.build_docx("م", "س؟", "```mermaid\nflowchart RL\nA[بداية]-->B[نهاية]\n```", "X", Path(d) / "m.docx")
+            self.assertEqual(len(Document(str(p)).inline_shapes), 1)
 
 
 if __name__ == "__main__":

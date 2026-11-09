@@ -460,15 +460,30 @@ def _body(doc, answer):
         s = ln.strip()
         if s.startswith("```"):
             flush()
+            lang = s[3:].strip().lower()
             i += 1
             code = []
             while i < len(lines) and not lines[i].strip().startswith("```"):
                 code.append(lines[i])
                 i += 1
-            p = _para(doc, "\n".join(code) or " ", size=11, ltr=True)
-            for r in p.runs:
-                _font(r, name="Menlo", size=10)
-            _shade(p, "F2F5F9")
+            src = "\n".join(code)
+            png = None
+            import mermaid_render
+            if mermaid_render.is_mermaid(lang, src):
+                png = mermaid_render.render(src)
+                if png:
+                    from docx.enum.text import WD_ALIGN_PARAGRAPH
+                    from docx.shared import Cm
+                    doc.add_picture(str(png), width=Cm(15))
+                    doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    _para(doc, "مخطط", size=10, color="6B7587", center=True)
+            if not png:
+                p = _para(doc, src or " ", size=11, ltr=True)
+                for r in p.runs:
+                    _font(r, name="Menlo", size=10)
+                _shade(p, "F2F5F9")
+                if mermaid_render.is_mermaid(lang, src):
+                    _para(doc, "(تعذّر رسم المخطط؛ هذا نصه)", size=10, color="6B7587")
         elif re.match(r"^!\[[^\]]*\]\([^)]+\)\s*$", s):
             flush()
             m = re.match(r"^!\[([^\]]*)\]\(([^)\s]+)", s)

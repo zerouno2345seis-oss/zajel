@@ -707,7 +707,25 @@ def handle(h, method):
             b = _body(h)
             i, act = str(b.get("id", "")), path.rsplit("/", 1)[1]
             try:
-                if act == "export_all":
+                if act == "mermaid_png":
+                    code = b.get("code", "")
+                    if not isinstance(code, str) or len(code) > 20000:
+                        h.send_json({"error": "تعذّر رسم المخطط"}, 400)
+                        return
+                    try:
+                        import mermaid_render
+                        png_path = mermaid_render.render(code)
+                        if png_path is None:
+                            raise ValueError("mermaid render unavailable")
+                        png = Path(png_path).read_bytes()
+                        h.send_response(200)
+                        h.send_header("Content-Type", "image/png")
+                        h.send_header("Content-Length", str(len(png)))
+                        h.end_headers()
+                        h.wfile.write(png)
+                    except Exception:
+                        h.send_json({"error": "تعذّر رسم المخطط"}, 400)
+                elif act == "export_all":
                     h.send_json(terminal.export_all(b.get("ids") or [], b.get("extra") or []))
                 elif act == "export_text":
                     h.send_json(terminal.export_text(b))
