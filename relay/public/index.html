@@ -284,11 +284,21 @@ const S = { tab:'home', sub:'search', device:null, devices:[], sheet:null, toast
   groups:null, sect:null, sectData:null };
 
 /* ---- الاتصال ---- */
+// عمليات قراءة فقط: إن انقطعت الشبكة لحظة (تبدّل بين 5G وواي فاي) نعيدها بدل إظهار خطأ
+const SAFE = /(^|\.)(list|poll|home|libs|inbox|watch|backup|dls|agents|search|section|places|suggest|candidates)$/;
 async function api(op, args = {}, confirm = null) {
-  const r = await fetch('/api', { method:'POST', headers:{'content-type':'application/json','x-init-data': TW ? TW.initData : ''},
-    body: JSON.stringify({ device: S.device, op, args, confirm }) });
-  let d; try { d = await r.json(); } catch (e) { d = { error: 'ردّ غير مفهوم من الوسيط' }; }
-  return d;
+  const tries = SAFE.test(op) ? 3 : 1;
+  for (let i = 1; ; i++) {
+    try {
+      const r = await fetch('/api', { method:'POST', headers:{'content-type':'application/json','x-init-data': TW ? TW.initData : ''},
+        body: JSON.stringify({ device: S.device, op, args, confirm }) });
+      let d; try { d = await r.json(); } catch (e) { d = { error: 'ردّ غير مفهوم من الوسيط' }; }
+      return d;
+    } catch (e) {
+      if (i >= tries) throw e;
+      await new Promise(ok => setTimeout(ok, 700 * i));
+    }
+  }
 }
 /* يعيد البيانات، أو يفتح لوح التأكيد/الرمز بحسب ما يقرره الماك */
 async function call(op, args = {}, then) {
@@ -551,10 +561,10 @@ async function ask(q) {
   S.chat.push({ me:true, text:q }); const m = { me:false, who:'زاجل', text:'' }; S.chat.push(m); render();
   const r = await call('assist.ask', { q, agent:S.agent }); if (!r) { S.chat.pop(); S.chat.pop(); return render(); }
   m.who = r.agent; S.job = r.job; render();
-  const t0 = Date.now();
+  const t0 = Date.now(); let fails = 0;
   while (S.job === r.job && Date.now() - t0 < 20 * 60 * 1000) {            // بثّ تدريجي: الجواب يكبر في مكانه
     await new Promise(ok => setTimeout(ok, 1200));
-    const p = await call('assist.poll', { job:r.job }); if (!p) break;
+    let p = null; try { p = await call('assist.poll', { job:r.job }); fails = 0; } catch (e) { if (++fails < 6) continue; throw e; } if (!p) break;
     m.text = p.text || (p.step ? '… ' + p.step : '…');
     if (p.state !== 'running') { if (p.state === 'stopped') m.text += ' …(أُوقف)'; else if (p.error && !p.text) m.text = p.error; break; }
     render(true);
