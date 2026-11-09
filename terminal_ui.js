@@ -1242,7 +1242,12 @@
     } else {
       text = items.map(it => q(it.path)).join(' ');
     }
-    req('send', { id: slot.id, text }).then(() => showToast('أُدرج المسار؛ اضغط Enter حين تريد')).catch(e => showToast(e.message || 'تعذّر الإدراج'));
+    if (a && !a.cmd && a.state === 'stopped') {      // طرفية متوقفة: تُفتح مباشرة في ذلك المجلد
+      const it = items[0];
+      req('start', { id: slot.id, cwd: it.dir ? it.path : it.path.replace(/\/[^/]*$/, '') }).then(() => { showToast('فُتحت الطرفية في المجلد'); refreshList(); refreshScreens(true); }).catch(e => showToast(e.message || 'تعذّر الفتح'));
+    } else {
+      req('send', { id: slot.id, text }).then(() => showToast('أُدرج المسار؛ اضغط Enter حين تريد')).catch(e => showToast(e.message || 'تعذّر الإدراج'));
+    }
     activeSlot = slots.indexOf(slot); slot.pre && slot.pre.focus({ preventScroll: true });
     return true;
   }
