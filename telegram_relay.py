@@ -54,7 +54,7 @@ def status():
 
 def _http(method, path, body=None, timeout=40):
     req = urllib.request.Request(url() + path, data=json.dumps(body).encode() if body is not None else None, method=method,
-                                 headers={"X-Mac-Key": _key(), "Content-Type": "application/json"})
+                                 headers={"X-Mac-Key": _key(), "Content-Type": "application/json", "User-Agent": "zajel-mac/1.0"})       # Cloudflare يحجب توقيع Python الافتراضي (خطأ 1010)
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read().decode() or "{}")
 

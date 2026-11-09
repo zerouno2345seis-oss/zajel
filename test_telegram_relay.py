@@ -41,3 +41,21 @@ class Relay(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UserAgent(unittest.TestCase):
+    def test_custom_user_agent_sent(self):
+        import telegram_relay as R
+        seen = {}
+
+        class Resp:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self): return b"{}"
+
+        def fake(req, timeout=0):
+            seen["ua"] = req.get_header("User-agent")
+            return Resp()
+        with mock.patch.object(R, "url", lambda: "https://x.workers.dev"), mock.patch.object(R, "_key", lambda: "k"), mock.patch.object(R.urllib.request, "urlopen", fake):
+            R._http("GET", "/mac/poll")
+        self.assertEqual(seen["ua"], "zajel-mac/1.0")
