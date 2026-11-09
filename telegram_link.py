@@ -150,6 +150,12 @@ def start():
         if not (_mail_thread and _mail_thread.is_alive()):
             _mail_thread = threading.Thread(target=_mail_loop, daemon=True)
             _mail_thread.start()
+        try:
+            import telegram_relay
+            if telegram_relay.url():
+                telegram_relay.start()
+        except Exception:
+            pass
         global _pusher
         if not (_pusher and _pusher.is_alive()):
             _pusher = threading.Thread(target=_pending_loop, daemon=True)
@@ -368,7 +374,7 @@ def _loop():
             continue
         try:
             c = _cfg()
-            ups = _api(tok, "getUpdates", {"offset": c["offset"], "timeout": 25, "allowed_updates": ["message", "callback_query"]}, timeout=40)
+            ups = _api(tok, "getUpdates", {"offset": c["offset"], "timeout": 25, "allowed_updates": ["message", "callback_query", "inline_query", "chosen_inline_result"]}, timeout=40)
             if not STATE["gateway"]:
                 STATE["gw_changed"] = True          # صرنا المستقبِل: سجّل الحضور فورًا ليعرفه الجهاز الآخر
             STATE["gateway"], STATE["error"] = True, ""
@@ -437,6 +443,12 @@ def _dispatch(u):
             if _authorized(chat):
                 _ask(chat, m.get("text") or "", failover=u["zajel_failover"])
             return
+        if u.get("inline_query"):
+            _on_inline(u["inline_query"])
+            return
+        if u.get("chosen_inline_result"):
+            _on_chosen(u["chosen_inline_result"])
+            return
         cb = u.get("callback_query")
         if cb:
             chat = cb["message"]["chat"]["id"]
@@ -456,6 +468,73 @@ def _dispatch(u):
     except Exception as exc:
         if chat:
             send("تعذّر تنفيذ الطلب: " + str(exc)[:150], chat)
+
+
+# ================= البحث المضمّن: @اسم_البوت كلمة في أي محادثة =================
+INLINE_BUDGET = 6.0         # تيليجرام يريد الجواب سريعًا؛ ما لم يصل خلال هذه المهلة لا ننتظره
+
+
+def _inline_results(q):
+    import concurrent.futures
+    out = []
+    ex = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+    futs = {}
+    try:
+        import telegram_more as M
+        acc = M._account()
+        if acc is not None and acc.linked():
+            futs["lib"] = ex.submit(acc.A.search, q)
+        import agent_server
+        futs["mac"] = ex.submit(agent_server.call, "search_all", {"q": q}, "telegram")
+        deadline = time.time() + INLINE_BUDGET
+        for name, f in futs.items():
+            try:
+                r = f.result(max(0.1, deadline - time.time()))
+            except Exception:
+                continue
+            if name == "lib":
+                for i in r["items"][:8]:
+                    if i["t"] == "link" or not i.get("link"):
+                        continue
+                    out.append({"type": "article", "id": "t" + i["ref"].replace(":", "_"), "title": i["title"][:90], "description": f"{i['lib_name']} · {i['size_h']}",
+                                "input_message_content": {"message_text": f"{i['title']}\n{i['link']}"}})
+            else:
+                for e in ((r.get("result") or {}).get("entries") or [])[:5]:
+                    if e.get("is_dir"):
+                        continue
+                    k = uuid_short()
+                    FIND[k] = (e.get("place") or e.get("sid"), e.get("path"))
+                    out.append({"type": "article", "id": "m" + k, "title": (e.get("name") or "")[:90], "description": "من ملفات " + HOST,
+                                "input_message_content": {"message_text": "📄 " + (e.get("name") or "")}})
+    finally:
+        ex.shutdown(wait=False)
+    return out[:20]
+
+
+def _on_inline(iq):
+    """نتائج من مكتباتك ومن ملفات الماك. لا يُجاب إلا المستخدم المقترن."""
+    me = _cfg().get("chat_id")
+    if not me or (iq.get("from") or {}).get("id") != me:
+        _quiet("answerInlineQuery", {"inline_query_id": iq["id"], "results": [], "cache_time": 1, "is_personal": True})
+        return
+    q = (iq.get("query") or "").strip()
+    res = _inline_results(q) if len(q) >= 2 else []
+    _quiet("answerInlineQuery", {"inline_query_id": iq["id"], "results": res, "cache_time": 5, "is_personal": True,
+                                 **({} if res else {"button": {"text": "اكتب كلمتين أو أكثر للبحث", "start_parameter": "inline"}})})
+
+
+def _on_chosen(cr):
+    """اختار نتيجة من ملفات الماك: تيليجرام لا يسمح للبوت برفع ملف إلى محادثة غيره، فيصلك الملف في محادثة البوت لتحوّله."""
+    me = _cfg().get("chat_id")
+    rid = cr.get("result_id") or ""
+    if not me or (cr.get("from") or {}).get("id") != me or not rid.startswith("m"):
+        return
+    f = FIND.get(rid[1:])
+    if f:
+        import agent_server
+        r = agent_server.call("send_to_telegram", {"place": f[0], "path": f[1]}, agent="telegram")
+        if r.get("error"):
+            send(r["error"], me)
 
 
 def _authorized(chat):
@@ -930,6 +1009,16 @@ def _on_callback(chat, mid, data):
         _save_cfg({rest: not _cfg()[rest]}); _show(chat, "settings", mid)
 
 
+def _app_row():
+    """زر يفتح التطبيق المصغّر إن كان الوسيط مضبوطًا."""
+    try:
+        import telegram_relay
+        u = telegram_relay.url()
+    except Exception:
+        u = ""
+    return [[{"text": "افتح التطبيق المصغّر", "web_app": {"url": u + "/"}, "style": "success"}]] if u else []
+
+
 def _show(chat, name, mid=None):
     import telegram_more as M
     name = M.ALIAS.get(name, name)
@@ -975,7 +1064,7 @@ def _screen(name):
         return (f"{HOST} · متصل · زاجل {_version()}\nالقرص: {_human(du.used)} من {_human(du.total)}\nالمساعد: {agent_runner.AGENTS[agent_runner.settings()['default_agent']]['name']}\nالوكلاء العاملون: {up} من {len(ag)}\nبانتظار موافقتك: {pend}" + extra,
                 [[_b("بحث", "scr:search", "primary"), _b("الوارد", "scr:inbox"), _b("المراقب", "scr:watchwords")],
                  [_b("الجوال", "scr:phone"), _b("البريد", "scr:mail"), _b("الطرفية", "scr:term")],
-                 [_b("التنظيف", "scr:clean"), _b("الوكلاء", "scr:agents"), _b("كل الأقسام", "scr:more", "primary")]])
+                 [_b("التنظيف", "scr:clean"), _b("الوكلاء", "scr:agents"), _b("كل الأقسام", "scr:more", "primary")]] + _app_row())
     if name == "agents":
         names = {a["id"]: a["name"] for a in agent_runner.agents()}
         s = agent_metrics.stats(24, {a["id"]: a["installed"] for a in agent_runner.agents()}, list(names))
@@ -1255,7 +1344,7 @@ def _route(u):
     m = u.get("message") or {}
     cb = u.get("callback_query") or {}
     text = (m.get("text") or "").strip()
-    local = text.startswith("/start") or text.startswith("/pc") or text == "الأجهزة" or (cb.get("data") or "").startswith(("pc:", "scr:pc", "one:"))
+    local = "inline_query" in u or "chosen_inline_result" in u or text.startswith("/start") or text.startswith("/pc") or text == "الأجهزة" or (cb.get("data") or "").startswith(("pc:", "scr:pc", "one:"))
     chat = (m.get("chat") or (cb.get("message") or {}).get("chat") or {}).get("id")
     hb = _host_by_button(text) if text else ""
     if hb and _authorized(chat):                # زر جهاز في لوحة المفاتيح: يصير هو الحالي فورًا

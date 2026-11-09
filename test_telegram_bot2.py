@@ -201,3 +201,51 @@ class StopButton(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class InlineMode(Base):
+    def setUp(self):
+        super().setUp()
+        self.answers = []
+        p = mock.patch.object(TL, "_quiet", lambda m, p=None, **k: self.answers.append((m, p)))
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_unpaired_user_gets_nothing(self):
+        TL._on_inline({"id": "q1", "from": {"id": 99}, "query": "المغني"})
+        m, p = self.answers[-1]
+        self.assertEqual((m, p["results"]), ("answerInlineQuery", []))
+
+    def test_results_from_libraries_and_mac_files(self):
+        lib = types.SimpleNamespace(linked=lambda: True, A=types.SimpleNamespace(search=lambda q: {"items": [
+            {"ref": "1:5", "t": "book", "title": "المغني", "lib_name": "مكتبة", "size_h": "5 م.ب", "link": "https://t.me/m/5"},
+            {"ref": "1:6", "t": "link", "title": "رابط", "lib_name": "م", "size_h": "—", "link": "https://t.me/m/6"}]}))
+        server = types.SimpleNamespace(call=lambda n, a, agent="": {"result": {"entries": [{"name": "المغني.docx", "place": "mac", "path": "/x/المغني.docx"}, {"name": "مجلد", "is_dir": True}]}})
+        with mock.patch.object(M, "_account", lambda: lib), mock.patch.dict("sys.modules", {"agent_server": server}):
+            TL._on_inline({"id": "q1", "from": {"id": 7}, "query": "المغني"})
+        res = self.answers[-1][1]["results"]
+        self.assertEqual([r["id"][0] for r in res], ["t", "m"])
+        self.assertIn("https://t.me/m/5", res[0]["input_message_content"]["message_text"])
+        self.assertTrue(all(len(r["id"].encode()) <= 64 for r in res))
+        self.assertTrue(self.answers[-1][1]["is_personal"])
+
+    def test_short_query_empty(self):
+        TL._on_inline({"id": "q1", "from": {"id": 7}, "query": "م"})
+        self.assertEqual(self.answers[-1][1]["results"], [])
+
+    def test_chosen_mac_file_is_sent_to_bot_chat_only_for_owner(self):
+        calls = []
+        server = types.SimpleNamespace(call=lambda n, a, agent="": calls.append((n, a)) or {})
+        TL.FIND["abc"] = ("mac", "/x/f.pdf")
+        with mock.patch.dict("sys.modules", {"agent_server": server}):
+            TL._on_chosen({"result_id": "mabc", "from": {"id": 99}})
+            self.assertEqual(calls, [])
+            TL._on_chosen({"result_id": "mabc", "from": {"id": 7}})
+        self.assertEqual(calls, [("send_to_telegram", {"place": "mac", "path": "/x/f.pdf"})])
+
+    def test_inline_updates_handled_locally(self):
+        got = []
+        with mock.patch.object(TL, "_dispatch", lambda u: got.append("here")), mock.patch.object(TL, "_forward", lambda u, h: got.append("fwd")), \
+                mock.patch.object(TL, "_target", lambda: "other"), mock.patch.object(TL, "_presence", lambda: {"other": {"ts": time.time()}}):
+            TL._route({"inline_query": {"id": "1", "from": {"id": 7}, "query": "x"}})
+        self.assertEqual(got, ["here"])

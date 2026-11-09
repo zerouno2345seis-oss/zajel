@@ -6468,6 +6468,30 @@
     };
     api('/api/assistant/telegram/account/status').then(renderTgAcc).catch(tgAccError);
 
+    // بطاقة الوسيط: يربط التطبيق المصغّر بهذا الماك (الماك هو الذي يتصل بالوسيط؛ لا منفذ مفتوح عليه)
+    const relayCard = makeSettingsCard('التطبيق المصغّر في تيليجرام', 'صفحة تُفتح داخل تيليجرام وتتحكم بهذا الماك عبر وسيط مجاني. خطوات النشر في ملف relay/DEPLOY.md.');
+    relayCard.status.textContent = 'جارٍ تحميل الحالة…';
+    const relayBody = el('div', '');
+    relayBody.style.cssText = 'display:flex;flex-direction:column;gap:7px;margin-top:7px';
+    relayCard.card.appendChild(relayBody);
+    sideContentEl.appendChild(relayCard.card);
+    const renderRelay = (st) => {
+      relayBody.replaceChildren();
+      relayCard.status.textContent = st.url ? ((st.ok ? 'متصل بالوسيط' : (st.error || 'لم يتصل بعد')) + ' · ' + st.url) : 'لم يُضبط الوسيط بعد.';
+      const url = document.createElement('input');
+      url.type = 'text'; url.placeholder = 'https://zajel-relay.xxxx.workers.dev'; url.value = st.url || '';
+      url.style.cssText = 'width:100%;box-sizing:border-box;padding:6px;border:1px solid var(--line);border-radius:7px;background:var(--side);color:var(--ink)';
+      relayBody.append(url,
+        telegramButton('احفظ عنوان الوسيط', async () => renderRelay(await api('/api/assistant/telegram/relay/set', { url: url.value }))),
+        telegramButton(st.has_key ? 'مفتاح جديد للماك' : 'أنشئ مفتاح الماك', async () => {
+          if (st.has_key && !window.confirm('المفتاح الجديد يقطع الاتصال حتى تضعه في الوسيط. تابع؟')) return;
+          const r = await api('/api/assistant/telegram/relay/key', {});
+          relayBody.appendChild(el('div', 'ضع هذا المفتاح في الوسيط بالأمر wrangler secret put MAC_KEY (لا يظهر مرة أخرى): ' + r.key));
+          relayCard.status.textContent = 'أُنشئ المفتاح.';
+        }));
+    };
+    api('/api/assistant/telegram/relay/status').then(renderRelay).catch((err) => { relayCard.status.textContent = err.message || 'تعذر التحميل.'; });
+
     // بطاقة واتساب: التنبيهات والتقرير الصباحي (الوقت والمحتوى والشكل)
     const waCard = makeSettingsCard('واتساب: التنبيهات والتقرير الصباحي', 'يراقب رسائلك الواردة ويرسل إلى Telegram ما يهمّك، وتقريرًا مرتّبًا في الوقت الذي تختاره. لا يرسل شيئًا إلى واتساب.');
     waCard.status.textContent = 'جارٍ تحميل الإعدادات…';
