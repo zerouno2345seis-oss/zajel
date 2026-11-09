@@ -414,8 +414,27 @@ def _which(cmd):
     return ""
 
 
+_PERSIST_DONE = set()
+
+
+def _persist_model_choice(i):
+    """/model في Hermes يغيّر النموذج لهذه الجلسة فقط ويعود إلى الأساسي عند إعادة التشغيل؛ هذا المفتاح يجعل كل اختيار يُحفظ افتراضيًا."""
+    if i != "hermes" or i in _PERSIST_DONE:
+        return
+    _PERSIST_DONE.add(i)
+    exe = shutil.which("hermes") or str(Path.home() / ".local/bin/hermes")
+
+    def run():
+        try:
+            subprocess.run([exe, "config", "set", "model.persist_switch_by_default", "true"], capture_output=True, timeout=30, env=_env())
+        except Exception:
+            pass
+    threading.Thread(target=run, daemon=True).start()
+
+
 def start(i, cwd=""):
     n = _name(i)
+    _persist_model_choice(i)
     with LOCK:
         if _t("has-session", "-t", n).returncode == 0:
             return {"ok": True, "started": False}

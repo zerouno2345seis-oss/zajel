@@ -36,18 +36,35 @@
     for(let i=start;i<rows.length;i++){
       const m=plainRows[i].match(/^\s*(?:[❯›>●]\s*)?(\d{1,2})[.)]\s+\S/);
       if(m)numbered.set(i,Number(m[1]));
-      if(/^\s*[❯›>]\s+\S/.test(plainRows[i]))cursorLines.push(i);
+      if(/^\s*(?:[│┃|]\s*)?[❯›>]\s+\S/.test(plainRows[i]))cursorLines.push(i);
     }
     let unnumbered=new Set(), curLine=-1, curMode='';
-    // نسبة الحروف المظلَّلة (خلفية أو عكس ألوان) في السطر؛ القوائم المنبثقة (مثل / للنماذج) تظلّل الصف المختار بدل علامة ❯
-    const hlRatio=row=>{let bgOn=false,inv=false,hi=0,tot=0,last=0,m;const re=/\x1b\[([0-9;]*)m/g;const cnt=t=>{for(const ch of t){if(/\s|[│┃|─━╭╮╰╯┌┐└┘]/.test(ch))continue;tot++;if(bgOn||inv)hi++;}};
-      while((m=re.exec(row))){cnt(row.slice(last,m.index));last=re.lastIndex;const a=(m[1]||'0').split(';').map(x=>Number(x||0));for(let i=0;i<a.length;i++){const n=a[i];if(n===0){bgOn=false;inv=false;}else if(n===7)inv=true;else if(n===27)inv=false;else if(n===49)bgOn=false;else if((n>=40&&n<=47)||(n>=100&&n<=107))bgOn=true;else if(n===48){bgOn=true;i+=a[i+1]===5?2:a[i+1]===2?4:0;}else if(n===38)i+=a[i+1]===5?2:a[i+1]===2?4:0;}}
-      cnt(row.slice(last));return tot>=3?hi/tot:0;};
-    const colOf=(p,isCur)=>{const m=isCur&&p.match(/^\s*[❯›>]\s+/);return m?m[0].length:p.search(/\S/);};
-    const buildBlock=ci=>{const col=colOf(plainRows[ci],true),ok=i=>{const p=plainRows[i];return p&&p.trim()&&!EDGE_RE.test(p)&&colOf(p,false)===col;};const b=[ci];for(let i=ci+1;i<rows.length&&ok(i)&&b.length<30;i++)b.push(i);for(let i=ci-1;i>=0&&ok(i)&&b.length<30;i--)b.unshift(i);return b;};
-    if(cursorLines.length===1){const block=buildBlock(cursorLines[0]);if(block.length>1){unnumbered=new Set(block);curLine=cursorLines[0];curMode=block.length>=3?'mark':'weak';}}
-    if(curLine<0){const hl=[];for(let i=start;i<rows.length-2;i++)if(plainRows[i].trim()&&hlRatio(rows[i])>=0.6)hl.push(i);   // آخر صف في الشاشة غالبًا شريط حالة لا قائمة
-      if(hl.length===1){const block=buildBlock(hl[0]);if(block.length>1&&block.every(i=>i===hl[0]||hlRatio(rows[i])<0.3)){unnumbered=new Set(block);curLine=hl[0];curMode='hl';}}}
+    const colOf=(p,isCur)=>{const m=isCur?p.match(/^\s*(?:[│┃|]\s*)?[❯›>]\s+/):p.match(/^\s*(?:[│┃|]\s*)?/);return m?m[0].length:p.search(/\S/);};
+    const buildBlock=(ci,accept)=>{const col=colOf(plainRows[ci],true),ok=i=>{const p=plainRows[i];return p&&p.trim()&&!EDGE_RE.test(p)&&colOf(p,false)===col&&(!accept||accept(i));};const b=[ci];for(let i=ci+1;i<rows.length&&ok(i)&&b.length<30;i++)b.push(i);for(let i=ci-1;i>=0&&ok(i)&&b.length<30;i--)b.unshift(i);return b;};
+    {const cands=cursorLines.map(ci=>({ci,block:buildBlock(ci)})).filter(x=>x.block.length>1);   // مع مربع الاختيار يوجد ❯ آخر في سطر الإدخال؛ نأخذ صاحب أكبر كتلة
+      cands.sort((p,q)=>q.block.length-p.block.length);
+      const top=cands[0];
+      if(top&&(cands.length===1||top.block.length>=3&&top.block.length>cands[1].block.length)){unnumbered=new Set(top.block);curLine=top.ci;curMode=top.block.length>=3?'mark':'weak';}}
+    if(curLine<0){
+      // القوائم المنبثقة (مثل / في Hermes) لا تضع علامة ❯: كل الصفوف بخلفية واحدة والصف المختار معكوس الألوان أو بخلفية مختلفة.
+      // نقرأ حالة أول حرف مرئي في كل سطر: خلفية؟ عكس ألوان؟
+      const st=row=>{let bgv='',inv=false,last=0,m;const re=/\x1b\[([0-9;]*)m/g;const seen=t=>/[^\s│┃|]/.test(t);
+        while((m=re.exec(row))){if(seen(row.slice(last,m.index)))return {bg:bgv,inv};last=re.lastIndex;const a=(m[1]||'0').split(';').map(x=>Number(x||0));for(let i=0;i<a.length;i++){const n=a[i];if(n===0){bgv='';inv=false;}else if(n===7)inv=true;else if(n===27)inv=false;else if(n===49)bgv='';else if((n>=40&&n<=47)||(n>=100&&n<=107))bgv=String(n);else if(n===48){const k=a[i+1]===5?2:a[i+1]===2?4:0;bgv=a.slice(i,i+1+k).join(',');i+=k;}else if(n===38)i+=a[i+1]===5?2:a[i+1]===2?4:0;}}
+        return seen(row.slice(last))?{bg:bgv,inv}:null;};
+      let run=[];const runs=[];
+      for(let i=start;i<rows.length-1;i++){const x=plainRows[i].trim()?st(rows[i]):null;if(x&&(x.bg||x.inv))run.push({i,...x});else{if(run.length)runs.push(run);run=[];}}
+      if(run.length)runs.push(run);
+      runs.sort((p,q)=>q.length-p.length);
+      const r=runs[0];
+      if(r&&r.length>=3&&r.length<=30){
+        const inv=r.filter(x=>x.inv);let cur=-1;
+        if(inv.length===1)cur=inv[0].i;
+        else if(!inv.length){const cnt=new Map();r.forEach(x=>cnt.set(x.bg,(cnt.get(x.bg)||0)+1));const maj=[...cnt.entries()].sort((p,q)=>q[1]-p[1])[0];const odd=r.filter(x=>x.bg!==maj[0]);if(odd.length===1&&maj[1]>=2)cur=odd[0].i;}
+        // بلا صف مختار لا نعدّها قائمة إلا إن كانت صفوفها أوامر أو إشارات (/ أو @)؛ فمربع الإدخال بخلفية أيضًا ولا نخطف تمريره
+        const cmdRows=r.every(x=>/^\s*[\/@]\S/.test(plainRows[x.i]));
+        if(cur>=0||cmdRows){unnumbered=new Set(r.map(x=>x.i));curLine=cur;curMode='hl';}
+      }
+    }
     rows.forEach((row,i)=>{
       const plain=row.replace(/\x1b\[[0-9;]*m/g,''), nl=i<rows.length-1?'\n':'';
       if(Q_RE.test(plain))mode='q';
@@ -57,7 +74,7 @@
       if(qOpen&&mode!=='q'){out+='</span>';qOpen=false;}
       if(mode==='q'&&!qOpen){out+='<span class="tt-q">';qOpen=true;}
       const h=line(row);
-      const option=numbered.has(i)?' data-opt-number="'+numbered.get(i)+'"':(unnumbered.has(i)?' data-opt-list="1"'+(i===curLine?' data-opt-cur="'+curMode+'"':''):'');
+      const option=numbered.has(i)?' data-opt-number="'+numbered.get(i)+'"':(unnumbered.has(i)?' data-opt-list="1" data-opt-menu="'+curMode+'"'+(i===curLine?' data-opt-cur="1"':''):'');
       out+='<span data-line="'+i+'"'+option+(option?' role="button" tabindex="-1"':'')+'>'+(mode==='a'?'<span class="tt-a">'+h+'</span>':h)+'</span>'+nl;
     });
     return out+(qOpen?'</span>':'');
@@ -78,7 +95,7 @@
   function stateColor(s){return s==='working'?'#22c55e':s==='waiting'?'#eab308':s==='shell'?'#ef4444':'#94a3b8';}
   let fastUntil=0,lastFull=0,screenBusy=false;
   function kick(){fastUntil=Date.now()+2500;}
-  function send(slot, payload){kick();sendChain=sendChain.then(()=>req('send',{id:slot.id,...payload})).then(()=>setMsg(slot,'')).catch(e=>setMsg(slot,'تعذّر الإرسال: '+(e&&e.message||'خطأ'),true));}
+  function send(slot, payload){kick();sendChain=sendChain.then(()=>req('send',{id:slot.id,...payload})).then(()=>{setMsg(slot,'');for(const d of [0,70,180,400])setTimeout(()=>{if(!screenBusy)refreshScreens(false,slot);},d);}).catch(e=>setMsg(slot,'تعذّر الإرسال: '+(e&&e.message||'خطأ'),true));}
 
   let barState = (() => { try { return localStorage.getItem('zajel_term_bar_state') || 'expanded'; } catch (_) { return 'expanded'; } })();
   let barPos = (() => { try { return localStorage.getItem('zajel_term_bar_pos') || 'side'; } catch (_) { return 'side'; } })();
@@ -1666,7 +1683,7 @@
       let wheelAcc=0;
       pre.addEventListener('wheel',e=>{
         if(e.ctrlKey||e.metaKey)return;
-        const cur=pre.querySelector('[data-opt-cur]'),mode=cur?cur.dataset.optCur:'',alt=!!(slot.cur&&slot.cur.alt);
+        const menu=pre.querySelector('[data-opt-menu]'),mode=menu?menu.dataset.optMenu:'',alt=!!(slot.cur&&slot.cur.alt);
         if(!alt&&mode!=='hl'&&mode!=='mark')return;
         e.preventDefault();
         wheelAcc+=e.deltaMode===1?e.deltaY*40:e.deltaY;
@@ -1680,7 +1697,7 @@
         const optionLines=[...pre.querySelectorAll('[data-opt-list]')], cursor=optionLines.findIndex(x=>x.hasAttribute('data-opt-cur'));
         let action;
         if(target.hasAttribute('data-opt-number')) action=req('send',{id:slot.id,text:String(target.dataset.optNumber)});
-        else {const index=optionLines.indexOf(target);if(index<0||cursor<0)return;const delta=index-cursor,keys=Array(Math.abs(delta)).fill(delta>0?'Down':'Up');keys.push('Enter');action=req('send',{id:slot.id,keys});}
+        else {const index=optionLines.indexOf(target);if(index<0||(cursor<0&&optionLines[0]?.dataset.optMenu!=='hl'))return;const delta=index-cursor,keys=Array(Math.abs(delta)).fill(delta>0?'Down':'Up');keys.push('Enter');action=req('send',{id:slot.id,keys});}
         e.preventDefault();e.stopPropagation();kick();Promise.resolve(action).then(()=>setTimeout(()=>refreshScreens(true),150)).catch(err=>showToast('تعذّر الإرسال: '+(err.message||'خطأ')));
       });
 
