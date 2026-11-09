@@ -701,7 +701,9 @@ def handle(h, method):
             b = _body(h)
             i, act = str(b.get("id", "")), path.rsplit("/", 1)[1]
             try:
-                if act == "export_answer":
+                if act == "export_all":
+                    h.send_json(terminal.export_all(b.get("ids") or []))
+                elif act == "export_answer":
                     h.send_json(terminal.export_answer(i))
                 elif act == "broadcast":
                     h.send_json(terminal.broadcast(b.get("ids") or [], b.get("text", "")))

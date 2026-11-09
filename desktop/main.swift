@@ -28,6 +28,17 @@ func portFree(_ port: Int) -> Bool {
 /// صفحة زاجل لا تعرف مسار الملف المسحوب إليها (المتصفح يعطيها الاسم فقط)، فيلتقط البرنامج الإفلات
 /// ويسلّم المسارات الكاملة إلى الطرفية التي أُفلتت فوقها (ZajelTermApp.dropPaths). غير ذلك يمضي كما هو.
 final class DropWebView: WKWebView {
+    // الصفحة لا تعلن قبول الملفات فكان النظام يرفض الإفلات قبل أن يصل إلينا: نعلن «نسخ» لكل سحب ملفات
+    func hasFiles(_ s: NSDraggingInfo) -> Bool {
+        s.draggingPasteboard.canReadObject(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true])
+    }
+    override func draggingEntered(_ s: NSDraggingInfo) -> NSDragOperation {
+        let op = super.draggingEntered(s); return hasFiles(s) ? .copy : op
+    }
+    override func draggingUpdated(_ s: NSDraggingInfo) -> NSDragOperation {
+        let op = super.draggingUpdated(s); return hasFiles(s) ? .copy : op
+    }
+    override func prepareForDragOperation(_ s: NSDraggingInfo) -> Bool { hasFiles(s) ? true : super.prepareForDragOperation(s) }
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
         let urls = (sender.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL]) ?? []
         if !urls.isEmpty {
@@ -54,7 +65,7 @@ final class DropWebView: WKWebView {
     }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNavigationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNavigationDelegate, WKScriptMessageHandler {
     var window: NSWindow!
     var web: WKWebView!
     var server: Process?
@@ -182,6 +193,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         cfg.preferences.javaScriptCanOpenWindowsAutomatically = true
         cfg.preferences.setValue(true, forKey: "developerExtrasEnabled")
         cfg.applicationNameForUserAgent = "PhoneBackupDesktop/1.0"
+        cfg.userContentController.add(self, name: "zajel")     // رسائل الصفحة إلى البرنامج (مفتاح الاستدعاء)
         web = DropWebView(frame: .zero, configuration: cfg)
         web.uiDelegate = self; web.navigationDelegate = self
         web.allowsMagnification = true
@@ -228,7 +240,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         return nil
     }
     func webViewWebContentProcessDidTerminate(_ w: WKWebView) { w.reload() }
-    func webView(_ w: WKWebView, didFinish n: WKNavigation!) { if w.url?.host == "127.0.0.1" { onSplash = false } }
+    func webView(_ w: WKWebView, didFinish n: WKNavigation!) {
+        if w.url?.host == "127.0.0.1" { onSplash = false; tellPage() }
+    }
+
+    /// تعرف الصفحة أنها داخل البرنامج، وما مفتاح الاستدعاء الحالي (لتعرضه وتغيّره)
+    func tellPage() {
+        let (code, mods) = hotKeyPref()
+        web.evaluateJavaScript("window.ZajelNative={app:'\(MODE)',hotkey:{key:\(code),mods:\(mods)}};window.dispatchEvent(new Event('zajel-native'))", completionHandler: nil)
+    }
+
+    func userContentController(_ c: WKUserContentController, didReceive m: WKScriptMessage) {
+        guard let d = m.body as? [String: Any], let hk = d["hotkey"] as? [String: Any] else { return }
+        let code = (hk["key"] as? Int) ?? -1, mods = (hk["mods"] as? Int) ?? 0
+        UserDefaults.standard.set(code, forKey: "HotKeyCode")
+        UserDefaults.standard.set(mods, forKey: "HotKeyMods")
+        registerHotKey()
+        tellPage()
+    }
 
     // MARK: نوافذ JavaScript الأصلية (تنبيه، تأكيد، إدخال، اختيار ملف)
     func webView(_ w: WKWebView, runJavaScriptAlertPanelWithMessage m: String, initiatedByFrame f: WKFrameInfo, completionHandler: @escaping () -> Void) {
@@ -412,18 +441,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         }
     }
 
-    /// مفتاح الاستدعاء (الافتراضي ⌥ مسافة). يُغيَّر بـ: defaults write com.mohamad.zajel.terminal HotKey control-option | off
+    /// مفتاح الاستدعاء (الافتراضي ⌥ مسافة). يُغيَّر من زر «⌨ مفتاح الاستدعاء» في الطرفية.
+    var hotRef: EventHotKeyRef?
+    var hotHandlerInstalled = false
+    func hotKeyPref() -> (Int, Int) {
+        let d = UserDefaults.standard
+        if d.object(forKey: "HotKeyCode") == nil {
+            if d.string(forKey: "HotKey") == "off" { return (-1, 0) }
+            return (Int(kVK_Space), d.string(forKey: "HotKey") == "control-option" ? Int(controlKey | optionKey) : Int(optionKey))
+        }
+        return (d.integer(forKey: "HotKeyCode"), d.integer(forKey: "HotKeyMods"))
+    }
     func registerHotKey() {
-        let pref = UserDefaults.standard.string(forKey: "HotKey") ?? "option"
-        if pref == "off" { return }
-        let mods = pref == "control-option" ? UInt32(controlKey | optionKey) : UInt32(optionKey)
-        var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
-        InstallEventHandler(GetApplicationEventTarget(), { _, _, _ in
-            DispatchQueue.main.async { delegate.toggleVisible() }
-            return noErr
-        }, 1, &spec, nil, nil)
-        var ref: EventHotKeyRef?
-        RegisterEventHotKey(UInt32(kVK_Space), mods, EventHotKeyID(signature: OSType(0x5A4A544D), id: 1), GetApplicationEventTarget(), 0, &ref)
+        guard TERM else { return }
+        if let r = hotRef { UnregisterEventHotKey(r); hotRef = nil }
+        let (code, mods) = hotKeyPref()
+        if code < 0 { return }
+        if !hotHandlerInstalled {
+            hotHandlerInstalled = true
+            var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
+            InstallEventHandler(GetApplicationEventTarget(), { _, _, _ in
+                DispatchQueue.main.async { delegate.toggleVisible() }
+                return noErr
+            }, 1, &spec, nil, nil)
+        }
+        RegisterEventHotKey(UInt32(code), UInt32(mods), EventHotKeyID(signature: OSType(0x5A4A544D), id: 1), GetApplicationEventTarget(), 0, &hotRef)
     }
 
     func toggleVisible() {

@@ -343,6 +343,58 @@ def build_docx(title, question, answer, agent_name, out_path):
     return out_path
 
 
+def build_many(title, items, out_path):
+    """مستند واحد فيه أجوبة عدة وكلاء: لكل وكيل عنوان باسمه، ثم سؤاله وجوابه."""
+    from docx import Document
+    from docx.shared import Cm
+    from docx.oxml import OxmlElement
+    doc = Document()
+    sec = doc.sections[0]
+    sec.page_height, sec.page_width = Cm(29.7), Cm(21)
+    for side in ("left_margin", "right_margin", "top_margin", "bottom_margin"):
+        setattr(sec, side, Cm(2.2))
+    sec._sectPr.append(OxmlElement("w:bidi"))
+    _para(doc, title, size=20, bold=True, color="183478", center=True)
+    _para(doc, "الوكلاء: " + "، ".join(n for n, _, _ in items) + " · " + time.strftime("%Y-%m-%d %H:%M"), size=10, color="6B7587", center=True)
+    same_q = len({q.strip() for _, q, _ in items}) == 1
+    if same_q:
+        lab = _para(doc, "السؤال", size=12, bold=True, color="183478")
+        _shade(lab, "F2F5F9")
+        _shade(_para(doc, items[0][1].strip(), size=13), "F2F5F9")
+    for name, q, a in items:
+        h = doc.add_heading(level=1)
+        _font(h.add_run("جواب " + name), size=16, bold=True, color="183478")
+        _rtl(h)
+        if not same_q:
+            _shade(_para(doc, q.strip(), size=12), "F2F5F9")
+        _body(doc, a)
+    fp = sec.footer.paragraphs[0]
+    _font(fp.add_run("زاجل · " + "، ".join(n for n, _, _ in items)), size=9, color="8B95A7")
+    _rtl(fp)
+    doc.save(str(out_path))
+    return out_path
+
+
+def export_many(entries, out_dir=None):
+    """entries: [(agent_id, agent_name, screen_text, cwd)]. يجمع ما اكتمل من أجوبة في ملف واحد ويذكر من لم يكتمل."""
+    items, missing = [], []
+    for aid, name, text, cwd in entries:
+        q, a = last_exchange(aid, text, cwd)
+        (items.append((name, q, a)) if q and a.strip() else missing.append(name))
+    if not items:
+        raise ValueError("لم يكتمل جواب أي وكيل من الوكلاء المعروضين بعد.")
+    title = short_title(items[0][1], "").strip() + " — " + "، ".join(n for n, _, _ in items)
+    out_dir = Path(out_dir or HOME / "Downloads")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    base, n = _safe(title), 1
+    path = out_dir / f"{base}.docx"
+    while path.exists():
+        n += 1
+        path = out_dir / f"{base} ({n}).docx"
+    build_many(title, items, path)
+    return {"ok": True, "path": str(path), "title": title, "missing": missing}
+
+
 def _safe(name):
     return re.sub(r"[\\/:*?\"<>|\n\r\t]+", " ", name).strip()[:90] or "جواب"
 

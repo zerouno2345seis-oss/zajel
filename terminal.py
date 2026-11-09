@@ -350,6 +350,22 @@ def _tail(i, n=6):
     return "\n".join(lines[-n:])
 
 
+_STABLE = {}      # معرّف ← (نص الشاشة بلا أرقام ورموز دوران، منذ متى لم يتغير)
+_SPIN = re.compile(r"[0-9⠀-⣿◐◓◑◒✻✶✳✢·•*|/\\\-.]+")
+
+
+def _still(i):
+    """بعض الوكلاء (Antigravity وHermes) يحرّكون شاشتهم دائمًا: مؤشر يدور، ساعة، عدّاد.
+    فحركة الشاشة وحدها ليست عملًا: إن لم يتغير نصها الحقيقي منذ ثوانٍ فالوكيل هادئ."""
+    cur = _SPIN.sub("", _tail(i, 12))
+    old = _STABLE.get(i)
+    now = time.time()
+    if not old or old[0] != cur:
+        _STABLE[i] = (cur, now)
+        return False
+    return now - old[1] >= IDLE_SECS
+
+
 def state_of(i, live=None):
     """(الحالة، التسمية، ثوانٍ منذ آخر نشاط). الحالات: stopped, working, waiting, idle, shell."""
     live = _live() if live is None else live
@@ -364,7 +380,7 @@ def state_of(i, live=None):
         return "shell", "خرج الوكيل (الطرفية جاهزة)", idle
     if not a["cmd"] and cmd in SHELLS:
         return ("working", "ينفّذ أمرًا", idle) if idle < WORK_SECS else ("idle", "جاهزة", idle)
-    if idle < WORK_SECS:
+    if idle < WORK_SECS and not _still(i):
         return "working", "يعمل", idle
     if WAIT_RE.search(_tail(i)):
         return "waiting", "ينتظر ردّك", idle
@@ -1062,6 +1078,23 @@ def export_answer(i):
     text = _t("capture-pane", "-p", "-J", "-S", "-5000", "-t", n, timeout=15).stdout
     import answer_export
     r = answer_export.export(i, BY_ID[i]["name"], text, cwd(i).get("path", ""))
+    subprocess.Popen(["open", r["path"]], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return r
+
+
+def export_all(ids):
+    """أجوبة الوكلاء المعروضين الآن ← مستند Word واحد."""
+    import answer_export
+    entries = []
+    for i in [x for x in dict.fromkeys(ids or []) if x in BY_ID and BY_ID[x]["cmd"]]:
+        n = _name(i)
+        if _t("has-session", "-t", n).returncode != 0:
+            continue
+        text = _t("capture-pane", "-p", "-J", "-S", "-5000", "-t", n, timeout=15).stdout
+        entries.append((i, BY_ID[i]["name"], text, cwd(i).get("path", "")))
+    if not entries:
+        raise ValueError("لا وكيل يعمل في الشاشات المعروضة.")
+    r = answer_export.export_many(entries)
     subprocess.Popen(["open", r["path"]], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return r
 
