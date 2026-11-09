@@ -758,4 +758,26 @@ body.as-docked .ov,body.as-docked .gallery,body.as-docked .lb{left:var(--as-dock
 <script src="/assistant_nav.js"></script>
 <script src="/terminal_theme.js"></script>
 <script src="/terminal_ui.js"></script>
+<script>
+  if (new URLSearchParams(location.search).get('mode') === 'terminal') {
+    document.body.classList.add('term-app');
+    const st = document.createElement('style');
+    st.textContent = 'body.term-app > *:not(#zajel-term-window){display:none!important}';
+    document.head.appendChild(st);
+    const start = () => {
+      try {
+        if (window.ZajelTerminalUI && window.ZajelTerminalUI.toggleWindow) {
+          window.ZajelTerminalUI.toggleWindow('terminals', { app: true });
+        }
+      } catch (e) {
+        console.error('فشل تشغيل طرفية زاجل:', e);
+      }
+    };
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', start);
+    } else {
+      start();
+    }
+  }
+</script>
 </body></html>

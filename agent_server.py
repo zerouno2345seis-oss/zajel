@@ -681,48 +681,18 @@ def handle(h, method):
             b = _body(h); S.chat_rename(str(b.get("id", "")), b.get("title")); h.send_json({"chats": S.chats_list()})
         elif path == "/api/assistant/chat/delete" and method == "POST":
             S.chat_delete(str(_body(h).get("id", ""))); h.send_json({"chats": S.chats_list()})
-        elif path == "/api/term/council/status":
-            import terminal
-            h.send_json(terminal.council_view(query.get("id", [""])[0]))
-        elif path == "/api/term/council/history":
-            import terminal
-            h.send_json({"rounds": terminal.council_history()})
-        elif path == "/api/term/council/check":
-            import terminal
-            h.send_json(terminal.council_check(query.get("ids", [""])[0], query.get("force", ["0"])[0] in ("1", "true")))
-        elif path == "/api/term/council/agents":
-            import terminal
-            h.send_json(terminal.council_agents())
-        elif path == "/api/term/council/profiles" and method == "GET":
-            import terminal
-            h.send_json(terminal.council_profiles())
-        elif path.startswith("/api/term/council/") and method == "POST":
-            import terminal
-            b = _body(h)
-            act = path.rsplit("/", 1)[1]
-            if act == "send":
-                lim = b.get("limit")
-                h.send_json(terminal.council_start(b.get("ids") or [], b.get("text", ""), str(b.get("main", "")), b.get("evaluate", True), b.get("attachments") or [], str(b.get("parent", "")),
-                                                   None if lim is None or lim == "" else int(lim or 0), str(b.get("mode", "direct")), str(b.get("depth", "bal")),
-                                                   bool(b.get("blind", True)), bool(b.get("review", False)), bool(b.get("verify", True))))
-            elif act == "profiles":
-                h.send_json(terminal.council_set_profile(str(b.get("id", "")), b.get("patch") or {}))
-            elif act == "stop":
-                h.send_json(terminal.council_stop(str(b.get("id", ""))))
-            elif act == "evaluate":
-                h.send_json(terminal.council_evaluate(str(b.get("id", ""))))
-            elif act == "deliver":
-                import telegram_extras
-                h.send_json(telegram_extras.deliver(str(b.get("id", "")), str(b.get("target", "telegram"))))
-            elif act == "warm":
-                h.send_json(terminal.warm(b.get("ids") or []))
-            elif act == "export":
-                h.send_json(terminal.council_export(str(b.get("id", "")), str(b.get("fmt", "md"))))
-            else:
-                h.send_json({"error": "غير موجود."}, 404)
         elif path == "/api/term/list":
             import terminal
             h.send_json(terminal.listing())
+        elif path == "/api/term/broadcast_status":
+            import terminal
+            h.send_json(terminal.broadcast_status(query.get("ids", [""])[0]))
+        elif path == "/api/term/custom":
+            import terminal
+            h.send_json(terminal.custom_get())
+        elif path == "/api/term/cwd":
+            import terminal
+            h.send_json(terminal.cwd(query.get("id", [""])[0]))
         elif path == "/api/term/screen":
             import terminal
             h.send_json(terminal.screen(query.get("id", [""])[0], query.get("since", [""])[0], int(query.get("hist", ["0"])[0] or 0)))
@@ -730,27 +700,44 @@ def handle(h, method):
             import terminal
             b = _body(h)
             i, act = str(b.get("id", "")), path.rsplit("/", 1)[1]
-            if act == "start":
-                h.send_json(terminal.start(i, str(b.get("cwd", ""))))
-            elif act == "stop":
-                h.send_json(terminal.stop(i))
-            elif act == "restart":
-                h.send_json(terminal.restart(i))
-            elif act == "send":
-                h.send_json(terminal.send(i, str(b.get("text", "")), b.get("keys") or [], bool(b.get("paste"))))
-            elif act == "resize":
-                h.send_json(terminal.resize(i, b.get("cols", 100), b.get("rows", 30)))
-            elif act == "notify":
-                h.send_json(terminal.set_notify(b.get("on")))
-            elif act == "health":
-                if i and b.get("check"):
-                    h.send_json(terminal.health_check(i, bool(b.get("force")), bool(b.get("repair")), bool(b.get("confirm"))))
+            try:
+                if act == "export_answer":
+                    h.send_json(terminal.export_answer(i))
+                elif act == "broadcast":
+                    h.send_json(terminal.broadcast(b.get("ids") or [], b.get("text", "")))
+                elif act == "start":
+                    h.send_json(terminal.start(i, str(b.get("cwd", ""))))
+                elif act == "stop":
+                    h.send_json(terminal.stop(i))
+                elif act == "restart":
+                    h.send_json(terminal.restart(i, str(b.get("cwd", ""))))
+                elif act == "send":
+                    h.send_json(terminal.send(i, str(b.get("text", "")), b.get("keys") or [], bool(b.get("paste"))))
+                elif act == "resize":
+                    h.send_json(terminal.resize(i, b.get("cols", 100), b.get("rows", 30)))
+                elif act == "notify":
+                    h.send_json(terminal.set_notify(b.get("on")))
+                elif act == "health":
+                    if i and b.get("check"):
+                        h.send_json(terminal.health_check(i, bool(b.get("force")), bool(b.get("repair")), bool(b.get("confirm"))))
+                    else:
+                        h.send_json(terminal.health_all())
+                elif act == "guard":
+                    h.send_json(terminal.set_guard(b.get("on")) if "on" in b else terminal.guard_status())
+                elif act == "agent_add":
+                    h.send_json(terminal.agent_add(b))
+                elif act == "agent_remove":
+                    h.send_json(terminal.agent_remove(i))
+                elif act == "shortcut_add":
+                    h.send_json(terminal.shortcut_add(b))
+                elif act == "shortcut_remove":
+                    h.send_json(terminal.shortcut_remove(i))
+                elif act == "open_path":
+                    h.send_json(terminal.open_path(i, str(b.get("path", ""))))
                 else:
-                    h.send_json(terminal.health_all())
-            elif act == "guard":
-                h.send_json(terminal.set_guard(b.get("on")) if "on" in b else terminal.guard_status())
-            else:
-                h.send_json({"error": "غير موجود."}, 404)
+                    h.send_json({"error": "غير موجود."}, 404)
+            except ValueError as e:
+                h.send_json({"error": str(e)}, 400)
         elif path == "/api/assistant/whatsapp/status":
             import whatsapp_watch
             h.send_json(whatsapp_watch.status())

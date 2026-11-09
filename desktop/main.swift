@@ -3,6 +3,13 @@
 // ويوقفه عند الخروج. نسخة واحدة فقط، ونقرة الـDock تُعيد النافذة نفسها.
 import Cocoa
 import WebKit
+import Carbon.HIToolbox
+
+// برنامجان من ملف واحد: «زاجل» الكامل، و«طرفية زاجل» (ZajelMode=terminal في Info.plist) يفتح على الطرفيات مباشرة.
+// كلاهما يستعمل الخادم نفسه على 127.0.0.1 إن كان يعمل، فالجلسات والإعدادات واحدة.
+let MODE = (Bundle.main.object(forInfoDictionaryKey: "ZajelMode") as? String) ?? "main"
+let TERM = MODE == "terminal"
+let APPNAME = TERM ? "طرفية زاجل" : "زاجل"
 
 // «الباب» الداخلي بين النافذة والخادم: 8765 إن كان فارغًا أو يعمل عليه زاجل نفسه، وإلا أول باب فارغ بعده
 // (على جهاز آخر قد يشغل 8765 برنامج آخر فلا يقوم الخادم).
@@ -18,11 +25,41 @@ func portFree(_ port: Int) -> Bool {
     return withUnsafePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) } } == 0
 }
 
+/// صفحة زاجل لا تعرف مسار الملف المسحوب إليها (المتصفح يعطيها الاسم فقط)، فيلتقط البرنامج الإفلات
+/// ويسلّم المسارات الكاملة إلى الطرفية التي أُفلتت فوقها (ZajelTermApp.dropPaths). غير ذلك يمضي كما هو.
+final class DropWebView: WKWebView {
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        let urls = (sender.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL]) ?? []
+        if !urls.isEmpty {
+            let p = convert(sender.draggingLocation, from: nil)
+            let y = isFlipped ? p.y : bounds.height - p.y
+            let mag = max(0.1, magnification)
+            let items = urls.map { u -> [String: Any] in
+                var dir: ObjCBool = false
+                FileManager.default.fileExists(atPath: u.path, isDirectory: &dir)
+                return ["path": u.path, "dir": dir.boolValue]
+            }
+            if let data = try? JSONSerialization.data(withJSONObject: items), let json = String(data: data, encoding: .utf8) {
+                let js = "window.ZajelTermApp && window.ZajelTermApp.dropPaths ? window.ZajelTermApp.dropPaths(\(json), \(p.x / mag), \(y / mag)) : false"
+                var handled = false
+                let sem = DispatchSemaphore(value: 0)
+                evaluateJavaScript(js) { r, _ in handled = (r as? Bool) ?? false; sem.signal() }
+                // الانتظار بلا حجب حلقة الأحداث: تُدار حتى يجيب الـJavaScript (أقصى ثانية)
+                let until = Date().addingTimeInterval(1)
+                while sem.wait(timeout: .now()) == .timedOut && Date() < until { RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01)) }
+                if handled { return true }
+            }
+        }
+        return super.performDragOperation(sender)
+    }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNavigationDelegate {
     var window: NSWindow!
     var web: WKWebView!
     var server: Process?
     var logHandle: FileHandle?
+    var onSplash = true     // الصفحة الحالية رسالة انتظار أو خطأ، لا الواجهة
 
     // MARK: دورة الحياة
     func applicationDidFinishLaunching(_ n: Notification) {
@@ -36,7 +73,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
             for _ in 0..<60 { if self.healthy() { ok = true; break }; Thread.sleep(forTimeInterval: 0.25) }
             self.startWatchdog()
             DispatchQueue.main.async {
-                if ok { self.web.load(URLRequest(url: BASE)) }
+                if ok { self.web.load(URLRequest(url: self.homeURL())) }
+                if TERM { self.startTerminalExtras() }
                 else { self.showSplash("تعذّر تشغيل الخادم. راجع السجل:\n~/Library/Application Support/Phone Backup/server.log") }
             }
         }
@@ -57,16 +95,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
             var misses = 0
             while true {
                 Thread.sleep(forTimeInterval: 4)
-                if self.healthy() { misses = 0; continue }
+                // الخادم صار يجيب والنافذة ما زالت على رسالة الخطأ (البرنامج الآخر شغّله بعد مهلتنا): افتح الواجهة
+                if self.healthy() { misses = 0; if self.onSplash { DispatchQueue.main.async { self.web.load(URLRequest(url: self.homeURL())) } }; continue }
                 misses += 1
                 if misses < 2 { continue }
                 if self.server == nil || self.server?.isRunning == false { self.startServer() }
                 for _ in 0..<40 { if self.healthy() { break }; Thread.sleep(forTimeInterval: 0.25) }
-                if self.healthy() { DispatchQueue.main.async { self.web.load(URLRequest(url: BASE)) } }
+                if self.healthy() { DispatchQueue.main.async { self.web.load(URLRequest(url: self.homeURL())) } }
                 misses = 0
             }
         }
     }
+
+    func homeURL() -> URL { TERM ? URL(string: BASE.absoluteString + "?mode=terminal")! : BASE }
 
     func dataDir() -> URL {
         let d = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Phone Backup")
@@ -141,19 +182,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         cfg.preferences.javaScriptCanOpenWindowsAutomatically = true
         cfg.preferences.setValue(true, forKey: "developerExtrasEnabled")
         cfg.applicationNameForUserAgent = "PhoneBackupDesktop/1.0"
-        web = WKWebView(frame: .zero, configuration: cfg)
+        web = DropWebView(frame: .zero, configuration: cfg)
         web.uiDelegate = self; web.navigationDelegate = self
         web.allowsMagnification = true
         web.setValue(false, forKey: "drawsBackground")
 
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1320, height: 840),
                           styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
-        window.title = "زاجل"
+        window.title = APPNAME
         window.minSize = NSSize(width: 760, height: 520)
         window.contentView = web
         window.backgroundColor = .windowBackgroundColor
-        window.setFrameAutosaveName("PhoneBackupMain")
-        if !window.setFrameUsingName("PhoneBackupMain") { window.center() }
+        let frameName = TERM ? "ZajelTerminalWin" : "PhoneBackupMain"
+        window.setFrameAutosaveName(frameName)
+        if !window.setFrameUsingName(frameName) {
+            // الطرفية تبدأ أول مرة بمساحة الشاشة كلها
+            if TERM, let f = NSScreen.main?.visibleFrame { window.setFrame(f, display: true) } else { window.center() }
+        }
         window.isReleasedWhenClosed = false
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
@@ -165,6 +210,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         font:15px -apple-system,'SF Arabic',sans-serif;color:#888;background:transparent;white-space:pre-line;text-align:center">
         \(msg)</body></html>
         """
+        onSplash = true
         web.loadHTMLString(html, baseURL: nil)
     }
 
@@ -173,6 +219,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         if let u = a.request.url, let host = u.host, host != "127.0.0.1", host != "localhost", u.scheme?.hasPrefix("http") == true {
             NSWorkspace.shared.open(u); decisionHandler(.cancel); return
         }
+        // ملف أُفلت خارج الطرفية: لا تغادر الصفحة إليه (كانت النافذة تصير عارض ملفات)
+        if a.request.url?.isFileURL == true { decisionHandler(.cancel); return }
         decisionHandler(.allow)
     }
     func webView(_ w: WKWebView, createWebViewWith c: WKWebViewConfiguration, for a: WKNavigationAction, windowFeatures f: WKWindowFeatures) -> WKWebView? {
@@ -180,6 +228,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         return nil
     }
     func webViewWebContentProcessDidTerminate(_ w: WKWebView) { w.reload() }
+    func webView(_ w: WKWebView, didFinish n: WKNavigation!) { if w.url?.host == "127.0.0.1" { onSplash = false } }
 
     // MARK: نوافذ JavaScript الأصلية (تنبيه، تأكيد، إدخال، اختيار ملف)
     func webView(_ w: WKWebView, runJavaScriptAlertPanelWithMessage m: String, initiatedByFrame f: WKFrameInfo, completionHandler: @escaping () -> Void) {
@@ -214,14 +263,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
             let i = NSMenuItem(title: t, action: a, keyEquivalent: k); i.keyEquivalentModifierMask = m; if let t = target { i.target = t }; return i
         }
         let appM = NSMenu()
-        appM.addItem(item("حول زاجل", #selector(NSApplication.orderFrontStandardAboutPanel(_:)), ""))
+        appM.addItem(item("حول " + APPNAME, #selector(NSApplication.orderFrontStandardAboutPanel(_:)), ""))
         appM.addItem(.separator())
         appM.addItem(item("فتح مجلد بيانات البرنامج", #selector(openData(_:)), "", target: self))
         appM.addItem(.separator())
-        appM.addItem(item("إخفاء زاجل", #selector(NSApplication.hide(_:)), "h"))
+        appM.addItem(item("إخفاء " + APPNAME, #selector(NSApplication.hide(_:)), "h"))
         appM.addItem(item("إخفاء الآخرين", #selector(NSApplication.hideOtherApplications(_:)), "h", [.command, .option]))
         appM.addItem(.separator())
-        appM.addItem(item("إنهاء زاجل", #selector(NSApplication.terminate(_:)), "q"))
+        appM.addItem(item("إنهاء " + APPNAME, #selector(NSApplication.terminate(_:)), "q"))
         let a = NSMenuItem(); a.submenu = appM; main.addItem(a)
 
         let edit = NSMenu(title: "تحرير")
@@ -249,10 +298,137 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         win.addItem(item("تكبير النافذة", #selector(NSWindow.performZoom(_:)), ""))
         win.addItem(item("إغلاق النافذة", #selector(NSWindow.performClose(_:)), "w", [.command, .shift]))
         win.addItem(.separator())
-        win.addItem(item("زاجل", #selector(showMain(_:)), "1", target: self))
+        win.addItem(item(APPNAME, #selector(showMain(_:)), "1", target: self))
         let w = NSMenuItem(); w.submenu = win; main.addItem(w)
         NSApp.windowsMenu = win
         NSApp.mainMenu = main
+    }
+
+    // MARK: إضافات «طرفية زاجل»: الدائرة على الأيقونة، قائمة الزر الأيمن، مفتاح الاستدعاء
+    var agents: [[String: Any]] = []
+    var lastWaiting = 0
+
+    func startTerminalExtras() {
+        registerHotKey()
+        DispatchQueue.global().async {
+            while true {
+                self.pollAgents()
+                Thread.sleep(forTimeInterval: 3)
+            }
+        }
+    }
+
+    func pollAgents() {
+        var req = URLRequest(url: BASE.appendingPathComponent("api/term/list")); req.timeoutInterval = 2
+        let sem = DispatchSemaphore(value: 0)
+        URLSession.shared.dataTask(with: req) { d, _, _ in
+            defer { sem.signal() }
+            guard let d = d, let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+                  let rows = j["agents"] as? [[String: Any]] else { return }
+            let waiting = rows.filter { ($0["state"] as? String) == "waiting" }.count
+            DispatchQueue.main.async {
+                self.agents = rows
+                NSApp.dockTile.badgeLabel = waiting > 0 ? String(waiting) : nil
+                if waiting > self.lastWaiting && !NSApp.isActive { NSApp.requestUserAttention(.informationalRequest) }
+                self.lastWaiting = waiting
+            }
+        }.resume()
+        _ = sem.wait(timeout: .now() + 3)
+    }
+
+    /// طلب إلى الخادم بالعنوان نفسه الذي ترسله الواجهة (الخادم يرفض طلبات الكتابة من مصدر غريب)
+    func post(_ act: String, _ body: [String: Any]) {
+        var req = URLRequest(url: BASE.appendingPathComponent("api/term/" + act)); req.httpMethod = "POST"; req.timeoutInterval = 30
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue("http://127.0.0.1:\(PORT)", forHTTPHeaderField: "Origin")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        URLSession.shared.dataTask(with: req) { _, _, _ in DispatchQueue.global().async { self.pollAgents() } }.resume()
+    }
+
+    func js(_ code: String) {
+        showMain(nil); NSApp.activate(ignoringOtherApps: true)
+        web.evaluateJavaScript("window.ZajelTermApp && " + code, completionHandler: nil)
+    }
+
+    func confirm(_ title: String, _ info: String) -> Bool {
+        NSApp.activate(ignoringOtherApps: true)
+        let a = NSAlert(); a.messageText = title; a.informativeText = info
+        a.addButton(withTitle: "أعد التشغيل"); a.addButton(withTitle: "إلغاء")
+        return a.runModal() == .alertFirstButtonReturn
+    }
+
+    var runnable: [[String: Any]] { agents.filter { !(($0["cmd"] as? String) ?? "").isEmpty && ($0["installed"] as? Bool) != false } }
+
+    func applicationDockMenu(_ s: NSApplication) -> NSMenu? {
+        guard TERM else { return nil }
+        let m = NSMenu()
+        let dots = ["working": "🟢", "waiting": "🟡", "idle": "⚪️", "shell": "⚪️", "stopped": "⚫️"]
+        for a in agents {
+            guard let id = a["id"] as? String else { continue }
+            let name = (a["name"] as? String) ?? id, st = (a["state"] as? String) ?? "", lab = (a["label"] as? String) ?? ""
+            let sub = NSMenu()
+            for (t, act) in [("افتح هنا", "open"), ("شغّل", "start"), ("أعد التشغيل", "restart"), ("افحص", "check")] {
+                if act == "check" && ((a["cmd"] as? String) ?? "").isEmpty { continue }
+                let i = NSMenuItem(title: t, action: #selector(dockAction(_:)), keyEquivalent: ""); i.target = self
+                i.representedObject = [act, id, name]; sub.addItem(i)
+            }
+            let row = NSMenuItem(title: "\(dots[st] ?? "⚪️") \(name)" + (lab.isEmpty ? "" : " — \(lab)"), action: nil, keyEquivalent: "")
+            row.submenu = sub; m.addItem(row)
+        }
+        if agents.isEmpty { m.addItem(NSMenuItem(title: "يجري تحميل الوكلاء…", action: nil, keyEquivalent: "")) }
+        m.addItem(.separator())
+        for (t, act) in [("شغّل كل الوكلاء", "startAll"), ("افحص كل الوكلاء", "checkAll"), ("أعد تشغيل كل الوكلاء", "restartAll")] {
+            let i = NSMenuItem(title: t, action: #selector(dockAction(_:)), keyEquivalent: ""); i.target = self; i.representedObject = [act, "", ""]; m.addItem(i)
+        }
+        m.addItem(.separator())
+        for (t, act) in [("أرسل لعدة وكلاء", "broadcast"), ("افتح زاجل الكامل", "main")] {
+            let i = NSMenuItem(title: t, action: #selector(dockAction(_:)), keyEquivalent: ""); i.target = self; i.representedObject = [act, "", ""]; m.addItem(i)
+        }
+        return m
+    }
+
+    @objc func dockAction(_ sender: NSMenuItem) {
+        guard let o = sender.representedObject as? [String], o.count == 3 else { return }
+        let act = o[0], id = o[1], name = o[2]
+        let safeId = id.replacingOccurrences(of: "'", with: "")
+        switch act {
+        case "open": js("ZajelTermApp.open('\(safeId)')")
+        case "start": post("start", ["id": id])
+        case "restart":
+            if confirm("إعادة تشغيل \(name)؟", "سيتوقف ما يكتبه الآن، ويبدأ من جديد.") { post("restart", ["id": id]) }
+        case "check": post("health", ["id": id, "check": true, "force": true])
+        case "startAll": for a in runnable { if let i = a["id"] as? String, (a["state"] as? String) == "stopped" { post("start", ["id": i]) } }
+        case "checkAll": for a in runnable { if let i = a["id"] as? String { post("health", ["id": i, "check": true, "force": true]) } }
+        case "restartAll":
+            if confirm("إعادة تشغيل كل الوكلاء؟", "سيتوقف كل وكيل يعمل الآن عمّا يكتبه، ويبدأ من جديد.") {
+                for a in runnable { if let i = a["id"] as? String { post("restart", ["id": i]) } }
+            }
+        case "broadcast": js("ZajelTermApp.broadcast()")
+        case "main":
+            if let u = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.mohamad.phonebackup") {
+                NSWorkspace.shared.openApplication(at: u, configuration: NSWorkspace.OpenConfiguration(), completionHandler: nil)
+            }
+        default: break
+        }
+    }
+
+    /// مفتاح الاستدعاء (الافتراضي ⌥ مسافة). يُغيَّر بـ: defaults write com.mohamad.zajel.terminal HotKey control-option | off
+    func registerHotKey() {
+        let pref = UserDefaults.standard.string(forKey: "HotKey") ?? "option"
+        if pref == "off" { return }
+        let mods = pref == "control-option" ? UInt32(controlKey | optionKey) : UInt32(optionKey)
+        var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
+        InstallEventHandler(GetApplicationEventTarget(), { _, _, _ in
+            DispatchQueue.main.async { delegate.toggleVisible() }
+            return noErr
+        }, 1, &spec, nil, nil)
+        var ref: EventHotKeyRef?
+        RegisterEventHotKey(UInt32(kVK_Space), mods, EventHotKeyID(signature: OSType(0x5A4A544D), id: 1), GetApplicationEventTarget(), 0, &ref)
+    }
+
+    func toggleVisible() {
+        if NSApp.isActive && window.isVisible && !window.isMiniaturized { NSApp.hide(nil) }
+        else { window.deminiaturize(nil); showMain(nil); NSApp.activate(ignoringOtherApps: true) }
     }
 }
 

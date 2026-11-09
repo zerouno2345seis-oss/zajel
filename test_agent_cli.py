@@ -6,10 +6,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-import council_agents as ca
+import agent_cli as ca
 
 
-class CouncilAgentsTests(unittest.TestCase):
+class AgentCliTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         ca.init(self.tmp.name)
@@ -107,7 +107,7 @@ if __name__ == "__main__":
 
 class EventParseTests(unittest.TestCase):
     def test_codex_and_agy_events(self):
-        import json as j, council_agents as c
+        import json as j, agent_cli as c
         ev = []
         st = {"text": "", "raw": ""}
         f = lambda k, d: ev.append((k, d))

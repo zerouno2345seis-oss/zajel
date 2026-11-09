@@ -240,6 +240,25 @@ def sync_run():
         rs.write_text(ls.read_text(encoding="utf-8"), encoding="utf-8"); settings = "pushed"
     elif rs.exists() and not ls.exists():
         ls.write_text(rs.read_text(encoding="utf-8"), encoding="utf-8"); settings = "pulled"
+    # تخصيصات الطرفية: الأحدث يفوز
+    rtc, ltc = repo / "terminal_custom.json", DATA / "terminal_custom.json"
+    term_custom = "same"
+    if rtc.exists() and ltc.exists() and rtc.read_text(encoding="utf-8") != ltc.read_text(encoding="utf-8"):
+        if _git_time(repo, "terminal_custom.json") > ltc.stat().st_mtime:
+            ltc.write_text(rtc.read_text(encoding="utf-8"), encoding="utf-8"); term_custom = "pulled"
+        else:
+            rtc.write_text(ltc.read_text(encoding="utf-8"), encoding="utf-8"); term_custom = "pushed"
+    elif ltc.exists() and not rtc.exists():
+        rtc.write_text(ltc.read_text(encoding="utf-8"), encoding="utf-8"); term_custom = "pushed"
+    elif rtc.exists() and not ltc.exists():
+        ltc.write_text(rtc.read_text(encoding="utf-8"), encoding="utf-8"); term_custom = "pulled"
+    if term_custom == "pulled":
+        try:
+            import terminal
+            terminal._load_custom()
+            terminal._apply_custom()
+        except Exception:
+            pass
     # المكتبة: السكربتات تُضاف وتُحدَّث بحسب الأحدث (الحذف لا ينتقل)
     sc_add = sc_upd = 0
     try:

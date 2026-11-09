@@ -1,4 +1,4 @@
-"""تشغيل وكلاء المجلس ببيئة مقيدة."""
+"""تشغيل الوكلاء ببيئة مقيدة."""
 import json
 import os
 import re
@@ -37,7 +37,7 @@ def init(data_dir):
     global DATA, _PROFILES
     DATA = Path(data_dir)
     try:
-        loaded = json.loads((DATA / "council_profiles.json").read_text(encoding="utf-8"))
+        loaded = json.loads((DATA / "agent_profiles.json").read_text(encoding="utf-8"))
         if isinstance(loaded, dict):
             _PROFILES = {str(k): _clean_profile(str(k), v) for k, v in loaded.items() if isinstance(v, dict)}
     except (OSError, ValueError):
@@ -68,9 +68,9 @@ def set_profile(agent_id, patch):
         _PROFILES[agent_id] = profile
         try:
             DATA.mkdir(parents=True, exist_ok=True)
-            tmp = DATA / "council_profiles.json.tmp"
+            tmp = DATA / "agent_profiles.json.tmp"
             tmp.write_text(json.dumps(_PROFILES, ensure_ascii=False, indent=2), encoding="utf-8")
-            tmp.replace(DATA / "council_profiles.json")
+            tmp.replace(DATA / "agent_profiles.json")
         except OSError:
             pass
         return dict(profile)
@@ -91,7 +91,7 @@ def can_run(agent_id):
 
 def _mcp_tools():
     try:
-        data = json.loads((DATA / "council_mcp_tools.json").read_text(encoding="utf-8"))
+        data = json.loads((DATA / "agent_mcp_tools.json").read_text(encoding="utf-8"))
         if time.time() - float(data.get("time", 0)) < 86400 and isinstance(data.get("tools"), list):
             return data["tools"]
     except (OSError, ValueError, TypeError):
@@ -156,7 +156,7 @@ def _command(agent_id, prompt, profile, depth, add_dirs, answer_file, timeout=90
 
 def _save_mcp_tools(tools):
     try:
-        (DATA / "council_mcp_tools.json").write_text(json.dumps({"time": time.time(), "tools": [t for t in tools if str(t).startswith("mcp__")]},
+        (DATA / "agent_mcp_tools.json").write_text(json.dumps({"time": time.time(), "tools": [t for t in tools if str(t).startswith("mcp__")]},
                                                                  ensure_ascii=False), encoding="utf-8")
     except OSError:
         pass
@@ -281,7 +281,7 @@ def run(agent_id, prompt, *, depth="bal", workdir=None, add_dirs=(), on_event=No
         if not can_run(agent_id):
             result["error"] = "الأداة غير موجودة في PATH"
             return result
-        with tempfile.TemporaryDirectory(prefix="council-") as td:
+        with tempfile.TemporaryDirectory(prefix="agent-") as td:
             answer = Path(td) / "answer.txt"
             stdout_path, stderr_path = Path(td) / "stdout", Path(td) / "stderr"
             cmd = _command(agent_id, str(prompt), profile, depth, list(add_dirs), answer, timeout)

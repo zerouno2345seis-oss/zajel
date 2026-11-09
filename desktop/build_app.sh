@@ -9,6 +9,7 @@ rm -rf "$OUT/Phone Backup.app"
 # أغلق النسخة العاملة وانتظر خروجها فعلًا قبل حذفها؛ وإلا بقيت حيّة بلا ملفات فلا يبدأ خادمها، و«open» يوقظها هي لا الجديدة
 if pgrep -f "/MacOS/PhoneBackup" >/dev/null 2>&1; then
   osascript -e 'tell application id "com.mohamad.phonebackup" to quit' >/dev/null 2>&1 || true
+  osascript -e 'tell application id "com.mohamad.zajel.terminal" to quit' >/dev/null 2>&1 || true
   i=0; while pgrep -f "/MacOS/PhoneBackup" >/dev/null 2>&1 && [ $i -lt 40 ]; do sleep 0.25; i=$((i+1)); done
   pkill -f "/MacOS/PhoneBackup" 2>/dev/null || true
   pkill -f "Resources/server/samsung_backup_web.py" 2>/dev/null || true
@@ -19,7 +20,7 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/server"
 /usr/bin/swiftc -O -target arm64-apple-macos13.0 -o "$APP/Contents/MacOS/PhoneBackup" "$ROOT/desktop/main.swift" -framework Cocoa -framework WebKit
 /usr/bin/swiftc -O -target arm64-apple-macos13.0 -o "$APP/Contents/MacOS/pbvision" "$ROOT/desktop/vision.swift" -framework Vision -framework ImageIO || echo "تعذّر بناء أداة تصنيف الصور؛ يعمل البرنامج بدونها."
-for f in "$ROOT"/*.py "$ROOT"/app.js "$ROOT"/ui.js "$ROOT"/assistant.js "$ROOT"/assistant_nav.js "$ROOT"/terminal_ui.js "$ROOT"/sections.js "$ROOT"/sw.js "$ROOT"/samsung_backup.html "$ROOT"/VERSION; do cp "$f" "$APP/Contents/Resources/server/"; done
+for f in "$ROOT"/*.py "$ROOT"/*.js "$ROOT"/samsung_backup.html "$ROOT"/VERSION; do cp "$f" "$APP/Contents/Resources/server/"; done
 cp -R "$ROOT/icons" "$APP/Contents/Resources/server/icons"
 rm -f "$APP/Contents/Resources/server/app.py"
 cp "$ROOT/icon.icns" "$APP/Contents/Resources/icon.icns"
@@ -56,3 +57,14 @@ PL
 ID=$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*\([0-9A-F]\{40\}\) "\(.*\)"/\1/p' | head -1)
 /usr/bin/codesign --force --deep --sign "${ID:--}" "$APP" >/dev/null 2>&1 || /usr/bin/codesign --force --deep --sign - "$APP" >/dev/null 2>&1 || true
 echo "$APP"
+
+# «طرفية زاجل»: البرنامج نفسه بمعرّف وأيقونة خاصين، ويفتح على الطرفيات مباشرة (ZajelMode=terminal)
+TAPP="$OUT/طرفية زاجل.app"
+rm -rf "$TAPP"
+cp -R "$APP" "$TAPP"
+[ -f "$ROOT/icon_terminal.icns" ] && cp "$ROOT/icon_terminal.icns" "$TAPP/Contents/Resources/icon.icns"
+PL="$TAPP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier com.mohamad.zajel.terminal" -c "Set :CFBundleName طرفية زاجل" \
+  -c "Set :CFBundleDisplayName طرفية زاجل" -c "Add :ZajelMode string terminal" "$PL"
+/usr/bin/codesign --force --deep --sign "${ID:--}" "$TAPP" >/dev/null 2>&1 || /usr/bin/codesign --force --deep --sign - "$TAPP" >/dev/null 2>&1 || true
+echo "$TAPP"

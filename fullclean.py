@@ -230,7 +230,7 @@ def ask_ai(f, results, plan) -> str:
     """يطلب من الوكيل الأساسي قراءة الخلاصة وكتابة رؤيته؛ إن تعذّر يبقى التحليل الآلي وحده."""
     try:
         import agent_runner
-        import council_agents
+        import agent_cli
         agent = f.get("agent") or agent_runner.settings().get("default_agent") or "agy"
         lines = []
         for o in plan["overview"]:
@@ -252,7 +252,7 @@ def ask_ai(f, results, plan) -> str:
                   "\n\nلا تقترح حذف أي بند من بنود «يحتاج خطوة من المستخدم»؛ هذه معلومات أو خطوات إرشادية وليست عناصر حذف. "
                   "اكتب بالعربية، في أقل من 180 كلمة وبنقاط قصيرة: (١) تقييمك للوضع العام وأين تضيع المساحة. (٢) ترتيب التنفيذ الأنسب ولماذا. "
                   "(٣) ما الذي يجب مراجعته يدويًا قبل الحذف، وأي مخاطر. (٤) اقتراحات تحسين دائمة (عادات أو أتمتة) تمنع عودة الفوضى. لا تنفّذ شيئًا ولا تستعمل أدوات.")
-        res = council_agents.run(agent, prompt, depth="fast", timeout=120)
+        res = agent_cli.run(agent, prompt, depth="fast", timeout=120)
         return (res.get("text") or "").strip() if res.get("ok") else ""
     except Exception:  # noqa: BLE001
         return ""

@@ -1,7 +1,7 @@
 (() => {
   'use strict';
   if (window.ZajelTerminalUI) return;
-  let councilApi = null, root = null, listTimer = null, screenTimer = null, resizeObserver = null, councilRoot = null, councilTimer = null, councilRoundId = '', councilPanel = null, councilFolded = true;
+  let root = null, listTimer = null, screenTimer = null, resizeObserver = null, broadcastPanel = null;
   let activeSlot = 0, agents = [], slots = [], layout = 1, notify = false, guard = true, hist = 1500, listBusy = false, builtLayout = 0, sendChain = Promise.resolve();
   const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const req = async (path, body) => {
@@ -46,22 +46,1034 @@
   }
   let themeHooked=false;
   function applyTheme(){const T=window.ZajelTermTheme;if(!T||!root)return;T.apply(root);if(themeHooked)return;themeHooked=true;T.onChange(()=>{if(root)T.apply(root);slots.forEach(x=>{x.hash='';});refreshScreens(true);});}
+  const agentColors = { claude: '#c96442', codex: '#3a4a5c', hermes: '#6b4bb8', agy: '#2f6fd6', opencode: '#2a8a72', pi: '#ec4899', grok: '#111827', shell: '#374151', shell2: '#374151' };
+  // رمز يدلّ على كل وكيل في الشريط (المطويّ خاصة)؛ الوكيل الذي يضيفه المستخدم يأخذ أول حرف من اسمه
+  const agentGlyphs = { shell: '▸_', shell2: '▸2', claude: '✻', codex: '⬡', hermes: '☤', agy: '✦', opencode: '{}', pi: 'π', grok: '◐' };
+  const glyphOf = (id, name) => agentGlyphs[id] || String(name || id || '?').trim().charAt(0).toUpperCase();
+  const colorOf = id => {
+    if (agentColors[id]) return agentColors[id];
+    let h = 0;
+    for (let i = 0; i < id.length; i++) h = ((h << 5) - h + id.charCodeAt(i)) | 0;
+    const p = ['#c96442', '#3a4a5c', '#6b4bb8', '#2f6fd6', '#2a8a72', '#ec4899', '#0f8f9a', '#d97706'];
+    return p[Math.abs(h) % p.length];
+  };
   function stateColor(s){return s==='working'?'#22c55e':s==='waiting'?'#eab308':s==='shell'?'#ef4444':'#94a3b8';}
   function send(slot, payload){sendChain=sendChain.then(()=>req('send',{id:slot.id,...payload})).then(()=>setMsg(slot,'')).catch(e=>setMsg(slot,'تعذّر الإرسال: '+(e&&e.message||'خطأ'),true));}
+
+  let barState = (() => { try { return localStorage.getItem('zajel_term_bar_state') || 'expanded'; } catch (_) { return 'expanded'; } })();
+  let barPos = (() => { try { return localStorage.getItem('zajel_term_bar_pos') || 'side'; } catch (_) { return 'side'; } })();
+  let shortcuts = [];
+  let shortcutsBusy = false;
+  let confirmRestart = null;
+  let confirmRemove = null;
+  let addingAgent = false;
+  let savingCwd = null;
+  let runningShortcutNotice = null;
+
+  function showToast(text) {
+    if (!root) return;
+    let t = root.querySelector('.as-term-toast');
+    if (!t) {
+      t = document.createElement('div');
+      t.className = 'as-term-toast';
+      t.setAttribute('role', 'status');
+      t.setAttribute('aria-live', 'polite');
+      t.style.cssText = 'position:absolute;bottom:16px;left:50%;transform:translateX(-50%);background:var(--term-ink,#fff);color:var(--rail,#111);padding:6px 14px;border-radius:8px;font-size:12px;z-index:99999;box-shadow:0 4px 16px rgba(0,0,0,0.4);transition:opacity .2s;pointer-events:none;opacity:0;';
+      root.appendChild(t);
+    }
+    t.textContent = text;
+    t.style.opacity = '1';
+    clearTimeout(t.timer);
+    t.timer = setTimeout(() => { if (t) t.style.opacity = '0'; }, Math.max(2200, String(text).length * 70));
+  }
+
+  async function refreshShortcuts() {
+    if (shortcutsBusy) return;
+    shortcutsBusy = true;
+    try {
+      const res = await fetch('/api/term/custom');
+      if (res.ok) {
+        const d = await res.json();
+        shortcuts = Array.isArray(d.shortcuts) ? d.shortcuts : [];
+      }
+    } catch (_) {
+    } finally {
+      shortcutsBusy = false;
+    }
+  }
+
+  function updateActiveCardHighlight() {
+    if (!root) return;
+    const curSlot = slots[Math.min(activeSlot, Math.max(0, slots.length - 1))];
+    const activeId = curSlot?.id || '';
+    root.querySelectorAll('.rail .agent[data-agent-id]').forEach(c => {
+      c.classList.toggle('sel', c.dataset.agentId === activeId);
+    });
+  }
+
+  function selectAgentForActiveSlot(id) {
+    const sl = slots[Math.min(activeSlot, Math.max(0, slots.length - 1))];
+    if (!sl) return;
+    sl.id = id;
+    sl.hash = '';
+    if (sl.select) sl.select.value = id;
+    refreshScreens(true);
+    updateActiveCardHighlight();
+  }
+
+  // لا يُعاد رسم الشريط وأنت تكتب في نموذج داخله أو تمرّ عليه بالفأرة (كانت القيم تُمسح كل ثانيتين)
+  function railBusy() {
+    const rail = root && root.querySelector('.rail');
+    if (!rail) return false;
+    if (addingAgent || savingCwd || confirmRestart || confirmRemove || runningShortcutNotice) return true;
+    const ae = document.activeElement;
+    return !!(ae && rail.contains(ae) && /^(INPUT|SELECT|TEXTAREA)$/.test(ae.tagName)) || rail.matches(':hover');
+  }
+
+  // اسم الوكيل يظهر فور مرور المؤشر عليه في الشريط المطوي. التلميح يُرسم فوق كل شيء
+  // (position:fixed)، لأن قائمة الشريط تقصّ ما يخرج عن حدودها.
+  function bindRailTips(rail) {
+    if (rail._tips) return;
+    rail._tips = true;
+    let f = null;
+    const hide = () => { if (f) { f.remove(); f = null; } };
+    rail.addEventListener('mouseover', e => {
+      const card = e.target.closest('.agent');
+      const app = root && root.querySelector('.as-terminal');
+      const tip = card && card.querySelector('.tip');
+      if (!card || !tip || !app || app.dataset.state !== 'collapsed') { hide(); return; }
+      if (f && f._card === card) return;
+      hide();
+      f = document.createElement('div'); f._card = card; f.className = 'rail-flytip'; f.setAttribute('role', 'tooltip');
+      f.textContent = tip.textContent;
+      (document.getElementById('zajel-term-window') || document.body).appendChild(f);   // في البرنامج المستقل كل ما خارج النافذة مخفي
+      const r = card.getBoundingClientRect();
+      if (app.dataset.pos === 'top') { f.style.left = Math.max(4, r.left + r.width / 2 - f.offsetWidth / 2) + 'px'; f.style.top = (r.bottom + 6) + 'px'; }
+      else { f.style.left = Math.max(4, r.left - f.offsetWidth - 8) + 'px'; f.style.top = (r.top + r.height / 2 - f.offsetHeight / 2) + 'px'; }
+    });
+    rail.addEventListener('mouseleave', hide);
+    rail.addEventListener('click', hide);
+  }
+
+  function renderRail() {
+    if (!root) return;
+    const rail = root.querySelector('.rail');
+    if (!rail) return;
+    const app = root.querySelector('.as-terminal');
+    if (app) {
+      app.dataset.state = barState;
+      app.dataset.pos = barPos;
+    }
+    bindRailTips(rail);
+    document.querySelectorAll('.rail-flytip').forEach(x => x.remove());
+    const keepScroll = rail.querySelector('.rail-list')?.scrollTop || 0;
+    rail.replaceChildren();
+
+    const head = document.createElement('div');
+    head.className = 'rail-head';
+
+    const lbl = document.createElement('span');
+    lbl.className = 'lbl';
+    lbl.textContent = 'الوكلاء · ' + agents.length;
+    head.appendChild(lbl);
+
+    const headActs = document.createElement('div');
+    headActs.className = 'rail-head-acts';
+
+    const posBtn = document.createElement('button');
+    posBtn.type = 'button';
+    posBtn.className = 'rail-btn-pos';
+    const posTitle = barPos === 'side' ? 'انقل الشريط إلى الأعلى' : 'انقل الشريط إلى الجانب';
+    posBtn.title = posTitle;
+    posBtn.setAttribute('aria-label', posTitle);
+    posBtn.textContent = barPos === 'side' ? 'علوي' : 'جانبي';
+    posBtn.onclick = () => {
+      barPos = barPos === 'side' ? 'top' : 'side';
+      try { localStorage.setItem('zajel_term_bar_pos', barPos); } catch (_) {}
+      if (app) app.dataset.pos = barPos;
+      renderRail();
+    };
+    headActs.appendChild(posBtn);
+
+    const toggleBtn = document.createElement('button');
+    toggleBtn.type = 'button';
+    toggleBtn.className = 'rail-toggle';
+    const exp = barState === 'expanded';
+    toggleBtn.textContent = exp ? '⇥' : '⇤';
+    const togTitle = exp ? 'اطوِ الشريط' : 'وسّع الشريط';
+    toggleBtn.title = togTitle;
+    toggleBtn.setAttribute('aria-label', togTitle);
+    toggleBtn.onclick = () => {
+      barState = barState === 'expanded' ? 'collapsed' : 'expanded';
+      try { localStorage.setItem('zajel_term_bar_state', barState); } catch (_) {}
+      if (app) app.dataset.state = barState;
+      renderRail();
+    };
+    headActs.appendChild(toggleBtn);
+
+    head.appendChild(headActs);
+    rail.appendChild(head);
+
+    const list = document.createElement('div');
+    list.className = 'rail-list';
+    rail.appendChild(list);
+    queueMicrotask(() => { list.scrollTop = keepScroll; });   // إعادة الرسم الدورية لا تُرجع القائمة إلى أولها
+
+    const curSlot = slots[Math.min(activeSlot, Math.max(0, slots.length - 1))];
+    const activeAgentId = curSlot?.id || agents[0]?.id || 'shell';
+
+    agents.forEach(a => {
+      const isSel = curSlot && curSlot.id === a.id;
+      const card = document.createElement('div');
+      card.className = 'agent' + (isSel ? ' sel' : '');
+      card.dataset.agentId = a.id;
+      card.tabIndex = 0;
+      card.setAttribute('role', 'button');
+      const stDot = a.state === 'working' ? 'working' : (a.state === 'waiting' ? 'waiting' : ((a.health && a.health.status && a.health.status !== 'ok') || a.state === 'broken' || a.state === 'error' ? 'broken' : 'stopped'));
+      const stLabel = a.label || a.state || '';
+      card.setAttribute('aria-label', a.name + ' · ' + stLabel);
+
+      const av = document.createElement('div');
+      av.className = 'av';
+      av.style.background = colorOf(a.id);
+      const ch = glyphOf(a.id, a.name);
+      const dot = document.createElement('span');
+      dot.className = 'dot ' + stDot;
+      av.append(document.createTextNode(ch), dot);
+
+      const meta = document.createElement('div');
+      meta.className = 'meta';
+      const strong = document.createElement('strong');
+      strong.textContent = a.name;
+      if (a.custom) {
+        const badge = document.createElement('span');
+        badge.className = 'new-badge';
+        badge.textContent = 'مخصّص';
+        strong.appendChild(badge);
+      }
+      const small = document.createElement('small');
+      let subTxt = a.installed === false ? 'غير مثبّت' : stLabel;
+      if (a.health && a.health.checking) subTxt += ' · يفحص…';
+      else if (a.health && a.health.label && a.health.status !== 'ok') subTxt += ' · ' + a.health.label;
+      small.textContent = subTxt;
+      meta.append(strong, small);
+
+      const tip = document.createElement('span');
+      tip.className = 'tip';
+      tip.textContent = a.name + ' · ' + subTxt;
+
+      card.append(av, meta, tip);
+
+      if (confirmRestart === a.id) {
+        const row = document.createElement('div');
+        row.className = 'inline-confirm';
+        row.setAttribute('role', 'alert');
+        const msg = document.createElement('span');
+        msg.className = 'confirm-msg';
+        msg.textContent = 'هل تعيد تشغيل ' + a.name + '؟';
+        const btns = document.createElement('div');
+        btns.className = 'confirm-btns';
+        const bYes = document.createElement('button');
+        bYes.type = 'button';
+        bYes.className = 'btn pri';
+        bYes.textContent = 'نعم، أعد';
+        bYes.setAttribute('aria-label', 'تأكيد إعادة تشغيل ' + a.name);
+        bYes.onclick = async (ev) => {
+          ev.stopPropagation();
+          confirmRestart = null;
+          try {
+            await req('restart', { id: a.id });
+            showAgent(a.id);
+            setTimeout(refreshList, 250);
+          } catch (e) {
+            showToast(e.message || 'تعذّرت إعادة التشغيل');
+          }
+          renderRail();
+        };
+        const bNo = document.createElement('button');
+        bNo.type = 'button';
+        bNo.className = 'btn';
+        bNo.textContent = 'إلغاء';
+        bNo.setAttribute('aria-label', 'إلغاء');
+        bNo.onclick = (ev) => {
+          ev.stopPropagation();
+          confirmRestart = null;
+          renderRail();
+        };
+        btns.append(bYes, bNo);
+        row.append(msg, btns);
+        card.appendChild(row);
+      } else if (confirmRemove === a.id) {
+        const row = document.createElement('div');
+        row.className = 'inline-confirm';
+        row.setAttribute('role', 'alert');
+        const msg = document.createElement('span');
+        msg.className = 'confirm-msg';
+        msg.textContent = 'هل تحذف ' + a.name + '؟';
+        const btns = document.createElement('div');
+        btns.className = 'confirm-btns';
+        const bYes = document.createElement('button');
+        bYes.type = 'button';
+        bYes.className = 'btn danger';
+        bYes.textContent = 'نعم، احذف';
+        bYes.setAttribute('aria-label', 'تأكيد حذف ' + a.name);
+        bYes.onclick = async (ev) => {
+          ev.stopPropagation();
+          confirmRemove = null;
+          try {
+            await req('agent_remove', { id: a.id });
+            await refreshList();
+          } catch (e) {
+            showToast(e.message || 'تعذّر حذف الوكيل');
+          }
+          renderRail();
+        };
+        const bNo = document.createElement('button');
+        bNo.type = 'button';
+        bNo.className = 'btn';
+        bNo.textContent = 'إلغاء';
+        bNo.setAttribute('aria-label', 'إلغاء');
+        bNo.onclick = (ev) => {
+          ev.stopPropagation();
+          confirmRemove = null;
+          renderRail();
+        };
+        btns.append(bYes, bNo);
+        row.append(msg, btns);
+        card.appendChild(row);
+      } else {
+        const acts = document.createElement('div');
+        acts.className = 'acts';
+
+        const bStart = document.createElement('button');
+        bStart.type = 'button';
+        bStart.className = 'btn';
+        bStart.textContent = 'شغّل';
+        bStart.disabled = a.installed === false;
+        bStart.title = a.installed === false ? 'غير مثبّت' : 'تشغيل';
+        bStart.setAttribute('aria-label', 'تشغيل ' + a.name);
+        bStart.onclick = async (ev) => {
+          ev.stopPropagation();
+          try {
+            await req('start', { id: a.id });
+            showAgent(a.id);
+            setTimeout(refreshList, 250);
+          } catch (e) {
+            showToast(e.message || 'تعذّر التشغيل');
+          }
+        };
+        acts.appendChild(bStart);
+
+        const bRestart = document.createElement('button');
+        bRestart.type = 'button';
+        bRestart.className = 'btn';
+        bRestart.textContent = 'أعد';
+        bRestart.title = 'إعادة تشغيل';
+        bRestart.setAttribute('aria-label', 'إعادة تشغيل ' + a.name);
+        bRestart.onclick = (ev) => {
+          ev.stopPropagation();
+          confirmRestart = a.id;
+          confirmRemove = null;
+          renderRail();
+        };
+        acts.appendChild(bRestart);
+
+        const bCheck = document.createElement('button');
+        bCheck.type = 'button';
+        bCheck.className = 'btn';
+        bCheck.textContent = 'افحص';
+        bCheck.title = 'فحص الجاهزية';
+        bCheck.setAttribute('aria-label', 'فحص جاهزية ' + a.name);
+        bCheck.onclick = async (ev) => {
+          ev.stopPropagation();
+          try {
+            await req('health', { id: a.id, check: true, force: true });
+            refreshList();
+          } catch (e) {
+            showToast(e.message || 'تعذّر الفحص');
+          }
+        };
+        acts.appendChild(bCheck);
+
+        if (a.custom) {
+          const bRem = document.createElement('button');
+          bRem.type = 'button';
+          bRem.className = 'btn btn-remove';
+          bRem.textContent = '✕';
+          bRem.title = 'حذف الوكيل';
+          bRem.setAttribute('aria-label', 'حذف ' + a.name);
+          bRem.onclick = (ev) => {
+            ev.stopPropagation();
+            confirmRemove = a.id;
+            confirmRestart = null;
+            renderRail();
+          };
+          acts.appendChild(bRem);
+        }
+        card.appendChild(acts);
+      }
+
+      card.onclick = (ev) => {
+        if (ev.target.closest('button') || ev.target.closest('.inline-confirm')) return;
+        showAgent(a.id);
+      };
+      card.onkeydown = (ev) => {
+        if (ev.key === 'Enter' || ev.key === ' ') {
+          if (!ev.target.closest('button') && !ev.target.closest('input')) {
+            ev.preventDefault();
+            showAgent(a.id);
+          }
+        }
+      };
+      list.appendChild(card);
+    });
+
+    if (addingAgent) {
+      const form = document.createElement('form');
+      form.className = 'agent-form-inline';
+      const fTitle = document.createElement('div');
+      fTitle.style.fontWeight = '600';
+      fTitle.textContent = 'إضافة وكيل جديد';
+
+      const lName = document.createElement('label');
+      lName.textContent = 'الاسم:';
+      const inpName = document.createElement('input');
+      inpName.type = 'text';
+      inpName.required = true;
+      inpName.placeholder = 'مثال: Grok';
+      inpName.setAttribute('aria-label', 'اسم الوكيل');
+      lName.appendChild(inpName);
+
+      const lCmd = document.createElement('label');
+      lCmd.textContent = 'الأمر في الطرفية:';
+      const inpCmd = document.createElement('input');
+      inpCmd.type = 'text';
+      inpCmd.required = true;
+      inpCmd.dir = 'ltr';
+      inpCmd.placeholder = 'مثال: grok';
+      inpCmd.setAttribute('aria-label', 'الأمر في الطرفية');
+      lCmd.appendChild(inpCmd);
+
+      const lAsk = document.createElement('label');
+      lAsk.textContent = 'أمر الاستدعاء المباشر (اختياري):';
+      const inpAsk = document.createElement('input');
+      inpAsk.type = 'text';
+      inpAsk.dir = 'ltr';
+      inpAsk.placeholder = 'مثال: grok -p';
+      inpAsk.setAttribute('aria-label', 'أمر الاستدعاء المباشر');
+      lAsk.appendChild(inpAsk);
+
+      const fErr = document.createElement('div');
+      fErr.style.color = 'var(--bad)';
+      fErr.style.fontSize = '11px';
+      fErr.hidden = true;
+
+      const fActs = document.createElement('div');
+      fActs.className = 'form-acts';
+      const bSub = document.createElement('button');
+      bSub.type = 'submit';
+      bSub.className = 'btn pri';
+      bSub.textContent = 'إضافة';
+      bSub.setAttribute('aria-label', 'حفظ الوكيل الجديد');
+      const bCan = document.createElement('button');
+      bCan.type = 'button';
+      bCan.className = 'btn';
+      bCan.textContent = 'إلغاء';
+      bCan.setAttribute('aria-label', 'إلغاء إضافة الوكيل');
+      bCan.onclick = () => { addingAgent = false; renderRail(); };
+      fActs.append(bSub, bCan);
+
+      form.onsubmit = async (ev) => {
+        ev.preventDefault();
+        fErr.hidden = true;
+        const name = inpName.value.trim();
+        const cmd = inpCmd.value.trim();
+        const ask = inpAsk.value.trim();
+        if (!name || !cmd) return;
+        try {
+          const res = await req('agent_add', { name, cmd, ask: ask || undefined });
+          if (res && res.error) {
+            fErr.textContent = res.error;
+            fErr.hidden = false;
+          } else {
+            addingAgent = false;
+            await refreshList();
+          }
+        } catch (e) {
+          fErr.textContent = e.message || 'تعذّرت الإضافة';
+          fErr.hidden = false;
+        }
+      };
+
+      form.append(fTitle, lName, lCmd, lAsk, fErr, fActs);
+      list.appendChild(form);
+    } else {
+      const addCard = document.createElement('div');
+      addCard.className = 'agent add';
+      addCard.tabIndex = 0;
+      addCard.setAttribute('role', 'button');
+      addCard.setAttribute('aria-label', 'أضف وكيلًا');
+      const av = document.createElement('div');
+      av.className = 'av';
+      av.textContent = '＋';
+      const meta = document.createElement('div');
+      meta.className = 'meta';
+      const strong = document.createElement('strong');
+      strong.textContent = 'أضف وكيلًا';
+      const small = document.createElement('small');
+      small.textContent = 'اسم + الأمر في الطرفية';
+      meta.append(strong, small);
+      const tip = document.createElement('span');
+      tip.className = 'tip';
+      tip.textContent = 'أضف وكيلًا جديدًا';
+      addCard.append(av, meta, tip);
+      addCard.onclick = () => {
+        if (barState === 'collapsed') {
+          barState = 'expanded';
+          try { localStorage.setItem('zajel_term_bar_state', 'expanded'); } catch (_) {}
+        }
+        addingAgent = true;
+        savingCwd = null;
+        renderRail();
+      };
+      addCard.onkeydown = (ev) => {
+        if (ev.key === 'Enter' || ev.key === ' ') {
+          ev.preventDefault();
+          addCard.click();
+        }
+      };
+      list.appendChild(addCard);
+    }
+
+    const sep = document.createElement('div');
+    sep.className = 'sep';
+    list.appendChild(sep);
+
+    const secHead = document.createElement('div');
+    secHead.className = 'rail-sec-head';
+    const secLbl = document.createElement('span');
+    secLbl.className = 'lbl';
+    secLbl.textContent = 'الاختصارات';
+    secHead.appendChild(secLbl);
+    list.appendChild(secHead);
+
+    shortcuts.forEach(s => {
+      const scCard = document.createElement('div');
+      scCard.className = 'agent shortcut-card';
+      scCard.tabIndex = 0;
+      scCard.setAttribute('role', 'button');
+      scCard.setAttribute('aria-label', s.name + ' · ' + s.path);
+
+      const av = document.createElement('div');
+      av.className = 'av';
+      if (s.kind === 'agent') {
+        av.style.background = colorOf(s.agent || '');
+        const ch = glyphOf(s.agent, (agents.find(x => x.id === s.agent) || {}).name);
+        const badge = document.createElement('span');
+        badge.className = 'sc-badge';
+        badge.textContent = '📁';
+        av.append(document.createTextNode(ch), badge);
+      } else {
+        av.style.background = '#4b5563';
+        av.textContent = '📁';
+      }
+
+      const meta = document.createElement('div');
+      meta.className = 'meta';
+      const strong = document.createElement('strong');
+      strong.textContent = s.name;
+      const small = document.createElement('small');
+      small.textContent = s.path;
+      meta.append(strong, small);
+
+      const tip = document.createElement('span');
+      tip.className = 'tip';
+      tip.textContent = s.name + (s.kind === 'agent' ? ' (' + s.agent + ')' : '') + ' · ' + s.path;
+
+      const bRem = document.createElement('button');
+      bRem.type = 'button';
+      bRem.className = 'btn btn-remove';
+      bRem.textContent = '✕';
+      bRem.title = 'حذف الاختصار';
+      bRem.setAttribute('aria-label', 'حذف الاختصار ' + s.name);
+      bRem.onclick = async (ev) => {
+        ev.stopPropagation();
+        try {
+          await req('shortcut_remove', { id: s.id });
+          await refreshShortcuts();
+          renderRail();
+        } catch (e) {
+          showToast(e.message || 'تعذّر حذف الاختصار');
+        }
+      };
+
+      scCard.append(av, meta, tip, bRem);
+
+      if (runningShortcutNotice && runningShortcutNotice.scId === s.id) {
+        const notice = document.createElement('div');
+        notice.className = 'shortcut-inline-notice';
+        notice.setAttribute('role', 'alert');
+        const nTxt = document.createElement('div');
+        nTxt.textContent = 'الوكيل يعمل الآن؛ هل تود فتحه في طرفية، أم إعادة تشغيله هنا؟';
+        const nActs = document.createElement('div');
+        nActs.className = 'acts';
+        const bShell = document.createElement('button');
+        bShell.type = 'button';
+        bShell.className = 'btn';
+        bShell.textContent = 'افتح في طرفية';
+        bShell.setAttribute('aria-label', 'افتح في طرفية');
+        bShell.onclick = async (ev) => {
+          ev.stopPropagation();
+          runningShortcutNotice = null;
+          showAgent('shell');
+          await req('open_path', { id: 'shell', path: s.path }).catch(() => {});
+          refreshScreens(true);
+          renderRail();
+        };
+        const bRestartHere = document.createElement('button');
+        bRestartHere.type = 'button';
+        bRestartHere.className = 'btn pri';
+        bRestartHere.textContent = 'أعد تشغيل الوكيل هنا';
+        bRestartHere.setAttribute('aria-label', 'أعد تشغيل الوكيل هنا');
+        bRestartHere.onclick = async (ev) => {
+          ev.stopPropagation();
+          const tgt = runningShortcutNotice.agentId;
+          runningShortcutNotice = null;
+          await req('restart', { id: tgt, cwd: s.path }).catch(() => {});
+          refreshList();
+          refreshScreens(true);
+          renderRail();
+        };
+        const bCancelNotice = document.createElement('button');
+        bCancelNotice.type = 'button';
+        bCancelNotice.className = 'btn';
+        bCancelNotice.textContent = 'إلغاء';
+        bCancelNotice.setAttribute('aria-label', 'إلغاء');
+        bCancelNotice.onclick = (ev) => {
+          ev.stopPropagation();
+          runningShortcutNotice = null;
+          renderRail();
+        };
+        nActs.append(bShell, bRestartHere, bCancelNotice);
+        notice.append(nTxt, nActs);
+        scCard.appendChild(notice);
+      }
+
+      scCard.onclick = async (ev) => {
+        if (ev.target.closest('button') || ev.target.closest('.shortcut-inline-notice')) return;
+        runningShortcutNotice = null;
+        const targetAgentId = s.kind === 'agent' ? (s.agent || activeAgentId) : activeAgentId;
+        if (s.kind === 'agent') {
+          showAgent(targetAgentId);
+        }
+        try {
+          const res = await req('open_path', { id: targetAgentId, path: s.path });
+          if (res && res.running) {
+            runningShortcutNotice = { scId: s.id, agentId: targetAgentId, path: s.path };
+            renderRail();
+          } else {
+            refreshScreens(true);
+          }
+        } catch (e) {
+          showToast(e.message || 'تعذّر فتح المسار');
+        }
+      };
+      scCard.onkeydown = (ev) => {
+        if (ev.key === 'Enter' || ev.key === ' ') {
+          if (!ev.target.closest('button')) {
+            ev.preventDefault();
+            scCard.click();
+          }
+        }
+      };
+      list.appendChild(scCard);
+    });
+
+    if (savingCwd) {
+      const form = document.createElement('form');
+      form.className = 'agent-form-inline';
+      const fTitle = document.createElement('div');
+      fTitle.style.fontWeight = '600';
+      fTitle.textContent = 'حفظ المسار الحالي';
+
+      const defaultName = (savingCwd.path ? savingCwd.path.split('/').filter(Boolean).pop() : '') || 'مجلد';
+      const lName = document.createElement('label');
+      lName.textContent = 'الاسم:';
+      const inpName = document.createElement('input');
+      inpName.type = 'text';
+      inpName.required = true;
+      inpName.value = defaultName;
+      inpName.setAttribute('aria-label', 'اسم الاختصار');
+      lName.appendChild(inpName);
+
+      const lPath = document.createElement('label');
+      lPath.textContent = 'المسار:';
+      const inpPath = document.createElement('input');
+      inpPath.type = 'text';
+      inpPath.required = true;
+      inpPath.dir = 'ltr';
+      inpPath.value = savingCwd.path || '';
+      inpPath.setAttribute('aria-label', 'مسار المجلد');
+      lPath.appendChild(inpPath);
+
+      const kGrp = document.createElement('div');
+      kGrp.style.display = 'flex';
+      kGrp.style.flexDirection = 'column';
+      kGrp.style.gap = '4px';
+      kGrp.style.margin = '4px 0';
+
+      const rPathLbl = document.createElement('label');
+      rPathLbl.style.flexDirection = 'row';
+      rPathLbl.style.alignItems = 'center';
+      rPathLbl.style.gap = '6px';
+      const rPath = document.createElement('input');
+      rPath.type = 'radio';
+      rPath.name = 'kind';
+      rPath.value = 'path';
+      rPath.checked = true;
+      rPathLbl.append(rPath, document.createTextNode('مسار'));
+
+      const rAgentLbl = document.createElement('label');
+      rAgentLbl.style.flexDirection = 'row';
+      rAgentLbl.style.alignItems = 'center';
+      rAgentLbl.style.gap = '6px';
+      const rAgent = document.createElement('input');
+      rAgent.type = 'radio';
+      rAgent.name = 'kind';
+      rAgent.value = 'agent';
+      rAgentLbl.append(rAgent, document.createTextNode('الوكيل الحالي (' + activeAgentId + ') في هذا المسار'));
+
+      kGrp.append(rPathLbl, rAgentLbl);
+
+      const fErr = document.createElement('div');
+      fErr.style.color = 'var(--bad)';
+      fErr.style.fontSize = '11px';
+      fErr.hidden = true;
+
+      const fActs = document.createElement('div');
+      fActs.className = 'form-acts';
+      const bSub = document.createElement('button');
+      bSub.type = 'submit';
+      bSub.className = 'btn pri';
+      bSub.textContent = 'حفظ الاختصار';
+      bSub.setAttribute('aria-label', 'حفظ الاختصار');
+      const bCan = document.createElement('button');
+      bCan.type = 'button';
+      bCan.className = 'btn';
+      bCan.textContent = 'إلغاء';
+      bCan.setAttribute('aria-label', 'إلغاء');
+      bCan.onclick = () => { savingCwd = null; renderRail(); };
+      fActs.append(bSub, bCan);
+
+      form.onsubmit = async (ev) => {
+        ev.preventDefault();
+        fErr.hidden = true;
+        const name = inpName.value.trim();
+        const path = inpPath.value.trim();
+        const kind = rAgent.checked ? 'agent' : 'path';
+        if (!name || !path) return;
+        try {
+          const res = await req('shortcut_add', {
+            kind,
+            name,
+            path,
+            agent: kind === 'agent' ? activeAgentId : undefined
+          });
+          if (res && res.error) {
+            fErr.textContent = res.error;
+            fErr.hidden = false;
+          } else {
+            savingCwd = null;
+            await refreshShortcuts();
+            renderRail();
+          }
+        } catch (e) {
+          fErr.textContent = e.message || 'تعذّر حفظ الاختصار';
+          fErr.hidden = false;
+        }
+      };
+
+      form.append(fTitle, lName, lPath, kGrp, fErr, fActs);
+      list.appendChild(form);
+    } else {
+      const saveCard = document.createElement('div');
+      saveCard.className = 'agent add save-cwd-btn';
+      saveCard.tabIndex = 0;
+      saveCard.setAttribute('role', 'button');
+      saveCard.setAttribute('aria-label', 'احفظ المسار الحالي');
+      const av = document.createElement('div');
+      av.className = 'av';
+      av.textContent = '⭐';
+      const meta = document.createElement('div');
+      meta.className = 'meta';
+      const strong = document.createElement('strong');
+      strong.textContent = 'احفظ المسار الحالي';
+      const small = document.createElement('small');
+      small.textContent = 'اختصار للمسار أو الوكيل';
+      meta.append(strong, small);
+      const tip = document.createElement('span');
+      tip.className = 'tip';
+      tip.textContent = 'احفظ المسار الحالي';
+      saveCard.append(av, meta, tip);
+      saveCard.onclick = async () => {
+        if (barState === 'collapsed') {
+          barState = 'expanded';
+          try { localStorage.setItem('zajel_term_bar_state', 'expanded'); } catch (_) {}
+        }
+        addingAgent = false;
+        let p = '';
+        try {
+          const d = await fetch('/api/term/cwd?id=' + encodeURIComponent(activeAgentId)).then(r => r.json());
+          if (d && d.ok && d.path) p = d.path;
+        } catch (_) {}
+        savingCwd = { path: p };
+        renderRail();
+      };
+      saveCard.onkeydown = (ev) => {
+        if (ev.key === 'Enter' || ev.key === ' ') {
+          ev.preventDefault();
+          saveCard.click();
+        }
+      };
+      list.appendChild(saveCard);
+    }
+  }
+
+  let broadcastBtnRef = null;
+  function closeBroadcastPanel() {
+    if (!broadcastPanel) return;
+    broadcastPanel.remove();
+    broadcastPanel = null;
+    broadcastBtnRef = null;
+    document.removeEventListener('pointerdown', onBroadcastOutside, true);
+    document.removeEventListener('keydown', onBroadcastKey, true);
+  }
+
+  function onBroadcastKey(ev) {
+    if (ev.key === 'Escape') closeBroadcastPanel();
+  }
+
+  function onBroadcastOutside(ev) {
+    if (!broadcastPanel) return;
+    if (broadcastPanel.contains(ev.target)) return;
+    if (broadcastBtnRef && broadcastBtnRef.contains(ev.target)) return;
+    closeBroadcastPanel();
+  }
+
+  function openBroadcastPanel(btn) {
+    if (broadcastPanel) {
+      closeBroadcastPanel();
+      return;
+    }
+    broadcastBtnRef = btn;
+    const winEl = root?.closest('#zajel-term-window') || document.getElementById('zajel-term-window') || root || document.body;
+
+    const panel = document.createElement('div');
+    panel.className = 'as-broadcast-panel';
+    panel.dir = 'rtl';
+    panel.style.cssText = 'position:fixed;z-index:100005;background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:10px;padding:12px;box-shadow:0 12px 36px -8px rgba(0,0,0,0.55);display:flex;flex-direction:column;gap:10px;width:340px;max-width:calc(100vw - 24px);font-size:13px;box-sizing:border-box;';
+
+    const ta = document.createElement('textarea');
+    ta.rows = 4;
+    ta.dir = 'auto';
+    ta.placeholder = 'اكتب الرسالة مرة واحدة…';
+    ta.setAttribute('aria-label', 'نص الرسالة الموجهة للوكلاء');
+    ta.style.cssText = 'width:100%;box-sizing:border-box;resize:vertical;min-height:76px;padding:8px 10px;border-radius:7px;border:1px solid var(--line);background:var(--bg);color:var(--ink);font:inherit;font-size:12.5px;line-height:1.4;outline:none;';
+    ta.addEventListener('focus', () => { ta.style.borderColor = 'var(--acc)'; });
+    ta.addEventListener('blur', () => { ta.style.borderColor = 'var(--line)'; });
+
+    const chipsWrap = document.createElement('div');
+    chipsWrap.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px;max-height:120px;overflow-y:auto;padding:2px 0;';
+
+    const validAgents = agents.filter(a => !!a.cmd);
+
+    let savedIds = [];
+    try {
+      savedIds = JSON.parse(localStorage.getItem('zajel_broadcast_ids') || '[]');
+      if (!Array.isArray(savedIds)) savedIds = [];
+    } catch (_) {
+      savedIds = [];
+    }
+
+    let selectedIds = new Set(savedIds.filter(id => validAgents.some(a => a.id === id)).slice(0, 5));
+    if (selectedIds.size === 0 && validAgents.length > 0) {
+      selectedIds.add(validAgents[0].id);
+    }
+
+    const chipBtns = [];
+    const updateChipsUI = () => {
+      chipBtns.forEach(({ btn: cb, id }) => {
+        const isSel = selectedIds.has(id);
+        // المختار واضح: مملوء بلون الوكيل وعليه ✓ (كان الفرق إطارًا باهتًا لا يُلحظ)
+        cb.style.borderColor = isSel ? colorOf(id) : 'var(--line)';
+        cb.style.background = isSel ? 'color-mix(in srgb,' + colorOf(id) + ' 22%, var(--panel))' : 'var(--bg)';
+        cb.style.fontWeight = isSel ? '700' : '400';
+        const mark = cb.querySelector('.bc-mark'); if (mark) mark.textContent = isSel ? '✓' : '';
+        cb.setAttribute('aria-pressed', isSel ? 'true' : 'false');
+      });
+      updateSendBtn();
+    };
+
+    validAgents.forEach(a => {
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'btn';
+      chip.setAttribute('aria-label', a.name);
+      chip.style.cssText = 'display:inline-flex;align-items:center;gap:6px;padding:4px 8px;border-radius:8px;border:1px solid var(--line);cursor:pointer;font-size:12px;user-select:none;color:var(--ink);';
+
+      const av = document.createElement('span');
+      av.style.cssText = 'width:20px;height:20px;border-radius:5px;display:inline-grid;place-items:center;font-size:11px;font-weight:600;color:#fff;flex:none;background:' + colorOf(a.id);
+      av.textContent = glyphOf(a.id, a.name);
+
+      const nSpan = document.createElement('span');
+      nSpan.textContent = a.name;
+      nSpan.style.cssText = 'white-space:nowrap;max-width:110px;overflow:hidden;text-overflow:ellipsis;';
+
+      const mark = document.createElement('span'); mark.className = 'bc-mark'; mark.style.cssText = 'font-weight:700;min-width:10px';
+      chip.append(av, nSpan, mark);
+
+      chip.onclick = () => {
+        if (selectedIds.has(a.id)) {
+          selectedIds.delete(a.id);
+        } else {
+          if (selectedIds.size >= 5) { errDiv.textContent = 'الحد خمسة وكلاء؛ أزل واحدًا أولًا.'; errDiv.style.display = 'block'; return; }
+          errDiv.style.display = 'none';
+          selectedIds.add(a.id);
+        }
+        try {
+          localStorage.setItem('zajel_broadcast_ids', JSON.stringify([...selectedIds]));
+        } catch (_) {}
+        updateChipsUI();
+      };
+
+      chipsWrap.appendChild(chip);
+      chipBtns.push({ btn: chip, id: a.id });
+    });
+
+    const footer = document.createElement('div');
+    footer.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:2px;';
+
+    const sendBtn = document.createElement('button');
+    sendBtn.type = 'button';
+    sendBtn.className = 'btn pri';
+    sendBtn.style.cssText = 'padding:6px 14px;font-size:12.5px;font-weight:600;min-width:100px;';
+
+    const errDiv = document.createElement('div');
+    errDiv.style.cssText = 'color:var(--bad, #dc2626);font-size:11.5px;line-height:1.3;flex:1;min-width:0;display:none;word-break:break-word;';
+
+    const updateSendBtn = () => {
+      const n = selectedIds.size;
+      sendBtn.textContent = 'أرسل إلى ' + n;
+      sendBtn.disabled = !ta.value.trim() || n === 0;
+    };
+
+    ta.addEventListener('input', updateSendBtn);
+    ta.addEventListener('keydown', ev => {
+      if ((ev.metaKey || ev.ctrlKey) && ev.key === 'Enter') {
+        ev.preventDefault();
+        if (!sendBtn.disabled) sendBtn.click();
+      }
+    });
+
+    sendBtn.onclick = async () => {
+      const ids = [...selectedIds];
+      const text = ta.value.trim();
+      if (!ids.length || !text) return;
+
+      sendBtn.disabled = true;
+      errDiv.style.display = 'none';
+
+      try {
+        const res = await req('broadcast', { ids, text });
+        if (res && res.error) throw new Error(res.error);
+
+        layout = Math.min(5, Math.max(1, ids.length));
+        while (slots.length < layout) slots.push({ id: '', hash: '', pre: null, select: null, card: null });
+        ids.slice(0, layout).forEach((id, k) => {
+          slots[k].id = id;
+          slots[k].hash = '';
+        });
+        build();
+        refreshScreens(true);
+        closeBroadcastPanel();
+        ta.value = '';
+        showToast('يجهّز الوكلاء ثم يرسل إليهم…');
+        // نتيجة كل وكيل: وصلت، أو لم تُرسل ولماذا (يعرض سؤالًا، لم يجهز…)
+        const t0 = Date.now();
+        const poll = async () => {
+          try {
+            const r = await fetch('/api/term/broadcast_status?ids=' + encodeURIComponent(ids.join(','))).then(x => x.json());
+            const v = Object.values(r.agents || {});
+            const pending = v.some(x => ['queued', 'starting'].includes(x.state));
+            if (pending && Date.now() - t0 < 75000) { setTimeout(poll, 1500); return; }
+            const sent = v.filter(x => x.state === 'sent').length;
+            const notes = v.filter(x => x.state !== 'sent').map(x => x.note).filter(Boolean);
+            showToast('وصلت إلى ' + sent + ' من ' + ids.length + (notes.length ? ' · ' + notes.join(' · ') : ''));
+          } catch (_) {}
+        };
+        setTimeout(poll, 1500);
+      } catch (e) {
+        errDiv.textContent = e.message || 'تعذّر الإرسال';
+        errDiv.style.display = 'block';
+        sendBtn.disabled = false;
+      }
+    };
+
+    updateChipsUI();
+
+    footer.append(errDiv, sendBtn);
+    panel.append(ta, chipsWrap, footer);
+
+    winEl.appendChild(panel);
+    broadcastPanel = panel;
+
+    const positionPanel = () => {
+      if (!broadcastPanel) return;
+      const btnRect = btn.getBoundingClientRect();
+      const winRect = winEl.getBoundingClientRect();
+      const pw = broadcastPanel.offsetWidth || 340;
+      const ph = broadcastPanel.offsetHeight || 240;
+      const pad = 8;
+
+      let left = btnRect.right - pw;
+      if (left + pw > winRect.right - pad) left = winRect.right - pw - pad;
+      if (left < winRect.left + pad) left = winRect.left + pad;
+
+      let top = btnRect.bottom + 6;
+      if (top + ph > winRect.bottom - pad) {
+        if (btnRect.top - ph - 6 >= winRect.top + pad) {
+          top = btnRect.top - ph - 6;
+        } else {
+          top = Math.max(winRect.top + pad, winRect.bottom - ph - pad);
+        }
+      }
+
+      broadcastPanel.style.left = Math.round(left) + 'px';
+      broadcastPanel.style.top = Math.round(top) + 'px';
+    };
+
+    positionPanel();
+    setTimeout(() => {
+      positionPanel();
+      ta.focus();
+      document.addEventListener('pointerdown', onBroadcastOutside, true);
+      document.addEventListener('keydown', onBroadcastKey, true);
+    }, 0);
+  }
+
   function build(){ if(!root)return; root.replaceChildren(); root.dir='rtl'; root.className='as-terminal-ui'; applyTheme();
     const unavailable=document.createElement('div'); unavailable.className='as-memory-hint'; unavailable.hidden=true; root.appendChild(unavailable);
-    const councilToggle=document.createElement('button');councilToggle.type='button';councilToggle.className='btn';councilToggle.textContent='⚖ مجلس الوكلاء (شاشة كاملة)';councilToggle.onclick=()=>{if(win&&win.el.isConnected)win.show('council');};root.appendChild(councilToggle);
-    const app=document.createElement('div'); app.className='as-terminal'; root.appendChild(app);
-    const toolbar=document.createElement('div'); toolbar.className='as-terminal-toolbar'; app.appendChild(toolbar);
-    const cards=document.createElement('div'); cards.className='as-terminal-agents'; app.appendChild(cards);
+    const app=document.createElement('div'); app.className='as-terminal'; app.dataset.state=barState; app.dataset.pos=barPos; root.appendChild(app);
     const controls=document.createElement('div'); controls.className='as-terminal-controls'; app.appendChild(controls);
-    const viewport=document.createElement('div'); viewport.className='as-terminal-grid'; app.appendChild(viewport);
-    const renderControls=()=>{controls.replaceChildren();[1,2,3,4,5].forEach(n=>{const b=document.createElement('button');b.className='btn'+(layout===n?' pri':'');b.textContent=String(n);b.title='عدد النوافذ';b.onclick=()=>{layout=n;build();refreshList();};controls.appendChild(b);});const pal=document.createElement('button');pal.className='btn';pal.textContent='🎨 الألوان';pal.title='ألوان الطرفية وإطار السؤال';pal.onclick=()=>window.ZajelTermTheme&&window.ZajelTermTheme.openPanel(pal);controls.appendChild(pal);const down=document.createElement('button');down.className='btn';down.textContent='انتقل إلى الأسفل';down.onclick=()=>viewport.querySelectorAll('pre').forEach(x=>x.scrollTop=x.scrollHeight);controls.appendChild(down);const tg=document.createElement('button');tg.className='btn';tg.textContent='الوكلاء ▾';tg.onclick=()=>{cards.classList.toggle('open');tg.textContent=cards.classList.contains('open')?'الوكلاء ▴':'الوكلاء ▾';};controls.insertBefore(tg,controls.firstChild);const longer=document.createElement('button');longer.className='btn';longer.textContent=hist>1500?'سجلّ عادي':'سجلّ أطول';longer.onclick=()=>{hist=hist>1500?1500:5000;longer.textContent=hist>1500?'سجلّ عادي':'سجلّ أطول';refreshScreens(true);};controls.appendChild(longer);const dirb=document.createElement('button');dirb.className='btn';const dirTxt=()=>root.dataset.dir==='ltr'?'الاتجاه: يسار ثابت':'الاتجاه: تلقائي (عربي يمينًا)';root.dataset.dir=(()=>{try{return localStorage.getItem('zajel_term_dir')||'auto';}catch(_){return 'auto';}})();dirb.textContent=dirTxt();dirb.onclick=()=>{root.dataset.dir=root.dataset.dir==='ltr'?'auto':'ltr';try{localStorage.setItem('zajel_term_dir',root.dataset.dir);}catch(_){}dirb.textContent=dirTxt();};controls.appendChild(dirb);const lab=document.createElement('label');lab.className='as-terminal-notify';const cb=document.createElement('input');cb.type='checkbox';cb.checked=notify;cb.onchange=()=>{notify=cb.checked;req('notify',{on:notify}).catch(()=>{});};lab.append(cb,document.createTextNode('إشعار تيليجرام عند انتظار الوكيل/انتهائه'));controls.appendChild(lab);const gl=document.createElement('label');gl.className='as-terminal-notify';gl.title='يراقب الوكلاء ويعيد تشغيل من يخرج منهم';const gc=document.createElement('input');gc.type='checkbox';gc.checked=guard;gc.onchange=()=>{guard=gc.checked;req('guard',{on:guard}).catch(()=>{});};gl.append(gc,document.createTextNode('جهاز التحكم: إنعاش الوكيل إذا خرج'));controls.appendChild(gl);};
+    const main=document.createElement('div'); main.className='as-terminal-main'; app.appendChild(main);
+    const rail=document.createElement('aside'); rail.className='rail'; rail.setAttribute('aria-label','شريط الوكلاء'); main.appendChild(rail);
+    const viewport=document.createElement('div'); viewport.className='as-terminal-grid screens'; viewport.setAttribute('aria-label','الشاشات'); main.appendChild(viewport);
+    const renderControls=()=>{controls.replaceChildren();const bcBtn=document.createElement('button');bcBtn.type='button';bcBtn.className='btn as-broadcast-btn';bcBtn.textContent='📣 أرسل لعدة وكلاء';bcBtn.title='إرسال نفس الرسالة إلى عدة وكلاء في وقت واحد';bcBtn.setAttribute('aria-label','أرسل لعدة وكلاء');bcBtn.onclick=()=>openBroadcastPanel(bcBtn);controls.appendChild(bcBtn);[1,2,3,4,5].forEach(n=>{const b=document.createElement('button');b.type='button';b.className='btn'+(layout===n?' pri':'');b.textContent=String(n);b.title='عدد النوافذ';b.setAttribute('aria-label','تخطيط '+n+' نوافذ');b.onclick=()=>{layout=n;build();refreshList();};controls.appendChild(b);});const pal=document.createElement('button');pal.type='button';pal.className='btn';pal.textContent='🎨 الألوان';pal.title='ألوان الطرفية وإطار السؤال';pal.setAttribute('aria-label','ألوان الطرفية');pal.onclick=()=>window.ZajelTermTheme&&window.ZajelTermTheme.openPanel(pal);controls.appendChild(pal);const down=document.createElement('button');down.type='button';down.className='btn';down.textContent='انتقل إلى الأسفل';down.title='انتقل إلى أسفل الشاشات';down.setAttribute('aria-label','انتقل إلى الأسفل');down.onclick=()=>viewport.querySelectorAll('pre').forEach(x=>x.scrollTop=x.scrollHeight);controls.appendChild(down);const longer=document.createElement('button');longer.type='button';longer.className='btn';longer.textContent=hist>1500?'سجلّ عادي':'سجلّ أطول';longer.setAttribute('aria-label',hist>1500?'سجلّ عادي':'سجلّ أطول');longer.onclick=()=>{hist=hist>1500?1500:5000;longer.textContent=hist>1500?'سجلّ عادي':'سجلّ أطول';refreshScreens(true);};controls.appendChild(longer);const dirb=document.createElement('button');dirb.type='button';dirb.className='btn';const dirTxt=()=>root.dataset.dir==='ltr'?'الاتجاه: يسار ثابت':'الاتجاه: تلقائي';root.dataset.dir=(()=>{try{return localStorage.getItem('zajel_term_dir')||'auto';}catch(_){return 'auto';}})();dirb.textContent=dirTxt();dirb.setAttribute('aria-label',dirTxt());dirb.onclick=()=>{root.dataset.dir=root.dataset.dir==='ltr'?'auto':'ltr';try{localStorage.setItem('zajel_term_dir',root.dataset.dir);}catch(_){}dirb.textContent=dirTxt();dirb.setAttribute('aria-label',dirTxt());};controls.appendChild(dirb);const lab=document.createElement('label');lab.className='as-terminal-notify';const cb=document.createElement('input');cb.type='checkbox';cb.checked=notify;cb.setAttribute('aria-label','إشعار تيليجرام');cb.onchange=()=>{notify=cb.checked;req('notify',{on:notify}).catch(()=>{});};lab.title='إشعار تيليجرام عند انتظار الوكيل أو انتهائه';lab.append(cb,document.createTextNode('إشعار تيليجرام'));controls.appendChild(lab);const gl=document.createElement('label');gl.className='as-terminal-notify';gl.title='يراقب الوكلاء ويعيد تشغيل من يخرج منهم';const gc=document.createElement('input');gc.type='checkbox';gc.checked=guard;gc.setAttribute('aria-label','جهاز التحكم');gc.onchange=()=>{guard=gc.checked;req('guard',{on:guard}).catch(()=>{});};gl.append(gc,document.createTextNode('إنعاش تلقائي'));controls.appendChild(gl);};
     renderControls();
     while(slots.length<layout)slots.push({id:agents[slots.length]?.id||'',hash:'',pre:null,select:null,card:null});slots=slots.slice(0,layout);
-    slots.forEach((slot,index)=>{const card=document.createElement('section');card.className='as-terminal-window';slot.card=card;const head=document.createElement('div');head.className='as-terminal-window-head';const select=document.createElement('select');select.setAttribute('aria-label','اختر الوكيل');agents.forEach(a=>{const o=document.createElement('option');o.value=a.id;o.textContent=a.name+' · '+a.label;select.appendChild(o);});if(slot.id)select.value=slot.id;if(!slot.id&&agents[0])slot.id=agents[0].id;select.onchange=()=>{slot.id=select.value;slot.hash='';refreshScreens(true);};slot.select=select;head.appendChild(select);const fsb=document.createElement('button');fsb.type='button';fsb.className='btn as-terminal-fs';fsb.textContent='⛶';fsb.title='ملء الشاشة / تصغير';fsb.setAttribute('aria-label','ملء الشاشة');fsb.onclick=()=>{const on=card.classList.toggle('is-full');fsb.textContent=on?'🗗':'⛶';fsb.title=on?'تصغير':'ملء الشاشة';setTimeout(()=>{resizeSlot(slot);slot.pre.scrollTop=slot.pre.scrollHeight;slot.input&&slot.input.focus({preventScroll:true});},60);};head.appendChild(fsb);const pre=document.createElement('pre');pre.dir='ltr';pre.tabIndex=0;pre.className='as-terminal-screen';pre.setAttribute('aria-label','شاشة الطرفية · اضغط للكتابة');const ta=document.createElement('textarea');ta.setAttribute('aria-label','إدخال الطرفية');ta.setAttribute('autocapitalize','off');ta.setAttribute('autocomplete','off');ta.setAttribute('autocorrect','off');ta.spellcheck=false;ta.style.cssText='position:absolute;opacity:0;width:2px;height:2px;left:0;top:0;border:0;padding:0;resize:none;font-size:16px';slot.input=ta;const msg=document.createElement('small');msg.className='as-terminal-msg';slot.msg=msg;head.appendChild(msg);slot.pre=pre;pre.addEventListener('focus',()=>{activeSlot=index;root&&root.querySelectorAll('.as-terminal-window').forEach((w,k)=>w.classList.toggle('is-active',k===index));});card.style.position='relative';card.append(head,pre,ta);viewport.appendChild(card);wireKeys(slot);});
-    const agentStyle=document.createElement('style');agentStyle.textContent='.as-council-terminal-panel{max-height:42vh;overflow:auto;min-height:0;border:1px solid var(--line);border-radius:9px;padding:7px}.as-terminal-ui{display:flex;flex-direction:column;gap:8px;min-height:0;flex:1;height:100%}.as-terminal{display:grid;grid-template-columns:232px minmax(0,1fr);grid-template-rows:auto minmax(0,1fr);gap:10px;flex:1;min-height:0}.as-terminal-agents{grid-row:1/3;grid-column:1;display:flex;flex-direction:column;gap:7px;overflow-y:auto;padding:2px;min-height:0}.as-terminal-controls{grid-column:2;grid-row:1;display:flex;gap:6px;align-items:center;flex-wrap:wrap}.as-terminal-grid{grid-column:2;grid-row:2;display:grid;gap:8px;min-height:0;min-width:0;grid-template-columns:1fr;grid-auto-rows:minmax(0,1fr)}.as-terminal-ui[data-layout="2"] .as-terminal-grid{grid-template-rows:repeat(2,minmax(0,1fr))}.as-terminal-ui[data-layout="4"] .as-terminal-grid{grid-template-columns:repeat(2,minmax(0,1fr));grid-template-rows:repeat(2,minmax(0,1fr))}.as-terminal-toolbar{display:none}.as-terminal-agent{border:1px solid var(--line);border-radius:10px;padding:8px 9px;background:var(--bg);cursor:pointer}.as-terminal-agent.is-shown{border-color:var(--acc);box-shadow:0 0 0 1px var(--acc) inset}.as-terminal-agent-head{display:flex;align-items:center;gap:6px;font-weight:600}.as-terminal-dot{width:9px;height:9px;border-radius:50%;display:inline-block;flex:none}.as-terminal-label{font-size:11px;color:var(--mut);margin:3px 0 6px}.as-terminal-actions{display:flex;gap:5px;flex-wrap:wrap;align-items:center}.as-terminal-actions .btn{padding:3px 9px;font-size:11.5px}.as-terminal-notify{display:flex;gap:5px;align-items:center;font-size:11.5px;margin-inline-start:auto}.as-terminal-window{min-width:0;min-height:0;display:flex;flex-direction:column;border:1px solid var(--line);border-radius:9px;overflow:hidden}.as-terminal-window.is-active{border-color:var(--acc)}.as-terminal-window-head{padding:4px;background:var(--side);flex:none;display:flex;flex-wrap:wrap;gap:4px;align-items:center}.as-terminal-window-head select{max-width:100%;flex:1;min-width:0}.as-terminal-fs{padding:2px 9px;font-size:14px;line-height:1.2}.as-terminal-window.is-full{position:fixed!important;inset:0;z-index:99999;border-radius:0;background:var(--bg)}.as-terminal-window.is-full .as-terminal-screen{font-size:14px}.as-terminal-screen{margin:0;padding:8px 10px;overflow:auto;white-space:pre;direction:ltr;unicode-bidi:plaintext;text-align:start;background:var(--tt-bg,#101318);color:var(--tt-fg,#e5e7eb);font:12.5px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;flex:1;min-height:0;outline:none;tab-size:8}.as-terminal-ui[data-dir="ltr"] .as-terminal-screen{unicode-bidi:normal;text-align:left}.as-terminal-window:focus-within{border-color:var(--acc);box-shadow:0 0 0 1px var(--acc)}.as-terminal-msg{display:block;font-size:11px;min-height:14px;padding:2px 4px;color:var(--mut)}.as-terminal-screen .tt-a{color:var(--tt-a)}.as-terminal-screen .tt-q{display:block;margin:5px 0;padding:3px 8px;border:1.5px solid var(--tt-qborder);border-radius:7px;background:var(--tt-qbg);color:var(--tt-q)}.as-terminal-screen .tt-q span{color:inherit!important;background:transparent!important}.as-terminal-screen:focus{box-shadow:inset 0 0 0 1px var(--acc)}@media(max-width:860px){.as-terminal{grid-template-columns:minmax(0,1fr);grid-template-rows:auto auto minmax(0,1fr)}.as-terminal-agents{grid-row:1;grid-column:1;flex-direction:row;overflow-x:auto;overflow-y:hidden}.as-terminal-agent{flex:0 0 150px}.as-terminal-controls{grid-column:1;grid-row:2}.as-terminal-grid{grid-column:1;grid-row:3}.as-terminal-ui[data-layout="4"] .as-terminal-grid,.as-terminal-ui[data-layout="2"] .as-terminal-grid{grid-template-columns:1fr;grid-template-rows:none;grid-auto-rows:minmax(180px,1fr);overflow-y:auto}}.as-terminal{grid-template-columns:minmax(0,1fr)!important;grid-template-rows:auto auto minmax(0,1fr)!important;gap:6px}.as-terminal-agents{grid-row:1!important;grid-column:1!important;flex-direction:row!important;flex-wrap:wrap;overflow:visible!important}.as-terminal-agent{padding:3px 9px!important;flex:none!important;border-radius:99px}.as-terminal-agent .as-terminal-label,.as-terminal-agent .as-terminal-actions{display:none}.as-terminal-agents.open .as-terminal-agent{flex:0 0 150px!important;border-radius:10px;padding:8px 9px!important}.as-terminal-agents.open .as-terminal-label{display:block}.as-terminal-agents.open .as-terminal-actions{display:flex}.as-terminal-controls{grid-column:1!important;grid-row:2!important}.as-terminal-grid{grid-column:1!important;grid-row:3!important}.as-terminal-ui[data-layout="2"] .as-terminal-grid{grid-template-columns:repeat(2,minmax(0,1fr))!important;grid-template-rows:minmax(0,1fr)!important}.as-terminal-ui[data-layout="3"] .as-terminal-grid{grid-template-columns:repeat(3,minmax(0,1fr))!important;grid-template-rows:minmax(0,1fr)!important}.as-terminal-ui[data-layout="4"] .as-terminal-grid{grid-template-columns:repeat(2,minmax(0,1fr))!important;grid-template-rows:repeat(2,minmax(0,1fr))!important}.as-terminal-ui[data-layout="5"] .as-terminal-grid{grid-template-columns:repeat(3,minmax(0,1fr))!important;grid-template-rows:repeat(2,minmax(0,1fr))!important}.as-terminal-screen{font-size:12px}@media(max-width:860px){.as-terminal-ui[data-layout="2"] .as-terminal-grid,.as-terminal-ui[data-layout="3"] .as-terminal-grid,.as-terminal-ui[data-layout="4"] .as-terminal-grid,.as-terminal-ui[data-layout="5"] .as-terminal-grid{grid-template-columns:1fr!important;grid-template-rows:none!important;grid-auto-rows:minmax(220px,1fr);overflow-y:auto}}';root.appendChild(agentStyle);root.dataset.layout=String(layout);
-    renderAgents();
+    slots.forEach((slot,index)=>{const card=document.createElement('section');card.className='as-terminal-window';slot.card=card;const head=document.createElement('div');head.className='as-terminal-window-head';const select=document.createElement('select');select.setAttribute('aria-label','اختر الوكيل');agents.forEach(a=>{const o=document.createElement('option');o.value=a.id;o.textContent=a.name+' · '+(a.label||a.state||'');select.appendChild(o);});if(slot.id)select.value=slot.id;if(!slot.id&&agents[0])slot.id=agents[0].id;select.onchange=()=>{slot.id=select.value;slot.hash='';refreshScreens(true);updateActiveCardHighlight();};slot.select=select;head.appendChild(select);const fsb=document.createElement('button');fsb.type='button';fsb.className='btn as-terminal-fs';fsb.textContent='⛶';fsb.title='ملء الشاشة / تصغير';fsb.setAttribute('aria-label','ملء الشاشة');fsb.onclick=()=>{const on=card.classList.toggle('is-full');fsb.textContent=on?'🗗':'⛶';fsb.title=on?'تصغير':'ملء الشاشة';setTimeout(()=>{resizeSlot(slot);slot.pre.scrollTop=slot.pre.scrollHeight;slot.input&&slot.input.focus({preventScroll:true});},60);};head.appendChild(fsb);const wb=document.createElement('button');wb.type='button';wb.className='btn as-terminal-fs';wb.textContent='📄 Word';wb.title='احفظ آخر سؤال وجوابه في مستند Word';wb.onclick=async()=>{wb.disabled=true;try{const r=await req('export_answer',{id:slot.id});if(r&&r.error)throw new Error(r.error);showToast('حُفظ في التنزيلات: '+r.title);}catch(e){showToast(e.message||'تعذّر صنع المستند');}finally{wb.disabled=false;}};head.appendChild(wb);const pre=document.createElement('pre');pre.dir='ltr';pre.tabIndex=0;pre.className='as-terminal-screen';pre.setAttribute('aria-label','شاشة الطرفية · اضغط للكتابة');const ta=document.createElement('textarea');ta.setAttribute('aria-label','إدخال الطرفية');ta.setAttribute('autocapitalize','off');ta.setAttribute('autocomplete','off');ta.setAttribute('autocorrect','off');ta.spellcheck=false;ta.style.cssText='position:absolute;opacity:0;width:2px;height:2px;left:0;top:0;border:0;padding:0;resize:none;font-size:16px';slot.input=ta;const msg=document.createElement('small');msg.className='as-terminal-msg';slot.msg=msg;head.appendChild(msg);slot.pre=pre;pre.addEventListener('focus',()=>{activeSlot=index;root&&root.querySelectorAll('.as-terminal-window').forEach((w,k)=>w.classList.toggle('is-active',k===index));updateActiveCardHighlight();});card.style.position='relative';card.append(head,pre,ta);viewport.appendChild(card);wireKeys(slot);});
+    const agentStyle=document.createElement('style');agentStyle.textContent='.as-terminal-main{direction:rtl!important}/* المساعد يضع dir=auto على العناصر بلا اتجاه؛ في الشريط يقلب البطاقات ذات الأسماء اللاتينية */.rail .agent,.rail .agent .meta,.rail .agent .acts{direction:rtl!important;unicode-bidi:isolate!important}.rail .agent .meta small{unicode-bidi:plaintext!important;text-align:right}.as-terminal-ui{display:flex;flex-direction:column;gap:8px;min-height:0;flex:1;height:100%;--rail:var(--side,#152131);--rail-line:var(--line,#24344a);--term-ink:var(--ink,#d6e2ee);--term-dim:var(--mut,#7f93a8);--accent:var(--acc,#0f8f9a);--accent-ink:#ffffff;--ok:var(--ok,#22a55a);--wait:var(--warn,#d99a06);--off:#8796a6;--bad:var(--err,#d64545)}.as-terminal{display:flex;flex-direction:column;gap:6px;flex:1;min-height:0}.as-terminal-controls{display:flex;gap:6px;align-items:center;flex-wrap:wrap;flex:none;direction:rtl}.as-terminal-main{display:flex;flex:1;min-height:0;min-width:0;overflow:hidden}.as-terminal[data-pos="top"] .as-terminal-main{flex-direction:column}.rail{background:var(--rail);border-inline-end:1px solid var(--rail-line);display:flex;flex-direction:column;gap:6px;padding:10px 8px;transition:width .22s ease;width:224px;flex:none;min-height:0}.as-terminal[data-state="collapsed"] .rail{width:64px;align-items:center}.as-terminal[data-state="collapsed"] .btn-remove,.as-terminal[data-state="collapsed"] .rail .agent:hover .tip{display:none!important}.rail .av{direction:ltr;unicode-bidi:isolate}.rail-flytip{position:fixed;z-index:100000;pointer-events:none;background:var(--panel,#182230);color:var(--ink,#fff);border:1px solid var(--line,#24344a);border-radius:8px;padding:5px 10px;font-size:12.5px;white-space:nowrap;box-shadow:0 6px 20px -8px rgba(0,0,0,.5);direction:rtl}.as-terminal[data-state="collapsed"] .rail-list{scrollbar-width:none;align-items:center}.as-terminal[data-state="collapsed"] .rail-list::-webkit-scrollbar{display:none}.as-terminal[data-state="collapsed"] .agent{justify-items:center;width:44px}.as-terminal[data-state="collapsed"] .av{width:36px;height:36px;font-size:16px}.as-terminal[data-pos="top"] .rail{width:auto;flex-direction:row;align-items:center;border-inline-end:0;border-bottom:1px solid var(--rail-line);padding:8px 10px;overflow-x:auto}.as-terminal[data-pos="top"][data-state="collapsed"] .rail{padding-block:6px}.rail-head{display:flex;align-items:center;justify-content:space-between;gap:6px;color:var(--term-dim);font-size:12px;padding:0 2px 4px;flex:none;width:100%}.as-terminal[data-state="collapsed"] .rail-head .lbl{display:none}.as-terminal[data-pos="top"] .rail-head{padding:0;flex:none;width:auto}.rail-head-acts{display:flex;gap:4px;align-items:center}.rail-toggle,.rail-btn-pos{border:1px solid var(--rail-line);background:transparent;color:var(--term-ink);border-radius:7px;width:28px;height:26px;cursor:pointer;font-size:12px;line-height:1;display:inline-flex;align-items:center;justify-content:center}.rail-btn-pos{width:auto;padding:2px 6px;font-size:11px}.as-terminal[data-state="collapsed"] .rail-btn-pos{display:none}.rail-list{display:flex;flex-direction:column;gap:6px;overflow-y:auto;min-height:0;flex:1;padding:2px 0;width:100%}.as-terminal[data-pos="top"] .rail-list{flex-direction:row;overflow-x:auto;overflow-y:hidden;align-items:center;width:auto}.rail-sec-head{display:flex;align-items:center;font-size:11px;font-weight:600;color:var(--term-dim);padding:4px 2px 2px;flex:none}.as-terminal[data-state="collapsed"] .rail-sec-head{display:none}.as-terminal[data-pos="top"] .rail-sec-head{display:none}.agent{position:relative;display:grid;grid-template-columns:auto 1fr;align-items:center;gap:4px 9px;padding:8px 9px;border-radius:10px;background:rgba(127,127,127,0.08);border:1px solid transparent;color:var(--term-ink);cursor:pointer;text-align:start;font:inherit;flex:none}.agent:hover{background:rgba(127,127,127,0.15)}.agent.sel{border-color:var(--accent);background:rgba(15,143,154,0.15)}.agent:focus-visible,.rail-toggle:focus-visible,.rail-btn-pos:focus-visible,.btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}.av{width:30px;height:30px;border-radius:8px;display:grid;place-items:center;font-family:ui-monospace,Menlo,monospace;font-weight:600;font-size:13px;color:#fff;position:relative;flex:none}.dot{position:absolute;bottom:-3px;inset-inline-end:-3px;width:11px;height:11px;border-radius:50%;border:2px solid var(--rail)}.dot.working{background:var(--ok)}.dot.waiting{background:var(--wait);animation:pulse 1.4s ease-in-out infinite}.dot.stopped{background:var(--off)}.dot.broken{background:var(--bad)}@keyframes pulse{50%{box-shadow:0 0 0 5px rgba(240,180,41,0.35)}}@media(prefers-reduced-motion:reduce){.dot.waiting{animation:none}.rail{transition:none}}.sc-badge{position:absolute;bottom:-4px;inset-inline-end:-4px;font-size:10px;line-height:1}.meta{min-width:0;overflow:hidden}.meta strong{display:block;font-size:13px;font-weight:600;line-height:1.3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.meta small{display:block;font-size:11px;color:var(--term-dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.acts{grid-column:1/-1;display:flex;gap:4px;margin-top:4px}.acts .btn{flex:1;font:inherit;font-size:11px;padding:3px 0;border-radius:6px;border:1px solid var(--rail-line);background:transparent;color:var(--term-ink);cursor:pointer;text-align:center}.acts .btn:hover{border-color:var(--accent)}.acts .btn.btn-remove{flex:none;width:22px;padding:0;color:var(--term-dim)}.acts .btn.btn-remove:hover{color:var(--bad);border-color:var(--bad)}.new-badge{font-size:10px;background:var(--accent);color:var(--accent-ink);border-radius:5px;padding:0 5px;margin-inline-start:4px;vertical-align:1px}.inline-confirm{grid-column:1/-1;display:flex;flex-direction:column;gap:4px;padding:5px;background:rgba(0,0,0,0.15);border:1px dashed var(--rail-line);border-radius:7px;margin-top:4px}.confirm-msg{font-size:11px;color:var(--term-ink)}.confirm-btns{display:flex;gap:4px}.confirm-btns .btn{flex:1;padding:2px 6px;font-size:11px}.confirm-btns .btn.danger{color:var(--bad);border-color:var(--bad)}.as-terminal[data-state="collapsed"] .agent{grid-template-columns:auto;padding:5px;background:transparent}.as-terminal[data-state="collapsed"] .meta,.as-terminal[data-state="collapsed"] .acts,.as-terminal[data-state="collapsed"] .inline-confirm{display:none!important}.as-terminal[data-pos="top"] .agent{flex:none;width:176px}.as-terminal[data-pos="top"][data-state="collapsed"] .agent{width:auto}.as-terminal[data-pos="top"] .acts{display:none}.as-terminal[data-pos="top"][data-state="expanded"] .acts{display:flex}.tip{display:none}.as-terminal[data-state="collapsed"] .agent:hover .tip,.as-terminal[data-state="collapsed"] .agent:focus-visible .tip{display:block;position:absolute;z-index:1000;inset-inline-end:calc(100% + 8px);top:50%;transform:translateY(-50%);background:var(--panel,#182230);color:var(--ink,#fff);border:1px solid var(--line,#24344a);border-radius:8px;padding:5px 9px;font-size:12px;white-space:nowrap;box-shadow:0 6px 20px -8px rgba(0,0,0,0.5);pointer-events:none}.as-terminal[data-pos="top"][data-state="collapsed"] .agent:hover .tip{inset-inline-end:auto;top:calc(100% + 6px);transform:none;right:0}.add .av{background:transparent!important;border:1.5px dashed var(--term-dim);color:var(--term-dim)}.sep{height:1px;background:var(--rail-line);margin:4px 0;flex:none;align-self:stretch}.as-terminal[data-pos="top"] .sep{width:1px;height:28px;margin:0 4px}.agent-form-inline{display:flex;flex-direction:column;gap:6px;padding:8px;border-radius:8px;border:1px solid var(--rail-line);background:rgba(0,0,0,0.2);margin:4px 0;font-size:11.5px}.as-terminal[data-pos="top"] .agent-form-inline{position:absolute;top:100%;right:0;z-index:20;width:250px;background:var(--side,#152131);box-shadow:0 8px 24px rgba(0,0,0,0.4)}.agent-form-inline label{display:flex;flex-direction:column;gap:2px;color:var(--term-dim)}.agent-form-inline input[type="text"]{border:1px solid var(--rail-line);background:rgba(0,0,0,0.25);color:var(--term-ink);border-radius:6px;padding:4px 7px;font:inherit}.agent-form-inline .form-acts{display:flex;gap:5px;margin-top:4px}.agent-form-inline .form-acts .btn{flex:1;padding:4px;font-size:11px}.shortcut-inline-notice{grid-column:1/-1;display:flex;flex-direction:column;gap:4px;padding:6px;background:rgba(217,154,6,0.15);border:1px solid var(--wait);border-radius:7px;margin-top:4px;font-size:11px}.shortcut-inline-notice .acts{display:flex;gap:4px;flex-wrap:wrap}.as-terminal-grid{flex:1;min-height:0;min-width:0;display:grid;gap:8px}.as-terminal-ui[data-layout="1"] .as-terminal-grid{grid-template-columns:1fr;grid-template-rows:1fr}.as-terminal-ui[data-layout="2"] .as-terminal-grid{grid-template-columns:repeat(2,minmax(0,1fr));grid-template-rows:minmax(0,1fr)}.as-terminal-ui[data-layout="3"] .as-terminal-grid{grid-template-columns:repeat(3,minmax(0,1fr));grid-template-rows:minmax(0,1fr)}.as-terminal-ui[data-layout="4"] .as-terminal-grid{grid-template-columns:repeat(2,minmax(0,1fr));grid-template-rows:repeat(2,minmax(0,1fr))}.as-terminal-ui[data-layout="5"] .as-terminal-grid{grid-template-columns:repeat(3,minmax(0,1fr));grid-template-rows:repeat(2,minmax(0,1fr))}.as-terminal-window{min-width:0;min-height:0;display:flex;flex-direction:column;border:1px solid var(--line);border-radius:9px;overflow:hidden}.as-terminal-window.is-active{border-color:var(--acc)}.as-terminal-window-head{padding:4px;background:var(--side);flex:none;display:flex;flex-wrap:wrap;gap:4px;align-items:center}.as-terminal-window-head select{max-width:100%;flex:1;min-width:0}.as-terminal-fs{padding:2px 9px;font-size:14px;line-height:1.2}.as-terminal-window.is-full{position:fixed!important;inset:0;z-index:99999;border-radius:0;background:var(--bg)}.as-terminal-window.is-full .as-terminal-screen{font-size:14px}.as-terminal-screen{margin:0;padding:8px 10px;overflow-y:auto;overflow-x:hidden;scrollbar-gutter:stable;white-space:pre;direction:ltr;unicode-bidi:plaintext;text-align:start;background:var(--tt-bg,#101318);color:var(--tt-fg,#e5e7eb);font:12.5px/1.25 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;flex:1;min-height:0;outline:none;tab-size:8}.as-terminal-ui[data-dir="ltr"] .as-terminal-screen{unicode-bidi:normal;text-align:left}.as-terminal-screen span[style*=background]{padding-block:.16em}.as-terminal-window:focus-within{border-color:var(--acc);box-shadow:0 0 0 1px var(--acc)}.as-terminal-msg{display:block;font-size:11px;min-height:14px;padding:2px 4px;color:var(--mut)}.as-terminal-screen .tt-a{color:var(--tt-a)}.as-terminal-screen .tt-q{display:block;margin:5px 0;padding:3px 8px;border:1.5px solid var(--tt-qborder);border-radius:7px;background:var(--tt-qbg);color:var(--tt-q)}.as-terminal-screen .tt-q span{color:inherit!important;background:transparent!important}.as-terminal-screen:focus{box-shadow:inset 0 0 0 1px var(--acc)}@media(max-width:860px){.as-terminal-ui[data-layout="2"] .as-terminal-grid,.as-terminal-ui[data-layout="3"] .as-terminal-grid,.as-terminal-ui[data-layout="4"] .as-terminal-grid,.as-terminal-ui[data-layout="5"] .as-terminal-grid{grid-template-columns:1fr!important;grid-template-rows:none!important;grid-auto-rows:minmax(220px,1fr);overflow-y:auto}}';root.appendChild(agentStyle);root.dataset.layout=String(layout);
+    renderRail();
     resizeObserver?.disconnect();resizeObserver=new ResizeObserver(entries=>{for(const e of entries){const s=slots.find(x=>x.pre===e.target);if(s)resizeSlot(s);}});slots.forEach(s=>{if(s.pre)resizeObserver.observe(s.pre);});
   }
   function renderAgents(){if(!root)return;const cards=root.querySelector('.as-terminal-agents');if(!cards)return;cards.replaceChildren();agents.forEach(a=>{const c=document.createElement('div');c.className='as-terminal-agent';const h=document.createElement('div');h.className='as-terminal-agent-head';const dot=document.createElement('span');dot.className='as-terminal-dot';dot.style.background=stateColor(a.state);h.append(dot,document.createTextNode(a.name));const label=document.createElement('div');label.className='as-terminal-label';label.textContent=(a.label||a.state||'')+(a.health&&(a.health.checking?' · يفحص…':a.health.label&&a.health.status!=='ok'?' · '+a.health.label:''));if(a.health&&a.health.status&&a.health.status!=='ok'){label.title='الإصدار '+(a.health.version||'؟')+(a.health.latest?' · الأحدث '+a.health.latest:'');}const actions=document.createElement('div');actions.className='as-terminal-actions';(a.state==='stopped'?[['تشغيل','start']]:[['إعادة تشغيل','restart'],['إيقاف','stop']]).forEach(([t,op])=>{const b=document.createElement('button');b.className='btn';b.textContent=t;b.disabled=op==='start'&&a.installed===false;b.title=a.installed===false?'غير مثبّت':t;b.onclick=async(ev)=>{ev.stopPropagation();try{await req(op,{id:a.id});if(op!=='stop')showAgent(a.id);setTimeout(refreshList,250);}catch(_){}};actions.appendChild(b);});if(a.installed===false){const not=document.createElement('small');not.textContent='غير مثبّت';not.className='as-card-err';actions.appendChild(not);}c.classList.toggle('is-shown',slots.some(x=>x.id===a.id));c.onclick=()=>showAgent(a.id);c.append(h,label,actions);cards.appendChild(c);});root.querySelectorAll('.as-terminal-window').forEach((w,i)=>{const s=w.querySelector('select');if(!s)return;const old=slots[i]?.id;s.replaceChildren();agents.forEach(a=>{const o=document.createElement('option');o.value=a.id;o.textContent=a.name+' · '+a.label;s.appendChild(o);});if(old&&agents.some(a=>a.id===old))s.value=old;});}
@@ -121,1420 +1133,171 @@
     });
     ta.addEventListener('paste',e=>{e.preventDefault();const t=e.clipboardData.getData('text/plain');if(t)send(slot,{text:t,paste:true});});
   }
-  function resizeSlot(slot){if(!slot.id||!slot.pre)return;const probe=document.createElement('span');probe.textContent='M';probe.style.cssText='position:absolute;visibility:hidden;font:12px ui-monospace,monospace';slot.pre.appendChild(probe);const cw=probe.getBoundingClientRect().width||7.2,ch=parseFloat(getComputedStyle(slot.pre).lineHeight)||16;probe.remove();const cols=Math.max(20,Math.floor((slot.pre.clientWidth-18)/cw)),rows=Math.max(5,Math.floor((slot.pre.clientHeight-16)/ch));clearTimeout(slot.resizeTimer);slot.resizeTimer=setTimeout(()=>req('resize',{id:slot.id,cols,rows}).catch(()=>{}),180);}
-  function showAgent(id){req('health',{id,check:true}).catch(()=>{});const sl=slots[Math.min(activeSlot,slots.length-1)];if(!sl||sl.id===id)return;sl.id=id;sl.hash='';if(sl.select)sl.select.value=id;refreshScreens(true);renderAgents();}
-  function showAgents(ids){if(!root)return false;ids=(ids||[]).filter(Boolean).slice(0,5);if(!ids.length)return false;layout=ids.length;slots=ids.map(id=>({id,hash:'',pre:null,select:null,card:null}));councilFolded=true;activeSlot=0;build();builtLayout=layout;refreshList();refreshScreens(true);return true;}
-  function syncSelects(){slots.forEach((slot,i)=>{if(!slot.select)return;if(!slot.id&&agents[i])slot.id=agents[i].id||agents[0]?.id||'';if(!slot.id&&agents[0])slot.id=agents[0].id;const sel=slot.select;sel.replaceChildren();agents.forEach(a=>{const o=document.createElement('option');o.value=a.id;o.textContent=a.name+' · '+a.label;sel.appendChild(o);});if(slot.id)sel.value=slot.id;});}
-  async function refreshList(){if(!root||listBusy)return;listBusy=true;try{const data=await req('list');agents=Array.isArray(data.agents)?data.agents:[];notify=!!data.notify;guard=data.guard!==false;const hint=root.querySelector('.as-memory-hint'),app=root.querySelector('.as-terminal');if(data.available===false){hint.hidden=false;hint.textContent=data.hint||'الطرفية غير متاحة';app.hidden=true;}else{hint.hidden=true;app.hidden=false;if(builtLayout!==layout){build();builtLayout=layout;}else renderAgents();syncSelects();}}catch(e){const hint=root.querySelector('.as-memory-hint');hint.hidden=false;hint.textContent='تعذر تحميل قائمة الطرفيات: '+e.message;}finally{listBusy=false;}}
+  // عدد الأعمدة يُقاس بخط الشاشة نفسه (كان يُقاس بخط أصغر فيُعطى الوكيل عرضًا أكبر من الظاهر: كلام يخرج عن الشاشة وخطوط مكسورة)،
+  // ولا يُرسل المقاس إلا إذا تغيّر فعلًا (كان كل ظهور لشريط التمرير يغيّر العرض فيعيد الوكيل الرسم فترتجف الشاشة)
+  function resizeSlot(slot){if(!slot.id||!slot.pre)return;const cs=getComputedStyle(slot.pre);const probe=document.createElement('span');probe.textContent='MMMMMMMMMM';probe.style.cssText='position:absolute;visibility:hidden;white-space:pre;font:'+cs.font;slot.pre.appendChild(probe);const cw=(probe.getBoundingClientRect().width/10)||7.6,ch=parseFloat(cs.lineHeight)||17.5;probe.remove();const padX=(parseFloat(cs.paddingLeft)||0)+(parseFloat(cs.paddingRight)||0),padY=(parseFloat(cs.paddingTop)||0)+(parseFloat(cs.paddingBottom)||0);const cols=Math.max(20,Math.floor((slot.pre.clientWidth-padX-2)/cw)),rows=Math.max(5,Math.floor((slot.pre.clientHeight-padY)/ch));const key=slot.id+':'+cols+'x'+rows;if(slot.lastSize===key)return;clearTimeout(slot.resizeTimer);slot.resizeTimer=setTimeout(()=>{slot.lastSize=key;req('resize',{id:slot.id,cols,rows}).catch(()=>{slot.lastSize='';});},250);}
+  function showAgent(id){req('health',{id,check:true}).catch(()=>{});selectAgentForActiveSlot(id);}
+  function showAgents(ids){if(!root)return false;ids=(ids||[]).filter(Boolean).slice(0,5);if(!ids.length)return false;layout=ids.length;slots=ids.map(id=>({id,hash:'',pre:null,select:null,card:null}));activeSlot=0;build();builtLayout=layout;refreshList();refreshScreens(true);return true;}
+  function syncSelects(){slots.forEach((slot,i)=>{if(!slot.select)return;if(!slot.id&&agents[i])slot.id=agents[i].id||agents[0]?.id||'';if(!slot.id&&agents[0])slot.id=agents[0].id;const sel=slot.select;sel.replaceChildren();agents.forEach(a=>{const o=document.createElement('option');o.value=a.id;o.textContent=a.name+' · '+(a.label||a.state||'');sel.appendChild(o);});if(slot.id)sel.value=slot.id;});}
+  async function refreshList(){if(!root||listBusy)return;listBusy=true;try{const [data,customData]=await Promise.all([req('list'),fetch('/api/term/custom').then(r=>r.json()).catch(()=>({shortcuts:[]}))]);agents=Array.isArray(data.agents)?data.agents:[];shortcuts=Array.isArray(customData.shortcuts)?customData.shortcuts:[];notify=!!data.notify;guard=data.guard!==false;const hint=root.querySelector('.as-memory-hint'),app=root.querySelector('.as-terminal');if(data.available===false){if(hint){hint.hidden=false;hint.textContent=data.hint||'الطرفية غير متاحة';}if(app)app.hidden=true;}else{if(hint)hint.hidden=true;if(app)app.hidden=false;if(builtLayout!==layout){build();builtLayout=layout;}else if(!railBusy())renderRail();syncSelects();}}catch(e){const hint=root.querySelector('.as-memory-hint');if(hint){hint.hidden=false;hint.textContent='تعذر تحميل قائمة الطرفيات: '+e.message;}}finally{listBusy=false;}}
   async function refreshScreens(force){if(!root||root.hidden)return;for(const slot of slots){if(!slot.id||!slot.pre)continue;try{if(!force&&slot.holdSel&&slot.holdSel())continue;const d=await req('screen?id='+encodeURIComponent(slot.id)+'&since='+encodeURIComponent(force?'':slot.hash)+'&hist='+hist);if(d.hash)slot.hash=d.hash;if(!d.unchanged&&typeof d.text==='string'){slot.cur=d.cursor?{cx:d.cursor[0],cy:d.cursor[1],rows:d.rows,cols:d.cols,alt:!!d.alt}:null;const pre=slot.pre,stick=pre.scrollHeight-pre.scrollTop-pre.clientHeight<40||!pre.dataset.init;pre.innerHTML=ansiHtml(d.text);pre.dataset.init='1';if(stick)pre.scrollTop=pre.scrollHeight;}if(d.alive===false)slot.pre.dataset.dead='true';}catch(_){}}}
-  const councilStateText = { restarting: 'يُعاد تشغيله', queued: 'في الانتظار', starting: 'يبدأ', asking: 'يجيب', reviewing: 'يراجع وينقد', done: 'انتهى', done_raw: 'انتهى بلا علامات', timeout: 'انتهت المهلة', error: 'خطأ', stopped: 'متوقف' };
-  const councilStateColor = { restarting: '#a855f7', queued: '#a3a3a3', starting: '#eab308', asking: '#3b82f6', reviewing: '#8b5cf6', done: '#22c55e', done_raw: '#16a34a', timeout: '#f97316', error: '#ef4444', stopped: '#737373' };
-  function councilButton(label, action, primary) { const b = document.createElement('button'); b.type = 'button'; b.className = 'btn' + (primary ? ' pri' : ''); b.textContent = label; b.onclick = action; return b; }
-  const agentColors = { claude: '#d97757', codex: '#10a37f', agy: '#3b82f6', hermes: '#8b5cf6', opencode: '#64748b', pi: '#ec4899' };
-  const colorOf = id => agentColors[id] || '#64748b';
-  const agentSpeed = { claude: 1.0, codex: 1.2, hermes: 0.9, agy: 2.4, opencode: 1.0, pi: 1.0 };
 
-  function formatClaimsTable(text) {
-    if (!text) return null;
-    const lines = text.split('\n').map(l => l.trim()).filter(l => l.startsWith('|'));
-    if (lines.length < 2) return null;
-    const parseRow = ln => ln.split('|').slice(1, -1).map(c => c.trim());
-    const headerCells = parseRow(lines[0]);
-    if (!headerCells.length) return null;
-    const table = document.createElement('table');
-    table.className = 'claims';
-    const thead = document.createElement('thead');
-    const trh = document.createElement('tr');
-    headerCells.forEach((c, idx) => {
-      const th = document.createElement('th');
-      th.textContent = c;
-      if (idx > 0 && idx < headerCells.length - 1) th.className = 'c';
-      trh.appendChild(th);
-    });
-    thead.appendChild(trh);
-    table.appendChild(thead);
 
-    const tbody = document.createElement('tbody');
-    const dataLines = lines.slice(1).filter(l => !/^[|\s-:]+$/.test(l));
-    dataLines.forEach(ln => {
-      const rowCells = parseRow(ln);
-      const tr = document.createElement('tr');
-      rowCells.forEach((c, idx) => {
-        const td = document.createElement('td');
-        if (idx > 0 && idx < rowCells.length - 1) {
-          td.className = 'c';
-          if (c.includes('✓')) td.innerHTML = '<span class="yes">✓</span>';
-          else if (c.includes('✗')) td.innerHTML = '<span class="no">✗</span>';
-          else if (c === '—' || c === '-' || !c) td.innerHTML = '<span class="na">—</span>';
-          else td.textContent = c;
-        } else if (idx === rowCells.length - 1) {
-          if (c.includes('✓')) td.innerHTML = `<span class="yes">${esc(c)}</span>`;
-          else if (c.includes('✗')) td.innerHTML = `<span class="no">${esc(c)}</span>`;
-          else td.textContent = c;
-        } else {
-          td.textContent = c;
-        }
-        tr.appendChild(td);
-      });
-      tbody.appendChild(tr);
-    });
-    table.appendChild(tbody);
-    return table;
-  }
-
-  function parseVerdict(text) {
-    if (!text || typeof text !== 'string') return null;
-    const re = /^##\s+(.+)$/gm;
-    const sections = {};
-    const matches = [];
-    let m;
-    while ((m = re.exec(text)) !== null) {
-      matches.push({ title: m[1].trim(), index: m.index, headerLen: m[0].length });
-    }
-    if (!matches.length) return null;
-    for (let i = 0; i < matches.length; i++) {
-      const cur = matches[i];
-      const start = cur.index + cur.headerLen;
-      const end = (i + 1 < matches.length) ? matches[i + 1].index : text.length;
-      sections[cur.title] = text.slice(start, end).trim();
-    }
-    const findSec = (...keys) => {
-      for (const k of Object.keys(sections)) {
-        for (const key of keys) {
-          if (k.includes(key)) return sections[k];
-        }
-      }
-      return '';
-    };
-
-    let confidence = '';
-    let summary = '';
-    const rawSum = findSec('الخلاصة');
-    if (rawSum) {
-      const lines = rawSum.split('\n').map(l => l.trim()).filter(Boolean);
-      for (const l of lines) {
-        const cm = l.match(/الثقة\s*:\s*([^\n]+)/);
-        if (cm) {
-          confidence = cm[1].replace(/[*_#]/g, '').trim();
-        } else if (!summary) {
-          summary = l.replace(/^[-*•]\s*/, '').trim();
-        }
-      }
-      if (!summary && lines.length) summary = lines[0];
-    }
-    if (!confidence) {
-      const cm = text.match(/الثقة\s*:\s*([^\n]+)/);
-      if (cm) confidence = cm[1].replace(/[*_#]/g, '').trim();
-    }
-
-    const finalVerdict = findSec('الحكم النهائي') || text;
-    const agreement = findSec('الاتفاق');
-    const difference = findSec('الاختلاف', 'الخلاف');
-    const claimsMap = findSec('خريطة الأقوال');
-    const sources = findSec('المصادر');
-    const ranking = findSec('الترتيب');
-
-    return {
-      confidence,
-      summary,
-      finalVerdict,
-      panes: {
-        agree: agreement,
-        diff: difference,
-        map: claimsMap,
-        src: sources,
-        rank: ranking
-      }
-    };
-  }
-
-  const mdBox = text => {
-    const box = document.createElement('div'); box.className = 'cn-md'; box.dir = 'auto'; let ul = null;
-    const fill = (el, t) => t.split(/(\*\*[^*]+\*\*)/).forEach(part => {
-      if (/^\*\*[^*]+\*\*$/.test(part)) { const b = document.createElement('b'); b.textContent = part.slice(2, -2); el.appendChild(b); } else el.appendChild(document.createTextNode(part));
-    });
-    const lines = String(text || '').split('\n');
-    let tblLines = [];
-    const flushTable = () => {
-      if (!tblLines.length) return;
-      const tbl = formatClaimsTable(tblLines.join('\n'));
-      if (tbl) box.appendChild(tbl);
-      else tblLines.forEach(ln => { const p = document.createElement('p'); fill(p, ln); box.appendChild(p); });
-      tblLines = [];
-    };
-    lines.forEach(ln => {
-      if (ln.trim().startsWith('|')) {
-        ul = null;
-        tblLines.push(ln);
-        return;
-      }
-      flushTable();
-      const h = ln.match(/^(#{1,4})\s+(.*)/), b = ln.match(/^\s*(?:[-*•]|\d+[.)])\s+(.*)/);
-      if (!b) ul = null;
-      if (h) { const e = document.createElement('h4'); fill(e, h[2]); box.appendChild(e); }
-      else if (b) { if (!ul) { ul = document.createElement('ul'); box.appendChild(ul); } const li = document.createElement('li'); fill(li, b[1]); ul.appendChild(li); }
-      else if (ln.trim()) { const p = document.createElement('p'); fill(p, ln); box.appendChild(p); }
-    });
-    flushTable();
-    return box;
-  };
-
-  const CN_CSS = `
-.cn{
-  /* ألوان زاجل نفسها (لا يُعرَّف متغير بنفسه: المتصفح يُسقط التعريف الدائري فتختفي الألوان) */
-  --acc-soft:var(--accp,#e6eeff);
-  --card:var(--panel,#ffffff);
-  --txt:var(--ink,#1b1f27);
-  --gold:#c08a00;
-  --gold-soft:#fff5d6;
-  --ok:#16a34a;
-  --ok-soft:#e3f6e9;
-  --bad:var(--err,#dc2626);
-  --bad-soft:#fde8e8;
-  --warn:#d97706;
-  --warn-soft:var(--warnp,#fff1dc);
-  --c-claude:#d97757;
-  --c-codex:#10a37f;
-  --c-hermes:#8b5cf6;
-  --c-agy:#3b82f6;
-  --c-opencode:#64748b;
-  --c-pi:#ec4899;
-  display:flex;flex-direction:column;gap:10px;min-width:0;width:100%;min-height:0;flex:1;height:100%;color:var(--txt);background:var(--bg);font-size:13.5px;direction:rtl;
-}
-@media (prefers-color-scheme:dark){
-  .cn{--gold:#f0b429;--gold-soft:#3a2f12;--ok:#4ade80;--ok-soft:#143221;--bad-soft:#3b1717;--warn:#fbbf24;}
-}
-.cn *{box-sizing:border-box}
-.cn-top{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-.cn-top h3{margin:0;font-size:16px;font-weight:700}
-.cn-top .sp{flex:1}
-/* صفّان من خانات مربّعة متلاصقة بلا فراغات، بانحناء خفيف جدًا */
-.mbar{display:flex;flex-direction:column;gap:6px}
-.brow{display:flex;min-width:0}
-.roster,.tiles{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(0,1fr);gap:0;width:100%;min-width:0}
-.roster{grid-auto-columns:minmax(104px,1fr);overflow-x:auto;scrollbar-width:thin}
-.roster .chip .nm{overflow:visible;text-overflow:clip}
-.opt.locked .tile{opacity:.55!important}
-.brow.cfg{display:grid;grid-template-columns:3fr 4fr;gap:6px}
-.msel{display:none}
-.chip,.tile{position:relative;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;min-height:58px;padding:6px 4px;
-  border:1px solid var(--line);margin-inline-start:-1px;border-radius:0;background:var(--card);color:var(--txt);cursor:pointer;user-select:none;
-  font:inherit;font-size:12px;line-height:1.25;text-align:center;transition:background .15s,box-shadow .15s;min-width:0}
-.roster>:first-child,.tiles>:first-child,.tiles>:first-child .tile{border-start-start-radius:4px;border-end-start-radius:4px;margin-inline-start:0}
-.roster>:last-child,.tiles>:last-child,.tiles>:last-child .tile{border-start-end-radius:4px;border-end-end-radius:4px}
-.chip:hover,.tile:hover{background:var(--side)}
-.chip.on{background:color-mix(in srgb,var(--c,var(--acc)) 14%,var(--card));box-shadow:inset 0 -3px 0 var(--c,var(--acc));z-index:1}
-.chip.judge{box-shadow:inset 0 -3px 0 var(--c,var(--acc)),inset 0 0 0 2px var(--gold);z-index:2}
-.chip.off{opacity:.62}
-.cn .chip,.cn .chip .nm{color:var(--txt)!important;text-shadow:none!important}
-.cn .chip.on{background:color-mix(in srgb,var(--c,var(--acc)) 22%,var(--card))!important}
-.cn .chip.on .nm{font-weight:700}
-.cn .chip.off .nm{text-decoration:line-through;text-decoration-thickness:1px}
-.cn .tile,.cn .tile .tl,.cn .tile .ic{color:var(--txt)!important}
-.cn .tile.on,.cn .opt input:checked+.tile{background:color-mix(in srgb,var(--acc) 24%,var(--card))!important;box-shadow:inset 0 -3px 0 var(--acc)!important}
-.cn .tile.on .tl,.cn .opt input:checked+.tile .tl{font-weight:700;color:var(--txt)!important}
-.cn .tile .tm,.cn .tile.on .tm{color:var(--mut)!important}
-.chip .av{width:24px;height:24px;border-radius:4px;display:grid;place-items:center;color:#fff;font-size:12px;font-weight:700;background:var(--c,#64748b)}
-.chip .nm{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600}
-.chip .dot{position:absolute;top:6px;inset-inline-start:6px;width:7px;height:7px;border-radius:50%}
-.dot.ready{background:var(--ok)}
-.dot.slow{background:var(--warn)}
-.dot.off{background:var(--bad)}
-.chip .crown{position:absolute;top:2px;inset-inline-end:3px;border:0;background:none;cursor:pointer;opacity:.25;font-size:12px;padding:0;filter:grayscale(1)}
-.chip.judge .crown,.chip .crown:hover{opacity:1;filter:none}
-.tile .ic{font-size:16px;line-height:1}
-.tile .tl{font-weight:600}
-.tile .tm{font-size:10.5px;color:var(--mut)}
-.tile.on,.opt input:checked+.tile{background:var(--acc-soft);color:var(--acc);box-shadow:inset 0 -3px 0 var(--acc);z-index:1}
-.tile.on .tm{color:var(--acc)}
-.opt{display:flex;min-width:0;cursor:pointer}
-.opt .tile{flex:1}
-.opt input{display:none}
-.opt.locked .tile{opacity:.4;cursor:not-allowed}
-.opts{animation:slide .3s}
-@keyframes slide{from{opacity:0;transform:translateY(-6px)}to{opacity:1}}
-@media(max-width:520px){.brow.cfg{grid-template-columns:1fr}}
-
-/* مضغوط: خانات بسطر واحد، ومربع كتابة بإطار واضح يُكبَّر بالسحب */
-.chip,.tile{flex-direction:row;min-height:28px;padding:2px 5px;gap:4px;font-size:11.5px}
-.chip .nm,.tile .tl{font-weight:500}
-.mbar{gap:4px}
-.brow.cfg{gap:4px}
-.chip .av{width:16px;height:16px;font-size:10px;border-radius:3px}
-.tile .tm{display:none}
-.tile .ic{font-size:12px}
-.chip .dot{top:3px;inset-inline-start:3px}
-.chip .crown{top:1px}
-.composer{border:1.5px solid color-mix(in srgb,var(--mut) 55%,transparent)!important;background:var(--card)!important;border-radius:8px!important}
-.composer textarea{resize:vertical!important;min-height:64px!important;max-height:none!important;border:1px solid var(--line)!important;border-radius:6px;background:var(--bg)!important}
-.cn-top:not(:has(*)){display:none}
-.composer{border:1.5px solid var(--line);border-radius:14px;background:var(--bg);padding:8px 10px;display:flex;flex-direction:column;gap:6px;transition:border-color .15s}
-.composer:focus-within{border-color:var(--acc);box-shadow:0 0 0 2px color-mix(in srgb,var(--acc) 20%,transparent)}
-.composer textarea{border:0;background:transparent;color:inherit;resize:none;min-height:36px;max-height:200px;padding:4px 6px;font:inherit;line-height:1.7;outline:none;direction:auto;width:100%}
-.composer .row{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
-.composer .row .sp{flex:1}
-.est{font-size:12px;color:var(--mut)}
-.cn-atts{display:flex;flex-wrap:wrap;gap:6px}
-.cn-att{display:flex;align-items:center;gap:5px;border:1px solid var(--line);border-radius:9px;padding:3px 4px 3px 8px;background:var(--side);font-size:12px}
-.cn-att select{border:0;background:transparent;color:inherit;font-size:12px;max-width:110px}
-.cn-att button{border:0;background:transparent;cursor:pointer;color:var(--mut)}
-.cn-ibtn{border:0;background:transparent;cursor:pointer;border-radius:9px;padding:5px 8px;color:var(--mut);font-size:15px}
-.cn-ibtn:hover{background:var(--acc-soft);color:var(--acc)}
-.cn-send{border:0;border-radius:10px;padding:7px 18px;background:var(--acc);color:#fff;font-weight:700;cursor:pointer;font-size:13.5px}
-.cn-send:disabled{opacity:.45;cursor:default}
-.cn-send.stop{background:var(--bad)}
-.cn-thread{display:flex;flex-direction:column;gap:14px;flex:1;min-height:0;overflow-y:auto;padding-bottom:12px}
-.cn-round{display:flex;flex-direction:column;gap:10px;animation:cnin .25s ease}
-@keyframes cnin{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
-.cn-q{align-self:flex-start;max-width:92%;background:var(--acc-soft);border-radius:14px 14px 4px 14px;padding:9px 13px;white-space:pre-wrap;overflow-wrap:anywhere}
-.cn-qfiles{font-size:11.5px;color:var(--mut);margin-top:4px}
-.stages{display:flex;gap:4px;align-items:center;flex-wrap:wrap;font-size:12px;margin:2px 0}
-.stages span{padding:2px 9px;border-radius:99px;background:var(--side);color:var(--mut)}
-.stages span.done{background:var(--ok-soft);color:var(--ok)}
-.stages span.cur{background:var(--acc);color:#fff}
-.stages-sep{background:none!important;padding:0!important;color:var(--mut)}
-.verdict{border:2px solid var(--gold);background:var(--gold-soft);border-radius:14px;padding:12px 14px;color:var(--txt)}
-.verdict .vh{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-.verdict .vh b{font-size:15px}
-.verdict .conf{font-size:12px;border-radius:99px;padding:1px 9px;background:var(--card);border:1px solid var(--gold);color:var(--gold);font-weight:600}
-.verdict .vbody{margin-top:8px;font-size:14px;line-height:1.8}
-.verdict .vsum{display:none;font-size:13px;color:var(--mut);margin-top:4px}
-.verdict.collapsed .vbody,.verdict.collapsed .vtabs,.verdict.collapsed .vpane{display:none}
-.verdict.collapsed .vsum{display:block}
-.vtabs{display:flex;gap:4px;margin-top:10px;flex-wrap:wrap}
-.vtabs button{border:1px solid var(--line);background:var(--card);color:var(--txt);border-radius:8px;padding:3px 10px;cursor:pointer;font:inherit;font-size:12.5px;transition:.15s}
-.vtabs button:hover{border-color:var(--gold)}
-.vtabs button.on{border-color:var(--gold);background:var(--gold);color:#fff;font-weight:700}
-.vpane{margin-top:8px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px;font-size:13.5px;line-height:1.75;overflow-x:auto}
-table.claims{width:100%;border-collapse:collapse;font-size:13px}
-table.claims th,table.claims td{border-bottom:1px solid var(--line);padding:6px 8px;text-align:start;vertical-align:top}
-table.claims td.c,table.claims th.c{text-align:center;width:52px}
-.yes{color:var(--ok);font-weight:700}.no{color:var(--bad);font-weight:700}.na{color:var(--mut)}
-.tbar{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--mut);margin:6px 0 2px}
-.tbar .sp{flex:1}
-.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:10px;align-items:start}
-.acard{border:1px solid var(--line);border-radius:12px;background:var(--card);border-top:3px solid var(--c,var(--line));display:flex;flex-direction:column;min-height:150px;min-width:0;transition:box-shadow .15s}
-.acard:hover{box-shadow:0 2px 8px rgba(0,0,0,.06)}
-.acard.wide{grid-column:1/-1}
-.acard .h{display:flex;align-items:center;gap:6px;padding:8px 10px;border-bottom:1px solid var(--line);font-size:13.5px}
-.acard .h .letter{font-size:11px;color:var(--mut)}
-.acard .h .bd{margin-inline-start:auto;font-size:11px;border-radius:99px;padding:1px 8px;color:#fff}
-.acard .act{font-size:12px;color:var(--mut);padding:6px 10px;border-bottom:1px dashed var(--line);min-height:28px;display:flex;align-items:center;gap:5px;flex-wrap:wrap}
-.acard .act .tool{display:inline-block;background:var(--side);border-radius:6px;padding:1px 6px;margin:1px 0;font-size:11.5px}
-.acard .tx{padding:8px 10px;font-size:13px;max-height:220px;overflow-y:auto;white-space:pre-wrap;scrollbar-width:thin}
-.acard.wide .tx{max-height:60vh}
-.acard .peek{display:none;font-size:12px;color:var(--mut);padding:8px 10px}
-.acard.collapsed{min-height:0}
-.acard.collapsed .act,.acard.collapsed .tx{display:none}
-.acard.collapsed .peek{display:block}
-.acard .ft{display:flex;gap:6px;padding:6px 10px;border-top:1px solid var(--line);margin-top:auto;font-size:12px;color:var(--mut);align-items:center;flex-wrap:wrap}
-.fold-h{cursor:pointer;user-select:none}
-.chev2{display:inline-block;margin-inline-start:auto;color:var(--mut);transition:transform .2s;font-size:13px}
-.collapsed .chev2{transform:rotate(90deg)}
-.mbtn{border:1px solid var(--line);background:var(--card);color:var(--txt);border-radius:9px;padding:4px 11px;cursor:pointer;font:inherit;font-size:12.5px;transition:.15s}
-.mbtn:hover{border-color:var(--acc);color:var(--acc)}
-.mbtn.pri{background:var(--acc);border-color:var(--acc);color:#fff}
-.mbtn.pri:hover{opacity:.9}
-.mbtn.gold{background:var(--gold-soft);border-color:var(--gold);color:var(--gold)}
-.mbtn.gold:hover{background:var(--gold);color:#fff}
-.cn [hidden]{display:none!important}
-.pill{display:inline-block;font-size:11px;border-radius:99px;padding:1px 7px;font-weight:600}
-.p-warn{background:var(--warn-soft);color:var(--warn)}
-.p-crit{background:var(--bad-soft);color:var(--bad)}
-.p-ok{background:var(--ok-soft);color:var(--ok)}
-.skel{height:12px;border-radius:6px;background:linear-gradient(90deg,var(--side),var(--line),var(--side));background-size:200% 100%;animation:sh 1.2s infinite;margin:6px 0}
-@keyframes sh{to{background-position:-200% 0}}
-.foot-actions{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:6px}
-.cn-md{overflow-wrap:anywhere;line-height:1.8}
-.cn-md h4{margin:10px 0 4px;color:var(--c,var(--acc));font-size:13.5px}
-.cn-md p{margin:3px 0}
-.cn-md ul{margin:3px 0;padding-inline-start:20px}
-.cn-err{color:var(--bad);font-size:12.5px;padding:4px 0}
-.cn-sub{color:var(--mut);font-size:12px}
-.cn-time{font-size:11px;color:var(--mut)}
-.cn-empty{border:1.5px dashed var(--line);border-radius:12px;padding:22px;text-align:center;color:var(--mut)}
-.cn-live{margin:0;padding:8px;max-height:180px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font:12px ui-monospace,monospace;background:var(--side);border-radius:8px;color:var(--mut);direction:auto}
-
-/* ===== ضغط شامل: مساحة أكبر للأجوبة ===== */
-.cn{gap:5px;font-size:12.5px}
-.brow.team{display:flex;gap:4px;align-items:stretch}
-.brow.team .roster{flex:1;grid-auto-columns:minmax(78px,1fr)}
-.cn-cfgtoggle{flex:none;border:1px solid var(--line);background:var(--card);color:var(--txt);border-radius:4px;padding:0 8px;font:inherit;font-size:11px;cursor:pointer;white-space:nowrap}
-.cn-cfgtoggle:hover{background:var(--side)}
-.brow.cfg[hidden]{display:none}
-.chip,.tile{min-height:22px;padding:1px 4px;font-size:11px}
-.chip .av{width:14px;height:14px;font-size:9px}
-.composer{padding:3px 6px!important;gap:3px!important;border-radius:7px!important}
-.composer textarea{min-height:34px!important;padding:2px 5px!important;line-height:1.5!important;font-size:12.5px}
-.composer .row{gap:4px}
-.cn-send{padding:3px 12px!important;font-size:12px!important;border-radius:6px!important}
-.cn-ibtn{padding:1px 6px;font-size:13px}
-.est{font-size:11px}
-.mbtn{padding:2px 8px;font-size:11.5px}
-.cn-thread{gap:8px;padding-bottom:6px}
-.cn-round{gap:6px}
-.cn-q{padding:5px 10px}
-.stages{margin:0;font-size:11px}
-.stages span{padding:1px 7px}
-.verdict{padding:6px 10px;border-width:1.5px;border-radius:9px}
-.verdict .vbody{margin-top:4px;line-height:1.65;font-size:13px}
-.tbar{margin:2px 0 0;font-size:12px}
-.cards{grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:6px}
-.acard{min-height:90px;border-radius:8px}
-.acard .h{padding:4px 8px;font-size:12px}
-
-`;
-
-  function mountCouncil(container, opts) {
-    if (!container) return;
-    opts = opts || {};
-    unmountCouncil(container);
-    const host = container; host.replaceChildren(); host.className = (host.className + ' cn').trim(); host.dir = 'rtl'; councilRoot = host;
-    const style = document.createElement('style'); style.textContent = CN_CSS; host.appendChild(style);
-    const mk = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
-
-    // ===== الرأس =====
-    const top = mk('div', 'cn-top');
-    const checkBtn = mk('button', 'mbtn', 'فحص الجاهزية');
-    checkBtn.type = 'button';
-    const histSel = mk('select', 'mbtn');
-    histSel.title = 'مجالس سابقة';
-    top.append(checkBtn, histSel);
-    const tabBar = host.closest('#zajel-term-window')?.querySelector('.tw-tabs');
-    if (tabBar) {
-      tabBar.querySelectorAll('.cn-tabtools').forEach(x => x.remove());
-      const tools = mk('span', 'cn-tabtools'); tools.style.cssText = 'margin-inline-start:auto;display:inline-flex;gap:6px';
-      tools.append(checkBtn, histSel); tabBar.appendChild(tools);
-    }
-    if (opts.onExit) {
-      const exitBtn = mk('button', 'mbtn', 'العودة للمحادثة');
-      exitBtn.type = 'button';
-      exitBtn.onclick = opts.onExit;
-      top.appendChild(exitBtn);
-    }
-    host.appendChild(top);
-
-    // ===== الصفّان (الفريق ثم العمق وخيارات الحكم) =====
-    const mbar = mk('div', 'mbar');
-
-    // الصف ١: الفريق
-    const browTeam = mk('div', 'brow team');
-    const roster = mk('div', 'roster');
-    roster.title = 'اضغط على الوكيل ليشارك · 👑 لتجعله الحكم';
-    browTeam.append(roster);
-    const cfgToggle = mk('button', 'cn-cfgtoggle'); cfgToggle.type = 'button'; cfgToggle.title = 'إعدادات العمق والخيارات (توسيع/طي)';
-    browTeam.append(cfgToggle);
-
-    // الصف ٢: العمق وخيارات الحكم
-    const browCfg = mk('div', 'brow cfg');
-    const depthSel = mk('select', 'msel');   // لا يُعرض: الأزرار الثلاثة تضبطه
-    depthSel.title = 'العمق يحدد طريقة التفكير والبحث والأدوات';
-    [
-      ['fast', '⚡ سريع · ١–٣ د'],
-      ['bal', '⚖ متوازن · ٣–٨ د'],
-      ['deep', '🔬 عميق · ١٠–٢٥ د']
-    ].forEach(([v, t]) => {
-      const o = mk('option', '', t); o.value = v; depthSel.appendChild(o);
-    });
-
-    // العمق: ثلاث خانات بدل القائمة المنسدلة
-    const DEPTH_TILES = [['fast', '⚡', 'سريع', '١–٣ د', 'سريع: تفكير عادي، للأسئلة القصيرة'],
-      ['bal', '⚖', 'متوازن', '٣–٨ د', 'متوازن: أقوى نموذج وتفكير عالٍ (الافتراضي)'],
-      ['deep', '🔬', 'عميق', '١٠–٢٥ د', 'عميق: أقصى تفكير ونقد متبادل، للدراسات والرسائل']];
-    const depthBtns = {};
-    const depthGroup = mk('div', 'tiles depth');
-    DEPTH_TILES.forEach(([v, ic, t, tm, tip]) => {
-      const b = mk('button', 'tile'); b.type = 'button'; b.title = tip;
-      b.append(mk('span', 'ic', ic), mk('span', 'tl', t), mk('span', 'tm', tm));
-      b.onclick = () => applyDepth(v);
-      depthBtns[v] = b; depthGroup.appendChild(b);
-    });
-    const syncDepthTiles = () => { Object.entries(depthBtns).forEach(([v, b]) => b.classList.toggle('on', v === depthSel.value)); if (typeof syncCfg === 'function') syncCfg(); };
-    const optsSpan = mk('div', 'tiles opts');
-
-    const makeOpt = (id, label, tip) => {
-      const lbl = mk('label', 'opt');
-      lbl.title = tip;
-      lbl.dataset.tip = tip;
-      const inp = mk('input'); inp.type = 'checkbox'; inp.id = id;
-      const [ic, ...rest] = label.split(' ');
-      const sp = mk('span', 'tile');
-      sp.append(mk('span', 'ic', ic), mk('span', 'tl', rest.join(' ')));
-      lbl.append(inp, sp);
-      return { lbl, inp };
-    };
-
-    const optBlind = makeOpt('cnOptBlind', '🙈 مُعمّى', 'حكم مُعمّى: لا يعرف الحكم أسماء أصحاب الإجابات');
-    const optReview = makeOpt('cnOptReview', '💬 نقد', 'جولة نقد متبادل: يراجع كل وكيل إجابات الآخرين قبل الحكم');
-    const optVerify = makeOpt('cnOptVerify', '🔎 تحقق', 'تحقق: يراجع الحكم الإحالات في الشاملة');
-    const optLive = makeOpt('cnOptLive', '📺 حي', 'وضع حي: تشاهد الوكيل وهو يكتب عبر الطرفية');
-
-    optsSpan.append(optBlind.lbl, optReview.lbl, optVerify.lbl, optLive.lbl);
-    browCfg.append(depthGroup, optsSpan);
-
-    mbar.append(browTeam, browCfg);
-    let cfgOpen = (() => { try { return localStorage.getItem('zajel_council_cfg_open') === 'true'; } catch (_) { return false; } })();
-    const DEPTH_NAME = { fast: '⚡ سريع', bal: '⚖ متوازن', deep: '🔬 عميق' };
-    const syncCfg = () => {
-      browCfg.hidden = !cfgOpen;
-      cfgToggle.textContent = (DEPTH_NAME[depthSel.value] || '') + (cfgOpen ? ' ▴' : ' ▾');
-    };
-    cfgToggle.onclick = () => { cfgOpen = !cfgOpen; try { localStorage.setItem('zajel_council_cfg_open', String(cfgOpen)); } catch (_) {} syncCfg(); };
-    depthSel.addEventListener('change', syncCfg);
-    host.appendChild(mbar);
-
-    // ===== مربع الكتابة والمرفقات =====
-    const composer = mk('div', 'composer');
-    const attBar = mk('div', 'cn-atts'); attBar.hidden = true;
-    const ta = mk('textarea');
-    ta.rows = 1;
-    ta.dir = 'auto';
-    ta.placeholder = 'اسأل المجلس… أرفق ملفًا أو اكتب مساره على الكمبيوتر (Markdown أو Word أو PDF) · ⌘↩ للإرسال';
-
-    const compRow = mk('div', 'row');
-    const attachBtn = mk('button', 'cn-ibtn', '📎');
-    attachBtn.type = 'button';
-    attachBtn.title = 'إرفاق ملفات لوكيل أو للحكم';
-    const fileIn = mk('input'); fileIn.type = 'file'; fileIn.multiple = true; fileIn.hidden = true;
-    const estSpan = mk('span', 'est');
-    const sp = mk('span', 'sp');
-    const newBtn = mk('button', 'mbtn', 'سؤال جديد'); newBtn.type = 'button'; newBtn.hidden = true;
-    const sendBtn = mk('button', 'cn-send', 'أرسل ⌘↩'); sendBtn.type = 'button';
-
-    compRow.append(attachBtn, fileIn, estSpan, sp, newBtn, sendBtn);
-    composer.append(attBar, ta, compRow);
-    host.appendChild(composer);
-
-    const thread = mk('div', 'cn-thread');
-    const empty = mk('div', 'cn-empty', 'اختر الوكلاء بالضغط على أسمائهم، وعيّن الحكم بالتاج، ثم اطرح سؤالك.');
-    thread.appendChild(empty);
-    host.appendChild(thread);
-
-    // ===== الحالة =====
-    let available = [], selected = new Set(), main = '', checkStates = {}, atts = [];
-    let activeId = '', lastDoneId = '', parentId = '', boxes = {};
-
-    // قراءة التفضيلات المحفوظة
-    try {
-      const sv = JSON.parse(localStorage.getItem('zajel_council_sel') || '{}');
-      selected = new Set(Array.isArray(sv.ids) ? sv.ids : []);
-      main = typeof sv.main === 'string' ? sv.main : '';
-    } catch (_) {}
-
-    let depth = (() => { try { return localStorage.getItem('zajel_council_depth') || 'bal'; } catch (_) { return 'bal'; } })();
-    if (!['fast', 'bal', 'deep'].includes(depth)) depth = 'bal';
-    depthSel.value = depth; syncCfg();
-
-    let blind = (() => { try { const v = localStorage.getItem('zajel_council_blind'); return v == null ? true : v === 'true'; } catch (_) { return true; } })();
-    let review = (() => { try { return localStorage.getItem('zajel_council_review') === 'true'; } catch (_) { return false; } })();
-    let verify = (() => { try { const v = localStorage.getItem('zajel_council_verify'); return v == null ? true : v === 'true'; } catch (_) { return true; } })();
-    let liveMode = (() => { try { return localStorage.getItem('zajel_council_live') === 'true'; } catch (_) { return false; } })();
-
-    optBlind.inp.checked = blind;
-    optReview.inp.checked = review;
-    optVerify.inp.checked = verify;
-    optLive.inp.checked = liveMode;
-
-    const persist = () => {
-      try {
-        localStorage.setItem('zajel_council_sel', JSON.stringify({ ids: [...selected], main }));
-        localStorage.setItem('zajel_council_depth', depth);
-        localStorage.setItem('zajel_council_blind', String(optBlind.inp.checked));
-        localStorage.setItem('zajel_council_review', String(optReview.inp.checked));
-        localStorage.setItem('zajel_council_verify', String(optVerify.inp.checked));
-        localStorage.setItem('zajel_council_live', String(optLive.inp.checked));
-      } catch (_) {}
-    };
-
-    const nameOf = id => available.find(a => a.id === id)?.name || id;
-    const err = e => {
-      const p = mk('div', 'cn-err', e?.message || 'تعذّر تنفيذ الطلب');
-      composer.after(p);
-      setTimeout(() => p.remove(), 6000);
-    };
-
-    const grow = () => {
-      ta.style.height = 'auto';
-      ta.style.height = Math.min(200, ta.scrollHeight) + 'px';
-    };
-    ta.addEventListener('input', grow);
-
-    // تطبيق ضبط العمق على حبوب الخيارات
-    const applyDepth = mode => {
-      depth = mode;
-      depthSel.value = depth;
-      syncDepthTiles();
-      if (mode === 'fast') {
-        optBlind.inp.checked = true;
-        optBlind.inp.disabled = false;
-        optBlind.lbl.classList.remove('locked');
-        optBlind.lbl.title = optBlind.lbl.dataset.tip;
-
-        optReview.inp.checked = false;
-        optReview.inp.disabled = true;
-        optReview.lbl.classList.add('locked');
-        optReview.lbl.title = 'غير متاح في الوضع السريع — ' + optReview.lbl.dataset.tip;
-
-        optVerify.inp.checked = false;
-        optVerify.inp.disabled = false;
-        optVerify.lbl.classList.remove('locked');
-        optVerify.lbl.title = optVerify.lbl.dataset.tip;
-      } else if (mode === 'bal') {
-        optBlind.inp.checked = true;
-        optBlind.inp.disabled = false;
-        optBlind.lbl.classList.remove('locked');
-        optBlind.lbl.title = optBlind.lbl.dataset.tip;
-
-        optReview.inp.checked = false;
-        optReview.inp.disabled = false;
-        optReview.lbl.classList.remove('locked');
-        optReview.lbl.title = optReview.lbl.dataset.tip;
-
-        optVerify.inp.checked = true;
-        optVerify.inp.disabled = false;
-        optVerify.lbl.classList.remove('locked');
-        optVerify.lbl.title = optVerify.lbl.dataset.tip;
-      } else if (mode === 'deep') {
-        optBlind.inp.checked = true;
-        optBlind.inp.disabled = false;
-        optBlind.lbl.classList.remove('locked');
-        optBlind.lbl.title = optBlind.lbl.dataset.tip;
-
-        optReview.inp.checked = true;
-        optReview.inp.disabled = false;
-        optReview.lbl.classList.remove('locked');
-        optReview.lbl.title = optReview.lbl.dataset.tip;
-
-        optVerify.inp.checked = true;
-        optVerify.inp.disabled = false;
-        optVerify.lbl.classList.remove('locked');
-        optVerify.lbl.title = optVerify.lbl.dataset.tip;
-      }
-      persist();
-      updateEst();
-    };
-
-    depthSel.onchange = () => applyDepth(depthSel.value);
-    [optBlind.inp, optReview.inp, optVerify.inp, optLive.inp].forEach(inp => {
-      inp.onchange = () => { persist(); updateEst(); };
-    });
-
-    // سطر تقدير الوقت
-    const updateEst = () => {
-      const ids = [...selected].filter(id => available.some(a => a.id === id));
-      if (!ids.length) {
-        estSpan.textContent = 'اختر مفوَّضًا واحدًا على الأقل';
-        return;
-      }
-      const base = { fast: 2, bal: 5, deep: 11 }[depth] + (optReview.inp.checked ? 4 : 0);
-      const speeds = ids.map(id => {
-        const cs = checkStates[id];
-        if (cs && cs.secs && cs.secs > 5) return Math.min(3, cs.secs / 10);
-        return agentSpeed[id] || 1.0;
-      });
-      const maxSp = Math.max(...speeds);
-      const lo = Math.max(1, Math.round(base * maxSp));
-      const hi = Math.max(lo + 1, Math.round(base * maxSp * 1.5));
-      const sorted = ids.map(id => ({ id, name: nameOf(id), sp: agentSpeed[id] || 1.0 })).sort((a, b) => b.sp - a.sp);
-      const slowest = sorted[0];
-      const slowestText = slowest && slowest.sp > 1.5 ? ' · الأبطأ: ' + slowest.name : '';
-      const judgeText = main ? ' · الحكم: ' + nameOf(main) : ' · بلا حكم';
-      estSpan.textContent = `متوقّع: ${lo}–${hi} دقيقة · ${ids.length} مفوَّض${judgeText}${slowestText}`;
-    };
-
-    applyDepth(depth);   // بعد تعريف updateEst (كان يُستدعى قبله فيتوقف المجلس عند الفتح)
-
-    // فحص الجاهزية GET council/check
-    const runCheck = async force => {
-      checkBtn.textContent = 'يفحص…';
-      checkBtn.disabled = true;
-      const ids = available.map(a => a.id);
-      try {
-        const query = (ids.length ? 'ids=' + encodeURIComponent(ids.join(',')) + '&' : '') + 'force=' + (force ? '1' : '0');
-        const res = await req('council/check?' + query).catch(() => null);
-        if (res && res.agents) {
-          checkStates = res.agents;
-        }
-        let readyCount = 0, offCount = 0;
-        available.forEach(a => {
-          const st = (checkStates[a.id] || {}).state || 'ready';
-          if (st === 'off') {
-            offCount++;
-            if (selected.has(a.id)) selected.delete(a.id);
-            if (main === a.id) main = '';
-          } else {
-            readyCount++;
-          }
-        });
-        persist();
-        renderRoster();
-        checkBtn.textContent = `✓ ${readyCount} جاهز${offCount ? ' · ' + offCount + ' معطّل' : ''}`;
-        setTimeout(() => { checkBtn.textContent = 'فحص الجاهزية'; checkBtn.disabled = false; }, 3500);
-      } catch (_) {
-        checkBtn.textContent = 'فحص الجاهزية';
-        checkBtn.disabled = false;
-      }
-    };
-    checkBtn.onclick = () => runCheck(true);
-
-    const flashChip = (c, note) => {
-      c.animate([
-        { transform: 'translateX(0)' },
-        { transform: 'translateX(-5px)' },
-        { transform: 'translateX(5px)' },
-        { transform: 'translateX(-4px)' },
-        { transform: 'translateX(4px)' },
-        { transform: 'translateX(0)' }
-      ], { duration: 280 });
-      err(new Error(note || 'الوكيل غير جاهز، لا يمكن اختياره'));
-    };
-
-    // رسم الفريق في الرستر
-    const renderRoster = () => {
-      roster.replaceChildren();
-      available.forEach(a => {
-        const chk = checkStates[a.id] || { state: 'ready', note: 'جاهز' };
-        const isOff = chk.state === 'off';
-        const isSlow = chk.state === 'slow';
-        const dotCls = isOff ? 'off' : (isSlow ? 'slow' : 'ready');
-
-        const chip = mk('div', 'chip' + (selected.has(a.id) ? ' on' : '') + (main === a.id ? ' judge' : '') + (isOff ? ' off' : ''));
-        chip.style.setProperty('--c', colorOf(a.id));
-        chip.title = a.name + ': ' + (chk.note || (isOff ? 'معطّل' : isSlow ? 'بطيء' : 'جاهز'));
-
-        const av = mk('span', 'av', a.name.trim().charAt(0).toUpperCase());
-        const nm = mk('span', '', a.name);
-        const dot = mk('span', 'dot ' + dotCls);
-        const crown = mk('button', 'crown', '👑');
-        crown.type = 'button';
-        crown.title = main === a.id ? 'هو الحكم (اضغط للإلغاء)' : 'اجعله الحكم';
-
-        crown.onclick = ev => {
-          ev.stopPropagation();
-          if (isOff) { flashChip(chip, chk.note); return; }
-          main = (main === a.id) ? '' : a.id;
-          if (main && !selected.has(main)) selected.add(main);
-          persist();
-          renderRoster();
-          renderAtts();
-        };
-
-        chip.onclick = () => {
-          if (isOff) { flashChip(chip, chk.note); return; }
-          if (selected.has(a.id)) {
-            selected.delete(a.id);
-            if (main === a.id) main = '';
-          } else {
-            selected.add(a.id);
-          }
-          persist();
-          renderRoster();
-          renderAtts();
-        };
-
-        nm.className = 'nm';
-        chip.append(dot, crown, av, nm);
-        roster.appendChild(chip);
-      });
-      updateEst();
-      sync();
-    };
-
-    // ===== المرفقات =====
-    const targets = () => [
-      ['*', 'للجميع'],
-      ...(main ? [['main', 'للحكم فقط']] : []),
-      ...[...selected].filter(id => available.some(a => a.id === id)).map(id => [id, 'لـ ' + nameOf(id)])
-    ];
-
-    function renderAtts() {
-      attBar.replaceChildren();
-      attBar.hidden = !atts.length;
-      atts.forEach((a, i) => {
-        const chip = mk('div', 'cn-att');
-        chip.appendChild(mk('span', '', (a.status === 'up' ? '⏳ ' : a.status === 'err' ? '⚠ ' : '📄 ') + a.name));
-        const sel = mk('select');
-        targets().forEach(([v, t]) => {
-          const o = mk('option', '', t); o.value = v; sel.appendChild(o);
-        });
-        if (!targets().some(([v]) => v === a.to)) a.to = '*';
-        sel.value = a.to;
-        sel.onchange = () => { a.to = sel.value; };
-        const rm = mk('button', '', '✕');
-        rm.type = 'button';
-        rm.onclick = () => { atts.splice(i, 1); renderAtts(); };
-        chip.append(sel, rm);
-        attBar.appendChild(chip);
-      });
-    }
-
-    const upload = async file => {
-      const item = { name: file.name, status: 'up', path: '', to: '*' };
-      atts.push(item);
-      renderAtts();
-      try {
-        const r = await (await fetch('/api/assistant/upload?name=' + encodeURIComponent(file.name), { method: 'POST', body: file })).json();
-        if (r && r.ok) {
-          item.path = r.path;
-          item.status = 'ok';
-        } else {
-          item.status = 'err';
-          err(new Error(r?.error || 'فشل رفع الملف'));
-        }
-      } catch (e) {
-        item.status = 'err';
-        err(e);
-      }
-      renderAtts();
-      sync();
-    };
-
-    attachBtn.onclick = () => fileIn.click();
-    fileIn.onchange = () => { [...fileIn.files].forEach(upload); fileIn.value = ''; };
-    ta.addEventListener('paste', ev => {
-      const fs = [...(ev.clipboardData?.files || [])];
-      if (fs.length) { ev.preventDefault(); fs.forEach(upload); }
-    });
-    host.addEventListener('dragover', ev => ev.preventDefault());
-    host.addEventListener('drop', ev => {
-      if (ev.dataTransfer?.files?.length) {
-        ev.preventDefault();
-        [...ev.dataTransfer.files].forEach(upload);
-      }
-    });
-
-    // ===== عرض الجولة وتحديثها الجزئي =====
-    const secs = t => {
-      const n = Math.max(0, Math.round(t));
-      return n < 60 ? n + ' ث' : Math.floor(n / 60) + ' د ' + (n % 60) + ' ث';
-    };
-    const finished = r => ['done', 'stopped', 'error'].includes(r.phase);
-
-    function renderRound(r) {
-      let box = boxes[r.id];
-      if (!box) {
-        empty.remove();
-        box = boxes[r.id] = mk('section', 'cn-round');
-        box.dataset.roundId = r.id;
-        thread.appendChild(box);
-
-        const qEl = mk('div', 'cn-q');
-        box.appendChild(qEl);
-
-        const stagesEl = mk('div', 'stages');
-        box.appendChild(stagesEl);
-
-        const verdictEl = mk('div');
-        verdictEl.hidden = true;
-        box.appendChild(verdictEl);
-
-        const tbarEl = mk('div', 'tbar');
-        tbarEl.innerHTML = '<span>إجابات الوكلاء</span><span class="sp"></span>';
-        const foldAllBtn = mk('button', 'mbtn', 'طيّ الكل');
-        foldAllBtn.type = 'button';
-        foldAllBtn.onclick = () => {
-          const isFold = foldAllBtn.textContent === 'طيّ الكل';
-          box.querySelectorAll('.acard, .verdict').forEach(el => el.classList.toggle('collapsed', isFold));
-          foldAllBtn.textContent = isFold ? 'توسيع الكل' : 'طيّ الكل';
-        };
-        tbarEl.appendChild(foldAllBtn);
-        box.appendChild(tbarEl);
-
-        const cardsEl = mk('div', 'cards');
-        box.appendChild(cardsEl);
-
-        const refiningNoteEl = mk('div', 'cn-sub');
-        refiningNoteEl.style.margin = '4px 0';
-        box.appendChild(refiningNoteEl);
-
-        const footEl = mk('div', 'foot-actions');
-        box.appendChild(footEl);
-
-        box._ui = {
-          qEl,
-          stagesEl,
-          verdictEl,
-          tbarEl,
-          cardsEl,
-          refiningNoteEl,
-          footEl,
-          agentCards: {},
-          lastEvalText: '',
-          activeVerdictTab: 'agree',
-          isVerdictCollapsed: false
-        };
-
-        setTimeout(() => box.scrollIntoView({ behavior: 'smooth', block: 'start' }), 50);
-      }
-
-      const ui = box._ui;
-
-      // 1. السؤال والمرفقات
-      if (!ui.qEl.dataset.rendered) {
-        ui.qEl.textContent = r.question || '';
-        if ((r.attachments || []).length) {
-          const qf = mk('div', 'cn-qfiles', '📎 ' + r.attachments.map(a => (a.name || a.path.split('/').pop()) + (a.scanned ? ' (⚠ مصوَّر بلا نص)' : a.text ? ' (✓ استُخرج نصه)' : '')).join('، '));
-          ui.qEl.appendChild(qf);
-        }
-        ui.qEl.dataset.rendered = '1';
-      }
-
-      // 2. شريط المراحل
-      const hasReview = !!r.review || r.phase === 'review';
-      const hasJudge = !!r.main;
-      const hasVerify = r.verify !== false;
-      const stagesList = [
-        'التحضير',
-        'الإجابات',
-        ...(hasReview ? ['النقد المتبادل'] : []),
-        ...(hasJudge ? ['الحكم'] : []),
-        ...(hasVerify ? ['التحقق'] : []),
-        'الصادر'
-      ];
-
-      let curStage = 0;
-      if (r.phase === 'asking') curStage = 1;
-      else if (r.phase === 'review') curStage = stagesList.indexOf('النقد المتبادل');
-      else if (r.phase === 'evaluating' || r.phase === 'refining') {
-        const evIdx = stagesList.indexOf('الحكم');
-        curStage = evIdx !== -1 ? evIdx : 1;
-      } else if (finished(r)) {
-        curStage = stagesList.length - 1;
-      }
-
-      const stagesHtml = stagesList.map((st, i) => {
-        const isDone = i < curStage;
-        const isCur = i === curStage;
-        const cls = isDone ? 'done' : (isCur ? 'cur' : '');
-        const mark = isDone ? '✓ ' : '';
-        return `<span class="${cls}">${mark}${st}</span>`;
-      }).join('<span class="stages-sep">‹</span>');
-
-      if (ui.stagesEl.innerHTML !== stagesHtml) {
-        ui.stagesEl.innerHTML = stagesHtml;
-      }
-
-      // 3. صندوق الحكم الذهبي
-      const ev = r.eval || {};
-      if (r.main) {
-        ui.verdictEl.hidden = false;
-        const isDoneEval = ['done', 'done_raw'].includes(ev.state) || (ev.answer && finished(r));
-        if (!ev.answer && !isDoneEval) {
-          if (['asking', 'starting', 'evaluating', 'refining'].includes(r.phase) || ['asking', 'starting'].includes(ev.state)) {
-            const textThinking = r.blind ? ' (لا يعرف أسماء أصحاب الإجابات)' : '';
-            const waitHtml = `<div class="verdict"><div class="vh"><span class="av" style="background:var(--gold)">⚖</span><b>الحكم يكتب${textThinking}…</b></div><div class="skel"></div><div class="skel" style="width:60%"></div></div>`;
-            if (ui.verdictEl.dataset.state !== 'wait') {
-              ui.verdictEl.innerHTML = waitHtml;
-              ui.verdictEl.dataset.state = 'wait';
-            }
-          } else {
-            ui.verdictEl.hidden = true;
-          }
-        } else if (ev.answer) {
-          ui.verdictEl.dataset.state = 'ans';
-          if (ui.lastEvalText !== ev.answer) {
-            ui.lastEvalText = ev.answer;
-            const judgeName = ev.name || nameOf(r.main);
-            const parsed = parseVerdict(ev.answer);
-
-            if (parsed) {
-              const vcard = mk('div', 'verdict');
-              if (ui.isVerdictCollapsed) vcard.classList.add('collapsed');
-
-              const vh = mk('div', 'vh fold-h');
-              vh.title = 'اضغط للطيّ أو التوسيع';
-              vh.innerHTML = `<span class="av" style="background:var(--gold);color:#fff">⚖</span><b>الحكم النهائي — ${esc(judgeName)}</b>${parsed.confidence ? `<span class="conf">الثقة: ${esc(parsed.confidence)}</span>` : ''}<span class="chev2">▾</span>`;
-              vh.onclick = () => {
-                ui.isVerdictCollapsed = vcard.classList.toggle('collapsed');
-              };
-              vcard.appendChild(vh);
-
-              if (parsed.summary) {
-                const vsum = mk('div', 'vsum', parsed.summary);
-                vcard.appendChild(vsum);
-              }
-
-              const vbody = mk('div', 'vbody');
-              vbody.appendChild(mdBox(parsed.finalVerdict));
-              vcard.appendChild(vbody);
-
-              const tabDefs = [
-                ['agree', 'الاتفاق', parsed.panes.agree],
-                ['diff', 'الخلاف ومن الأصح', parsed.panes.diff],
-                ['map', 'خريطة الأقوال', parsed.panes.map],
-                ['src', 'المصادر', parsed.panes.src],
-                ['rank', 'الترتيب', parsed.panes.rank]
-              ].filter(t => Boolean(t[2]));
-
-              if (tabDefs.length) {
-                if (!tabDefs.some(t => t[0] === ui.activeVerdictTab)) {
-                  ui.activeVerdictTab = tabDefs[0][0];
-                }
-                const vtabs = mk('div', 'vtabs');
-                const vpane = mk('div', 'vpane');
-
-                const renderPane = tabKey => {
-                  const def = tabDefs.find(t => t[0] === tabKey);
-                  if (!def) return;
-                  vpane.replaceChildren();
-                  if (tabKey === 'map') {
-                    const tbl = formatClaimsTable(def[2]);
-                    if (tbl) vpane.appendChild(tbl);
-                    else vpane.appendChild(mdBox(def[2]));
-                  } else {
-                    vpane.appendChild(mdBox(def[2]));
-                  }
-                };
-
-                tabDefs.forEach(([k, label]) => {
-                  const btn = mk('button', k === ui.activeVerdictTab ? 'on' : '', label);
-                  btn.type = 'button';
-                  btn.dataset.k = k;
-                  btn.onclick = () => {
-                    ui.activeVerdictTab = k;
-                    vtabs.querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.k === k));
-                    renderPane(k);
-                  };
-                  vtabs.appendChild(btn);
-                });
-
-                renderPane(ui.activeVerdictTab);
-                vcard.append(vtabs, vpane);
-              }
-
-              ui.verdictEl.replaceChildren(vcard);
-            } else {
-              const vcard = mk('div', 'verdict');
-              if (ui.isVerdictCollapsed) vcard.classList.add('collapsed');
-              const vh = mk('div', 'vh fold-h');
-              vh.title = 'اضغط للطيّ أو التوسيع';
-              vh.innerHTML = `<span class="av" style="background:var(--gold);color:#fff">⚖</span><b>الحكم — ${esc(judgeName)}</b><span class="chev2">▾</span>`;
-              vh.onclick = () => {
-                ui.isVerdictCollapsed = vcard.classList.toggle('collapsed');
-              };
-              vcard.appendChild(vh);
-              const vbody = mk('div', 'vbody');
-              vbody.appendChild(mdBox(ev.answer));
-              vcard.appendChild(vbody);
-              ui.verdictEl.replaceChildren(vcard);
-            }
-          }
-        }
-      } else {
-        ui.verdictEl.hidden = true;
-      }
-
-      // 4. بطاقات الوكلاء
-      const delegates = r.delegates || [];
-      const letters = r.letters || {};
-      delegates.forEach(id => {
-        const d = (r.agents && r.agents[id]) || {};
-        let card = ui.agentCards[id];
-        if (!card) {
-          card = mk('div', 'acard');
-          card.dataset.agentId = id;
-          card.style.setProperty('--c', colorOf(id));
-
-          const h = mk('div', 'h fold-h');
-          h.title = 'اضغط للطيّ أو التوسيع';
-          const av = mk('span', 'av', (d.name || nameOf(id)).trim().charAt(0).toUpperCase());
-          const nm = mk('b', '', d.name || nameOf(id));
-          const letSpan = mk('span', 'letter');
-          const bd = mk('span', 'bd');
-          const partBadge = mk('span', 'pill p-warn', 'جزئية');
-          partBadge.hidden = true;
-          const chev = mk('span', 'chev2', '▾');
-          h.append(av, nm, letSpan, bd, partBadge, chev);
-          h.onclick = () => card.classList.toggle('collapsed');
-
-          const peek = mk('div', 'peek');
-          const act = mk('div', 'act');
-          const tx = mk('div', 'tx');
-
-          const ft = mk('div', 'ft');
-          const tm = mk('span', 'tm');
-          const toggleRevBtn = mk('button', 'mbtn', 'الأصلية');
-          toggleRevBtn.type = 'button';
-          toggleRevBtn.hidden = true;
-          const cpBtn = mk('button', 'mbtn', 'نسخ');
-          cpBtn.type = 'button';
-          const wideBtn = mk('button', 'mbtn', 'توسيع');
-          wideBtn.type = 'button';
-          ft.append(tm, toggleRevBtn, cpBtn, wideBtn);
-
-          card.append(h, peek, act, tx, ft);
-          ui.cardsEl.appendChild(card);
-
-          card._ui = {
-            h, av, nm, letSpan, bd, partBadge, peek, act, tx, ft, tm, toggleRevBtn, cpBtn, wideBtn,
-            showRevised: true,
-            lastRenderedText: '',
-            lastActivity: '',
-            lastState: ''
-          };
-
-          wideBtn.onclick = () => {
-            const isWide = card.classList.toggle('wide');
-            wideBtn.textContent = isWide ? 'تصغير' : 'توسيع';
-          };
-
-          cpBtn.onclick = () => {
-            const textToCopy = (card._ui.showRevised && d.revised) ? d.revised : (d.answer || d.live || '');
-            if (textToCopy && navigator.clipboard?.writeText) {
-              navigator.clipboard.writeText(textToCopy).then(() => {
-                cpBtn.textContent = 'تم النسخ ✓';
-                setTimeout(() => cpBtn.textContent = 'نسخ', 1500);
-              }).catch(() => {});
-            }
-          };
-
-          toggleRevBtn.onclick = () => {
-            card._ui.showRevised = !card._ui.showRevised;
-            toggleRevBtn.textContent = card._ui.showRevised ? 'الأصلية' : 'المنقّحة';
-            card._ui.lastRenderedText = '';
-            renderCardText();
-          };
-
-          ui.agentCards[id] = card;
-        }
-
-        const cui = card._ui;
-
-        // تحديث الرأس
-        const letter = letters[id] || '';
-        cui.letSpan.textContent = letter ? `(الإجابة ${letter})` : '';
-        if (cui.lastState !== d.state) {
-          cui.lastState = d.state;
-          cui.bd.textContent = councilStateText[d.state] || d.state || 'في الانتظار';
-          cui.bd.style.background = councilStateColor[d.state] || '#737373';
-        }
-        cui.partBadge.hidden = !d.partial;
-
-        // تحديث النشاط
-        if (d.activity && cui.lastActivity !== d.activity) {
-          cui.lastActivity = d.activity;
-          cui.act.innerHTML = '🔧 <span class="tool">' + esc(d.activity) + '</span>';
-        } else if (!d.activity && cui.lastActivity !== (d.state || '')) {
-          cui.lastActivity = d.state || '';
-          if (['done', 'done_raw'].includes(d.state)) {
-            cui.act.innerHTML = '<span class="small muted">✓ اكتملت الإجابة</span>';
-          } else if (d.error) {
-            cui.act.innerHTML = '<span class="cn-err">⚠ ' + esc(d.error) + '</span>';
-          } else if (['asking', 'starting', 'reviewing'].includes(d.state)) {
-            cui.act.innerHTML = '<span class="small muted">⏳ يعمل الآن…</span>';
-          } else {
-            cui.act.textContent = '';
-          }
-        }
-
-        // زر الأصلية / المنقّحة
-        cui.toggleRevBtn.hidden = !(d.answer && d.revised);
-
-        // وقت الاستغراق
-        if (d.sent_at) {
-          cui.tm.textContent = secs(((d.finished_at || Date.now() / 1000) - d.sent_at));
-        } else {
-          cui.tm.textContent = '';
-        }
-
-        // نص الإجابة (مع احترام التحديد النشط)
-        function renderCardText() {
-          const sel = window.getSelection();
-          const hasActiveSelection = sel && !sel.isCollapsed && card.contains(sel.anchorNode);
-          if (hasActiveSelection) return;
-
-          const activeAns = (cui.showRevised && d.revised) ? d.revised : (d.answer || '');
-          if (activeAns) {
-            if (cui.lastRenderedText !== activeAns) {
-              cui.lastRenderedText = activeAns;
-              const st = cui.tx.scrollTop;
-              cui.tx.replaceChildren(mdBox(activeAns));
-              cui.tx.scrollTop = st;
-              const firstLn = activeAns.split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#'))[0] || '';
-              cui.peek.textContent = firstLn.slice(0, 80) + (firstLn.length > 80 ? '…' : '');
-            }
-          } else if (d.live) {
-            if (cui.lastRenderedText !== d.live) {
-              cui.lastRenderedText = d.live;
-              cui.tx.replaceChildren();
-              const pre = mk('pre', 'cn-live', d.live);
-              cui.tx.appendChild(pre);
-              pre.scrollTop = pre.scrollHeight;
-              cui.peek.textContent = d.live.slice(0, 80) + '…';
-            }
-          } else if (['asking', 'starting', 'queued', 'reviewing'].includes(d.state)) {
-            if (cui.lastRenderedText !== '__skel__') {
-              cui.lastRenderedText = '__skel__';
-              cui.tx.innerHTML = '<div class="skel"></div><div class="skel" style="width:70%"></div>';
-            }
-          }
-        }
-        renderCardText();
-      });
-
-      // 5. الملاحظات والتذييل
-      if (r.phase === 'refining') {
-        ui.refiningNoteEl.textContent = 'زاجل ينتظر ' + (r.pending || 'بعض') + ' وكيل ليحدّث الحكم بإجاباتهم…';
-        ui.refiningNoteEl.hidden = false;
-      } else {
-        ui.refiningNoteEl.hidden = true;
-      }
-
-      // أزرار التصدير والتقييم
-      ui.footEl.replaceChildren();
-      const anyAns = Object.values(r.agents || {}).some(x => x.answer);
-      if (r.main && anyAns && !['done', 'done_raw'].includes(ev.state) && !finished(r)) {
-        const evalNowBtn = mk('button', 'mbtn', 'قيّم الآن بما وصل');
-        evalNowBtn.type = 'button';
-        evalNowBtn.onclick = async () => {
-          try {
-            await req('council/evaluate', { id: r.id });
-            poll();
-          } catch (e) {
-            err(e);
-          }
-        };
-        ui.footEl.appendChild(evalNowBtn);
-      }
-
-      if (finished(r) && anyAns) {
-        ui.footEl.appendChild(mk('span', 'small muted', 'حفظ كامل الجلسة:'));
-        [['Word', 'docx'], ['PDF', 'pdf'], ['Markdown', 'md']].forEach(([t, f]) => {
-          const b = mk('button', 'mbtn', t);
-          b.type = 'button';
-          b.onclick = async () => {
-            try {
-              const x = await req('council/export', { id: r.id, fmt: f });
-              b.textContent = '✓ ' + t;
-              if (x.path) {
-                ui.refiningNoteEl.textContent = 'حُفظ في: ' + x.path;
-                ui.refiningNoteEl.hidden = false;
-              }
-            } catch (e) {
-              err(e);
-            }
-          };
-          ui.footEl.appendChild(b);
-        });
-
-        [['إلى تيليجرام', 'telegram'], ['إلى الموقع', 'web']].forEach(([t, target]) => {
-          const b = mk('button', 'mbtn', t);
-          b.type = 'button';
-          b.title = target === 'web' ? 'يرسل النتيجة إلى الرابط الذي ضبطته بأمر cweb في تيليجرام' : 'يرسل الحكم إلى محادثتك في تيليجرام';
-          b.onclick = async () => {
-            try {
-              await req('council/deliver', { id: r.id, target });
-              b.textContent = '✓ ' + t;
-            } catch (e) {
-              err(e);
-            }
-          };
-          ui.footEl.appendChild(b);
-        });
-
-        const followBtn = mk('button', 'mbtn gold', '↳ متابعة على هذا الحكم');
-        followBtn.type = 'button';
-        followBtn.onclick = () => {
-          lastDoneId = r.id;
-          parentId = r.id;
-          sync();
-          ta.focus();
-          followBtn.textContent = '✓ سيُرفق الحكم السابق كاملًا';
-        };
-        ui.footEl.appendChild(followBtn);
-      }
-    }
-
-    // ===== الاستعلام الدوري =====
-    async function poll() {
-      if (councilRoot !== host || !host.isConnected || !activeId) return;
-      try {
-        const d = await req('council/status?id=' + encodeURIComponent(activeId));
-        if (!d.round) return;
-        renderRound(d.round);
-        if (finished(d.round) && !(d.round.pending > 0)) {
-          clearInterval(councilTimer);
-          councilTimer = null;
-          lastDoneId = d.round.id;
-          sync();
-        }
-      } catch (e) {
-        err(e);
-      }
-    }
-
-    function sync() {
-      const busy = activeId && lastDoneId !== activeId;
-      sendBtn.textContent = busy ? '■ إيقاف' : (lastDoneId ? 'متابعة ⌘↩' : 'أرسل ⌘↩');
-      sendBtn.classList.toggle('stop', !!busy);
-      sendBtn.disabled = !busy && (!ta.value.trim() || !selected.size || atts.some(a => a.status === 'up'));
-      newBtn.hidden = !lastDoneId || busy;
-    }
-    ta.addEventListener('input', sync);
-    ta.addEventListener('keydown', ev => {
-      if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) {
-        ev.preventDefault();
-        if (!sendBtn.disabled) sendBtn.click();
-      }
-    });
-
-    newBtn.onclick = () => {
-      lastDoneId = '';
-      parentId = '';
-      sync();
-      ta.focus();
-    };
-
-    sendBtn.onclick = async () => {
-      if (activeId && lastDoneId !== activeId) {
-        try {
-          await req('council/stop', { id: activeId });
-          poll();
-        } catch (e) {
-          err(e);
-        }
-        return;
-      }
-      const ids = [...selected].filter(id => available.some(a => a.id === id));
-      if (!ta.value.trim() || !ids.length) {
-        err(new Error('اكتب سؤالًا واختر مفوَّضًا واحدًا على الأقل'));
-        return;
-      }
-      const files = atts.filter(a => a.status === 'ok').map(a => ({ path: a.path, name: a.name, to: a.to }));
-      const limit = depth === 'fast' ? 180 : (depth === 'bal' ? 300 : 0);
-      const mode = optLive.inp.checked ? 'terminal' : 'direct';
-
-      try {
-        const payload = {
-          ids,
-          text: ta.value,
-          main,
-          evaluate: true,
-          attachments: files,
-          parent: lastDoneId || parentId || '',
-          depth,
-          blind: optBlind.inp.checked,
-          review: optReview.inp.checked,
-          verify: optVerify.inp.checked,
-          mode,
-          limit
-        };
-        const d = await req('council/send', payload);
-        activeId = d.id;
-        lastDoneId = '';
-        ta.value = '';
-        atts = [];
-        renderAtts();
-        grow();
-        sync();
-
-        try {
-          window.ZajelTerminalUI?.showAgents?.(main && !ids.includes(main) ? [...ids, main] : ids);
-        } catch (_) {}
-
-        clearInterval(councilTimer);
-        councilTimer = setInterval(poll, 1500);
-        poll();
-      } catch (e) {
-        err(e);
-      }
-    };
-
-    // ===== المجالس السابقة =====
-    const loadHistory = async () => {
-      try {
-        const d = await req('council/history');
-        histSel.replaceChildren();
-        const o0 = mk('option', '', 'مجالس سابقة ▾');
-        o0.value = '';
-        histSel.appendChild(o0);
-        (d.rounds || []).forEach(r => {
-          const o = mk('option', '', (r.question || 'مجلس').slice(0, 50));
-          o.value = r.id;
-          histSel.appendChild(o);
-        });
-        histSel.hidden = !(d.rounds || []).length;
-      } catch (_) {
-        histSel.hidden = true;
-      }
-    };
-
-    histSel.onchange = async () => {
-      if (!histSel.value) return;
-      activeId = histSel.value;
-      lastDoneId = '';
-      thread.replaceChildren();
-      boxes = {};
-      await poll();
-      histSel.value = '';
-      if (!councilTimer) councilTimer = setInterval(poll, 1500);
-    };
-
-    // تهيئة الوكلاء وفحص الجاهزية التلقائي
-    req('list').then(d => {
-      available = (d.agents || []).filter(a => a.cmd && a.installed === true);
-      selected = new Set([...selected].filter(id => available.some(a => a.id === id)));
-      if (main && !available.some(a => a.id === main)) main = '';
-      renderRoster();
-      renderAtts();
-      loadHistory();
-      sync();
-      runCheck(false);
-    }).catch(err);
-
-    councilApi = { ask: t => { ta.value = t; sync(); return sendBtn.onclick(); } };
-  }
-  function unmountCouncil(container){if(councilRoot&&(!container||councilRoot===container||container.contains(councilRoot))){clearInterval(councilTimer);councilTimer=null;councilRoot=null;councilApi=null;councilRoundId='';}}
   function activate(el){if(!el)return;if(root&&root.parentNode===el&&listTimer)return;const host=document.createElement('div');el.replaceChildren(host);root=host;hist=1500;builtLayout=0;build();builtLayout=layout;refreshList();clearInterval(listTimer);listTimer=setInterval(refreshList,2000);clearInterval(screenTimer);screenTimer=setInterval(()=>refreshScreens(false),500);refreshScreens(true);}
-  function deactivate(){clearInterval(listTimer);clearInterval(screenTimer);listTimer=screenTimer=null;resizeObserver?.disconnect();resizeObserver=null;unmountCouncil();root=null;}
+  function deactivate(){clearInterval(listTimer);clearInterval(screenTimer);listTimer=screenTimer=null;resizeObserver?.disconnect();resizeObserver=null;closeBroadcastPanel();root=null;}
 
   // نافذة الطرفية المستقلة: أزرار التحكم في أقصى اليسار مثل نوافذ macOS
   let win = null;
-  function toggleWindow(tab){
-    if (win && win.el.isConnected) { if (win.el.hidden) { win.el.hidden = false; win.show(win.tab); } else { closeWindow(); } return; }
+  function toggleWindow(tabOrOpts, maybeOpts){
+    const opts = (tabOrOpts && typeof tabOrOpts === 'object') ? tabOrOpts : (maybeOpts || {});
+    const isApp = opts.app === true;
+    if (win && win.el.isConnected) {
+      if (isApp) {
+        win.show();
+        return;
+      }
+      if (win.el.hidden) {
+        win.el.hidden = false;
+        win.show();
+      } else {
+        closeWindow();
+      }
+      return;
+    }
     const GEO = 'zajel_term_win_geo';
     const el = document.createElement('div'); el.id = 'zajel-term-window'; el.dir = 'ltr';
-    let geo = null; try { geo = JSON.parse(localStorage.getItem(GEO) || 'null'); } catch (_) {}
-    const w = Math.min(1100, innerWidth - 40), h = Math.min(720, innerHeight - 60);
-    geo = geo || { x: Math.max(10, (innerWidth - w) / 2), y: 30, w, h };
-    el.style.cssText = `position:fixed;left:${geo.x}px;top:${geo.y}px;width:${geo.w}px;height:${geo.h}px;min-width:420px;min-height:280px;z-index:10002;display:flex;flex-direction:column;background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:12px;box-shadow:0 12px 48px #0006;overflow:hidden;resize:both`;
+    if (isApp) el.classList.add('is-app');
+    let geo = null, maximized = false, prev = null;
+    if (!isApp) {
+      try { geo = JSON.parse(localStorage.getItem(GEO) || 'null'); } catch (_) {}
+      // أول فتح: نصف عرض زاجل ونصف ارتفاعه في الوسط؛ بعده آخر حجم ومكان، مصغَّرًا ليدخل في النافذة الحالية
+      if (!geo || !(geo.w > 0 && geo.h > 0)) { const w = Math.round(innerWidth * 0.5), h = Math.round(innerHeight * 0.5); geo = { x: (innerWidth - w) / 2, y: (innerHeight - h) / 2, w, h }; }
+      geo.w = Math.max(420, Math.min(geo.w, innerWidth - 16)); geo.h = Math.max(280, Math.min(geo.h, innerHeight - 16));
+      geo.x = Math.max(0, Math.min(geo.x, innerWidth - geo.w)); geo.y = Math.max(0, Math.min(geo.y, innerHeight - geo.h));
+      el.style.cssText = `position:fixed;left:${geo.x}px;top:${geo.y}px;width:${geo.w}px;height:${geo.h}px;min-width:420px;min-height:280px;z-index:10002;display:flex;flex-direction:column;background:var(--bg);color:var(--ink);border:1px solid var(--line);border-radius:12px;box-shadow:0 12px 48px #0006;overflow:hidden;resize:both`;
+    } else {
+      el.style.cssText = 'position:fixed;inset:0;width:100vw;height:100vh;margin:0;border:0;border-radius:0;box-shadow:none;overflow:hidden;resize:none;z-index:10002;display:flex;flex-direction:column;background:var(--bg);color:var(--ink)';
+    }
+
     const style = document.createElement('style');
-    style.textContent = '#zajel-term-window .tw-head{display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--side);border-bottom:1px solid var(--line);cursor:move;user-select:none;touch-action:none}#zajel-term-window .tw-lights{display:flex;gap:8px}#zajel-term-window .tw-light{width:13px;height:13px;border-radius:50%;border:0;padding:0;cursor:pointer;font-size:9px;line-height:13px;color:transparent}#zajel-term-window .tw-lights:hover .tw-light{color:#0009}#zajel-term-window .tw-title{flex:1;text-align:center;font-weight:600;font-size:13px}#zajel-term-window .tw-tabs{display:flex;gap:4px;padding:6px 10px;border-bottom:1px solid var(--line);direction:rtl}#zajel-term-window .tw-tabs .btn.pri{font-weight:700}#zajel-term-window .tw-body{flex:1;min-height:0;display:flex;flex-direction:column;padding:10px;direction:rtl;overflow:hidden}';
+    style.textContent = '#zajel-term-window .tw-head{display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--side);border-bottom:1px solid var(--line);cursor:move;user-select:none;touch-action:none}#zajel-term-window.is-app .tw-head{cursor:default}#zajel-term-window .tw-lights{display:flex;gap:8px}#zajel-term-window .tw-light{width:13px;height:13px;border-radius:50%;border:0;padding:0;cursor:pointer;font-size:9px;line-height:13px;color:transparent}#zajel-term-window .tw-lights:hover .tw-light{color:#0009}#zajel-term-window .tw-title{flex:1;text-align:center;font-weight:600;font-size:13px}#zajel-term-window .tw-body{flex:1;min-height:0;display:flex;flex-direction:column;padding:10px;direction:rtl;overflow:hidden}#zajel-term-window.is-app .tw-body{padding:6px}';
     const head = document.createElement('div'); head.className = 'tw-head';
-    const lights = document.createElement('div'); lights.className = 'tw-lights';
-    const mk = (c, t, sym) => { const b = document.createElement('button'); b.type = 'button'; b.className = 'tw-light'; b.style.background = c; b.title = t; b.setAttribute('aria-label', t); b.textContent = sym; return b; };
-    const bClose = mk('#ff5f57', 'إغلاق', '×'), bMin = mk('#febc2e', 'تصغير', '–'), bMax = mk('#28c840', 'تكبير', '+');
-    lights.append(bClose, bMin, bMax);
-    const title = document.createElement('div'); title.className = 'tw-title'; title.textContent = 'الطرفية ومجلس الوكلاء';
-    head.append(lights, title);
-    const tabs = document.createElement('div'); tabs.className = 'tw-tabs';
+
+    if (!isApp) {
+      const lights = document.createElement('div'); lights.className = 'tw-lights';
+      const mk = (c, t, sym) => { const b = document.createElement('button'); b.type = 'button'; b.className = 'tw-light'; b.style.background = c; b.title = t; b.setAttribute('aria-label', t); b.textContent = sym; return b; };
+      const bClose = mk('#ff5f57', 'إغلاق', '×'), bMin = mk('#febc2e', 'تصغير', '–'), bMax = mk('#28c840', 'تكبير', '+');
+      lights.append(bClose, bMin, bMax);
+      head.append(lights);
+      bClose.onclick = closeWindow;
+      let minimized = false;
+      bMin.onclick = () => { minimized = !minimized; body.hidden = minimized; if (minimized) { prev = el.style.height; el.style.height = 'auto'; el.style.minHeight = '0'; el.style.resize = 'none'; } else { el.style.height = prev || geo.h + 'px'; el.style.minHeight = '280px'; el.style.resize = 'both'; } };
+      bMax.onclick = () => { maximized = !maximized; if (maximized) { save(); prev = [el.style.left, el.style.top, el.style.width, el.style.height]; Object.assign(el.style, { left: '8px', top: '8px', width: (innerWidth - 16) + 'px', height: (innerHeight - 16) + 'px' }); } else if (prev) { [el.style.left, el.style.top, el.style.width, el.style.height] = prev; } save(); };
+      head.ondblclick = ev => { if (!ev.target.closest('button')) bMax.onclick(); };
+      head.onpointerdown = ev => {
+        if (ev.target.closest('button') || maximized) return; ev.preventDefault();
+        const sx = ev.clientX, sy = ev.clientY, ox = el.offsetLeft, oy = el.offsetTop; head.setPointerCapture(ev.pointerId);
+        head.onpointermove = e2 => { el.style.left = Math.max(0, Math.min(innerWidth - 80, ox + e2.clientX - sx)) + 'px'; el.style.top = Math.max(0, Math.min(innerHeight - 40, oy + e2.clientY - sy)) + 'px'; };
+        const end = e3 => { try { head.releasePointerCapture(e3.pointerId); } catch (_) {} head.onpointermove = head.onpointerup = head.onpointercancel = null; save(); };
+        head.onpointerup = end; head.onpointercancel = end;
+      };
+      new ResizeObserver(() => { if (!maximized && !minimized) save(); }).observe(el);
+    }
+
+    const title = document.createElement('div'); title.className = 'tw-title'; title.textContent = 'طرفية زاجل';
+    head.append(title);
     const body = document.createElement('div'); body.className = 'tw-body';
-    const tabBtns = {};
-    [['terminals', 'الطرفيات'], ['council', 'مجلس الوكلاء']].forEach(([k, t]) => { const b = document.createElement('button'); b.type = 'button'; b.className = 'btn'; b.textContent = t; b.onclick = () => win.show(k); tabs.appendChild(b); tabBtns[k] = b; });
-    el.append(style, head, tabs, body);
+    el.append(style, head, body);
     document.body.appendChild(el);
-    const save = () => { try { localStorage.setItem(GEO, JSON.stringify({ x: el.offsetLeft, y: el.offsetTop, w: el.offsetWidth, h: el.offsetHeight })); } catch (_) {} };
-    let minimized = false, maximized = false, prev = null;
-    bClose.onclick = closeWindow;
-    bMin.onclick = () => { minimized = !minimized; tabs.hidden = body.hidden = minimized; if (minimized) { prev = el.style.height; el.style.height = 'auto'; el.style.minHeight = '0'; el.style.resize = 'none'; } else { el.style.height = prev || geo.h + 'px'; el.style.minHeight = '280px'; el.style.resize = 'both'; } };
-    bMax.onclick = () => { maximized = !maximized; if (maximized) { save(); prev = [el.style.left, el.style.top, el.style.width, el.style.height]; Object.assign(el.style, { left: '8px', top: '8px', width: (innerWidth - 16) + 'px', height: (innerHeight - 16) + 'px' }); } else if (prev) { [el.style.left, el.style.top, el.style.width, el.style.height] = prev; } };
-    head.ondblclick = ev => { if (!ev.target.closest('button')) bMax.onclick(); };
-    head.onpointerdown = ev => {
-      if (ev.target.closest('button') || maximized) return; ev.preventDefault();
-      const sx = ev.clientX, sy = ev.clientY, ox = el.offsetLeft, oy = el.offsetTop; head.setPointerCapture(ev.pointerId);
-      head.onpointermove = e2 => { el.style.left = Math.max(0, Math.min(innerWidth - 80, ox + e2.clientX - sx)) + 'px'; el.style.top = Math.max(0, Math.min(innerHeight - 40, oy + e2.clientY - sy)) + 'px'; };
-      const end = e3 => { try { head.releasePointerCapture(e3.pointerId); } catch (_) {} head.onpointermove = head.onpointerup = head.onpointercancel = null; save(); };
-      head.onpointerup = end; head.onpointercancel = end;
+    const save = () => {
+      if (isApp) return;
+      // وهي مكبّرة يُحفظ حجمها قبل التكبير مع علامة التكبير، فتفتح مكبّرة ويعيدها زر التصغير إلى حجمها
+      const g = maximized && prev ? { x: parseFloat(prev[0]), y: parseFloat(prev[1]), w: parseFloat(prev[2]), h: parseFloat(prev[3]) } : { x: el.offsetLeft, y: el.offsetTop, w: el.offsetWidth, h: el.offsetHeight };
+      g.max = maximized;
+      try { localStorage.setItem(GEO, JSON.stringify(g)); } catch (_) {}
     };
-    new ResizeObserver(() => { if (!maximized && !minimized) save(); }).observe(el);
-    win = { el, tab: 'terminals', show(k) {
-      win.tab = k; Object.entries(tabBtns).forEach(([n, b]) => b.classList.toggle('pri', n === k));
+    win = { el, show() {
       deactivate(); body.replaceChildren();
       const host = document.createElement('div'); host.style.cssText = 'flex:1;min-height:0;display:flex;flex-direction:column'; body.appendChild(host);
-      if (k === 'council') mountCouncil(host); else activate(host);
+      activate(host);
     } };
-    win.show(tab || 'terminals');
+    win.show();
+    if (!isApp && geo.max) head.querySelector('.tw-lights button:last-child')?.onclick();
   }
   function closeWindow(){ if (!win) return; deactivate(); win.el.remove(); win = null; }
-  window.ZajelTerminalUI={showAgents,activate,deactivate,mountCouncil,unmountCouncil,toggleWindow,closeWindow,councilAsk:t=>councilApi?councilApi.ask(t):Promise.reject(new Error('المجلس غير مفتوح'))};
+
+  window.ZajelTerminalUI = { showAgents, activate, deactivate, toggleWindow, closeWindow };
+
+  // الطرفية العادية: cd إلى المجلد (أو مجلد الملف)؛ الوكيل: المسار وحده (cd ستُقرأ جزءًا من رسالتك). لا يُضغط Enter.
+  function dropPaths(items, x, y) {
+    if (!root || !Array.isArray(items) || !items.length) return false;
+    const slot = slots.find(sl => { const r = sl.card && sl.card.getBoundingClientRect(); return r && x >= r.left && x <= r.right && y >= r.top && y <= r.bottom; });
+    if (!slot || !slot.id) return false;
+    const q = p => "'" + String(p).replace(/'/g, "'\\''") + "'";
+    const a = agents.find(z => z.id === slot.id);
+    let text;
+    if (a && !a.cmd) {
+      const it = items[0];
+      text = 'cd ' + q(it.dir ? it.path : it.path.replace(/\/[^/]*$/, '') || '/');
+    } else {
+      text = items.map(it => q(it.path)).join(' ');
+    }
+    req('send', { id: slot.id, text }).then(() => showToast('أُدرج المسار؛ اضغط Enter حين تريد')).catch(e => showToast(e.message || 'تعذّر الإدراج'));
+    activeSlot = slots.indexOf(slot); slot.pre && slot.pre.focus({ preventScroll: true });
+    return true;
+  }
+
+  window.ZajelTermApp = {
+    dropPaths,
+    async open(id) {
+      const isApp = new URLSearchParams(location.search).get('mode') === 'terminal';
+      if (!win || !win.el.isConnected) {
+        toggleWindow({ app: isApp });
+      }
+      showAgent(id);
+      const a = agents.find(x => x.id === id);
+      if (!a || a.state === 'stopped') {
+        try { await req('start', { id }); } catch (_) {}
+      }
+      refreshScreens(true);
+      refreshList();
+    },
+    async startAll() {
+      try {
+        const d = await req('list');
+        const list = Array.isArray(d.agents) ? d.agents : agents;
+        const toStart = list.filter(a => a.cmd && a.installed !== false && a.state === 'stopped');
+        await Promise.all(toStart.map(a => req('start', { id: a.id }).catch(() => {})));
+        await refreshList();
+      } catch (_) {}
+    },
+    async checkAll() {
+      try {
+        const d = await req('list');
+        const list = Array.isArray(d.agents) ? d.agents : agents;
+        await Promise.all(list.map(a => req('health', { id: a.id, check: true, force: true }).catch(() => {})));
+        await refreshList();
+      } catch (_) {}
+    },
+    broadcast() {
+      const isApp = new URLSearchParams(location.search).get('mode') === 'terminal';
+      if (!win || !win.el.isConnected) {
+        toggleWindow({ app: isApp });
+      } else if (win.el.hidden) {
+        win.el.hidden = false;
+        win.show();
+      }
+      setTimeout(() => {
+        const btn = root?.querySelector('.as-broadcast-btn');
+        if (btn) {
+          if (!broadcastPanel) openBroadcastPanel(btn);
+          else broadcastPanel.querySelector('textarea')?.focus();
+        }
+      }, 60);
+    },
+    async refresh() {
+      await refreshList();
+      await refreshScreens(true);
+    }
+  };
 })();

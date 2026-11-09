@@ -3196,7 +3196,6 @@
 
   function switchTab(tabKey) {
     if (['scripts', 'automations', 'agents', 'settings', 'terminal'].includes(tabKey)) { switchControlTab(tabKey); return; }
-    if (activeTab === 'council') window.ZajelTerminalUI?.unmountCouncil?.(assistantContentEl);
     activeWindow = 'assistant';
     sideContentEl = assistantContentEl;
     if (controlPanelEl) { controlPanelEl.hidden = true; controlPanelEl.style.display = 'none'; }
@@ -3218,7 +3217,6 @@
   }
 
   function switchControlTab(tabKey) {
-    if (activeTab === 'council') window.ZajelTerminalUI?.unmountCouncil?.(assistantContentEl);
     activeWindow = 'control';
     if (activeTab === 'automations' && tabKey !== 'automations') stopAutomationsPolling();
     if (activeTab === 'agents' && tabKey !== 'agents') stopAgentsPolling();
@@ -3235,7 +3233,6 @@
 
   function loadActiveTabData() {
     if (activeWindow === 'control' && activeTab === 'terminal') { window.ZajelTerminalUI?.activate?.(controlContentEl); return; }
-    if (activeWindow === 'assistant' && activeTab === 'council') { window.ZajelTerminalUI?.mountCouncil?.(sideContentEl); return; }
     window.ZajelTerminalUI?.deactivate?.();
     if (activeTab === 'chats') {
       loadChats();
@@ -6942,7 +6939,6 @@
     else if (activeTab === 'agents') renderAgentsTab();
     else if (activeTab === 'settings') renderSettingsTab();
     else if (activeTab === 'terminal') window.ZajelTerminalUI?.activate?.(controlContentEl);
-    else if (activeTab === 'council' && activeWindow === 'assistant') window.ZajelTerminalUI?.mountCouncil?.(sideContentEl);
   }
 
   /* ==========================================================================
@@ -7047,15 +7043,8 @@
     });
   }
 
-  let councilMode = false, councilBodyEl = null;
   async function sendMsg() {
     if (!inputEl) return;
-    if (councilMode) {
-      const q = inputEl.value.trim();
-      if (!q) return;
-      try { await window.ZajelTerminalUI?.councilAsk?.(q); inputEl.value = ''; inputEl.dispatchEvent(new Event('input')); } catch (_) {}
-      return;
-    }
     const raw = inputEl.value.trim();
     const readyAtts = pendingAttachments.filter(a => a.status === 'done');
     const hasUploading = pendingAttachments.some(a => a.status === 'uploading');
@@ -8553,8 +8542,7 @@
     const tabsConfig = [
       { key: 'chats', title: 'المحادثات', icon: 'chat' },
       { key: 'memory', title: 'الذاكرة', icon: 'brain' },
-      { key: 'prompts', title: 'الأوامر', icon: 'spark' },
-      { key: 'council', title: 'المجلس', icon: 'users' }
+      { key: 'prompts', title: 'الأوامر', icon: 'spark' }
     ];
 
     tabsConfig.forEach(t => {
@@ -8884,23 +8872,7 @@
     // مربع إدخال واحد متجاوب: النص بعرض كامل، وتحته صف أزرار (إرفاق، حفظ كأمر، ثم إيقاف وإرسال)
     const composer = el('div', '', 'as-composer');
     const composerRow = el('div', '', 'as-composer-row');
-    const setCouncilMode = on => {
-      councilMode = on;
-      councilToggleBtn.classList.toggle('pri', on);
-      chatContainer.hidden = on; inputBar.hidden = on;
-      if (improveRowEl) improveRowEl.hidden = on;
-      if (on) {
-        councilBodyEl = el('div', '', 'as-council-body');
-        councilBodyEl.style.cssText = 'flex:1;min-height:0;overflow:auto;padding:10px;display:flex;flex-direction:column';
-        chatContainer.after(councilBodyEl);
-        window.ZajelTerminalUI?.mountCouncil?.(councilBodyEl, { embedded: true, onExit: () => setCouncilMode(false) });
-      } else {
-        window.ZajelTerminalUI?.unmountCouncil?.(councilBodyEl);
-        councilBodyEl?.remove(); councilBodyEl = null;
-      }
-    };
-    const councilToggleBtn = btn('⚖ وضع المجلس', () => setCouncilMode(!councilMode), 'btn as-council-toggle', { title: 'حوّل المساعد إلى مجلس وكلاء: سؤالك يذهب إلى عدة وكلاء ثم يحكم بينهم الرئيسي' });
-    composerRow.append(attachBtn, starPromptBtn, councilToggleBtn, el('span', '', 'as-composer-spacer'), stopBtn, sendBtn);
+    composerRow.append(attachBtn, starPromptBtn, el('span', '', 'as-composer-spacer'), stopBtn, sendBtn);
     composer.append(inputWrap, composerRow);
     inputBar.append(composer, fileInputEl);
 

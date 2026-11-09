@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 
 AGENTS = ("claude", "codex", "agy", "hermes", "opencode", "pi")
+_CUSTOM_CMDS = {}
 EXTRA_PATH = [str(Path.home() / ".local/bin"), "/opt/homebrew/bin", "/usr/local/bin"]
 NPM_PKG = {"claude": "@anthropic-ai/claude-code", "codex": "@openai/codex",
            "opencode": "opencode-ai", "pi": "@earendil-works/pi-coding-agent"}
@@ -61,8 +62,36 @@ def _hist(kind, agent_id, note=""):
     del _state["history"][:-HIST_MAX]
 
 
+def register(agent_id, cmd):
+    w = str(cmd or "").strip().split()[0] if str(cmd or "").strip() else ""
+    with _lock:
+        if w:
+            _CUSTOM_CMDS[agent_id] = w
+        else:
+            _CUSTOM_CMDS.pop(agent_id, None)
+
+
+def unregister(agent_id):
+    with _lock:
+        _CUSTOM_CMDS.pop(agent_id, None)
+
+
+def all_agents():
+    with _lock:
+        return list(AGENTS) + [k for k in _CUSTOM_CMDS if k not in AGENTS]
+
+
+def due_list(force=False):
+    return [a for a in all_agents() if due(a, force=force)]
+
+
+def due_agents(force=False):
+    return due_list(force=force)
+
+
 def _which(name):
-    return shutil.which(name, path=os.pathsep.join(EXTRA_PATH + [os.environ.get("PATH", "")]))
+    target = _CUSTOM_CMDS.get(name, name)
+    return shutil.which(target, path=os.pathsep.join(EXTRA_PATH + [os.environ.get("PATH", "")]))
 
 
 def _exec(cmd, timeout):
@@ -100,7 +129,8 @@ def parse_version(text):
 
 def version(agent_id):
     try:
-        r = _exec([agent_id, "--version"], 10)
+        exe = _CUSTOM_CMDS.get(agent_id, agent_id)
+        r = _exec([exe, "--version"], 10)
         return parse_version(r[1]) if r else None
     except Exception:
         return None
@@ -129,8 +159,20 @@ def update_command(agent_id):
 def smoke(agent_id):
     t0 = time.time()
     try:
-        import council_agents
-        r = council_agents.run(agent_id, "أجب بكلمة: تم", depth="fast", timeout=30)
+        if agent_id in _CUSTOM_CMDS:
+            try:
+                import terminal
+                hl = terminal._headless(agent_id, "أجب بكلمة: تم", timeout=30)
+                if hl:
+                    return {"ok": True, "secs": round(time.time() - t0, 2), "error": ""}
+            except Exception:
+                pass
+            exe = _CUSTOM_CMDS.get(agent_id, agent_id)
+            r = _exec([exe, "--version"], 10)
+            ok = bool(r and r[0] == 0)
+            return {"ok": ok, "secs": round(time.time() - t0, 2), "error": "" if ok else (r[1] if r else "فشل التشغيل")}
+        import agent_cli
+        r = agent_cli.run(agent_id, "أجب بكلمة: تم", depth="fast", timeout=30)
         ok = bool(r.get("ok")) and bool(str(r.get("text", "")).strip())
         err = "" if ok else str(r.get("error") or "لا إجابة")[:300]
         return {"ok": ok, "secs": round(time.time() - t0, 2), "error": err}
