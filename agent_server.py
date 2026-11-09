@@ -764,6 +764,22 @@ def handle(h, method):
                 h.send_json(whatsapp_watch.ai_selftest())
             else:
                 h.send_json({"error": "غير معروف"}, 404)
+        elif path == "/api/assistant/telegram/account/status":
+            import telegram_account
+            h.send_json(telegram_account.login_status())
+        elif path.startswith("/api/assistant/telegram/account/") and method == "POST":
+            import telegram_account
+            b = _body(h); act = path.rsplit("/", 1)[1]
+            if act == "start":
+                h.send_json(telegram_account.login_start(b.get("api_id"), b.get("api_hash"), b.get("phone")))
+            elif act == "code":
+                h.send_json(telegram_account.login_code(b.get("code")))
+            elif act == "password":
+                h.send_json(telegram_account.login_password(b.get("password")))
+            elif act == "logout":
+                h.send_json(telegram_account.logout())
+            else:
+                h.send_error(404)
         elif path == "/api/assistant/telegram/status":
             import telegram_link
             h.send_json(telegram_link.status())

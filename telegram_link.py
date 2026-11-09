@@ -487,6 +487,11 @@ def _on_text(chat, text):
     import telegram_extras as X
     if X.pending_text(chat, text):
         return
+    if not text.startswith("/"):
+        import telegram_more as _M
+        _acc = _M._account()
+        if _acc is not None and _acc.linked() and _acc.pending_text(chat, text):
+            return
     word = text.split()[0] if text.split() else ""
     name = BTN.get(text) or (word[1:].split("@")[0] if word.startswith("/") else "")
     name = CMDMAP.get(name, name)
@@ -818,6 +823,10 @@ STOPPED = set()
 def _on_callback(chat, mid, data):
     import agent_server
     kind, _, rest = data.partition(":")
+    if kind == "ta":
+        import telegram_account_bot as AB
+        AB.on_callback(chat, mid, rest)
+        return
     if kind in ("ay", "ay2", "sv"):
         import telegram_more
         telegram_more.on_callback(chat, mid, kind, rest)
@@ -924,6 +933,10 @@ def _on_callback(chat, mid, data):
 def _show(chat, name, mid=None):
     import telegram_more as M
     name = M.ALIAS.get(name, name)
+    if name == "search":
+        acc = M._account()
+        if acc is not None and acc.linked():
+            acc.AWAIT[chat] = "search"             # الرسالة التالية هي نص البحث
     text, kb = _screen(name)
     if mid:
         edit(chat, mid, text, kb)

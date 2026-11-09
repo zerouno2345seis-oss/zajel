@@ -28,6 +28,10 @@ if [ "$DEPS" = 1 ]; then
     say "تثبيت مكتبة الصور (Pillow) لمصغّرات الصور…"
     python3 -m pip install --user pillow >/dev/null 2>&1 || python3 -m pip install --user --break-system-packages pillow || { say "تعذّر تثبيت Pillow"; exit 1; }
   fi
+  if ! python3 -c "import telethon" 2>/dev/null; then
+    say "تثبيت مكتبة تيليجرام (telethon) لربط حسابك الشخصي (اختيارية)…"
+    python3 -m pip install --user telethon >/dev/null 2>&1 || python3 -m pip install --user --break-system-packages telethon >/dev/null 2>&1 || say "تنبيه: تعذّر تثبيت telethon؛ يعمل البوت ولا يعمل ربط حسابك الشخصي."
+  fi
   ADB="$(command -v adb || true)"
   if [ -z "$ADB" ]; then
     for c in /opt/homebrew/bin/adb /usr/local/bin/adb "$HOME/Library/Android/sdk/platform-tools/adb"; do [ -x "$c" ] && ADB="$c" && break; done

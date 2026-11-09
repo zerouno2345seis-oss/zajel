@@ -171,8 +171,8 @@ def screen_help_text():
 # ================= شاشات تحتاج ربط الحساب (المرحلة ٢) =================
 def _account():
     try:
-        import telegram_account
-        return telegram_account
+        import telegram_account_bot
+        return telegram_account_bot
     except ImportError:
         return None
 

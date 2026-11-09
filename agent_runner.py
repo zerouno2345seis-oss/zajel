@@ -85,6 +85,8 @@ def init(data_dir, port):
     app_update.init(data_dir)
     import telegram_link
     telegram_link.init(data_dir)
+    import telegram_account
+    telegram_account.init(data_dir)
     import whatsapp_watch
     whatsapp_watch.init(data_dir)
     import terminal

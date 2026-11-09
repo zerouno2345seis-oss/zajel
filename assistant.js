@@ -6423,6 +6423,51 @@
     };
     api('/api/assistant/telegram/status').then(renderTelegram).catch(telegramError);
 
+    // بطاقة حسابك الشخصي في تيليجرام (غير البوت): البحث والتحميل والوارد والمراقب ونسخ المحادثات
+    const tgAcc = makeSettingsCard('حسابك الشخصي في تيليجرام', 'ليبحث زاجل في قنواتك ويحمّل إلى الماك. تسجّل الدخول أنت بنفسك مرة واحدة؛ الأسرار تُحفظ في سلسلة مفاتيح الماك فقط.');
+    tgAcc.status.textContent = 'جارٍ تحميل الحالة…';
+    const tgAccBody = el('div', '');
+    tgAccBody.style.cssText = 'display:flex;flex-direction:column;gap:7px;margin-top:7px';
+    tgAcc.card.appendChild(tgAccBody);
+    sideContentEl.appendChild(tgAcc.card);
+    const tgAccError = (err) => { tgAcc.status.textContent = err && err.message ? err.message : 'تعذر تنفيذ الطلب.'; };
+    const tgAccField = (placeholder, type = 'text') => {
+      const input = document.createElement('input');
+      input.type = type; input.placeholder = placeholder; input.autocomplete = 'off';
+      input.style.cssText = 'width:100%;box-sizing:border-box;padding:6px;border:1px solid var(--line);border-radius:7px;background:var(--side);color:var(--ink)';
+      return input;
+    };
+    const renderTgAcc = (st) => {
+      tgAccBody.replaceChildren();
+      if (st.linked) {
+        tgAcc.status.textContent = 'الحساب مربوط' + (st.me ? ' · ' + st.me : '') + (st.flood ? ' · ' + st.flood : '');
+        tgAccBody.appendChild(el('div', 'يعمل الآن: البحث في القنوات، والتحميل إلى الماك، والوارد، والمراقب، ونسخ المحادثات ليلًا. استعملها من البوت: /search و/inbox و/watch و/dls و/backup.'));
+        tgAccBody.appendChild(telegramButton('فك ربط الحساب', async () => {
+          if (!window.confirm('هل تريد فك ربط حسابك الشخصي؟ تُحذف الجلسة من سلسلة مفاتيح هذا الجهاز.')) return;
+          renderTgAcc(await api('/api/assistant/telegram/account/logout', {}));
+        }));
+        return;
+      }
+      if (st.step === 'code') {
+        tgAcc.status.textContent = 'وصل رمز إلى تطبيق تيليجرام على هاتفك.';
+        const code = tgAccField('الرمز الذي وصلك');
+        tgAccBody.append(code, telegramButton('أكمل', async () => renderTgAcc(await api('/api/assistant/telegram/account/code', { code: code.value }))));
+        return;
+      }
+      if (st.step === 'password') {
+        tgAcc.status.textContent = 'حسابك محمي بكلمة مرور ثنائية.';
+        const pw = tgAccField('كلمة المرور الثنائية', 'password');
+        tgAccBody.append(pw, telegramButton('أكمل', async () => renderTgAcc(await api('/api/assistant/telegram/account/password', { password: pw.value }))));
+        return;
+      }
+      tgAcc.status.textContent = st.error || 'الحساب غير مربوط.';
+      tgAccBody.appendChild(el('div', '١. افتح my.telegram.org وسجّل الدخول برقم هاتفك، ثم «API development tools».'));
+      tgAccBody.appendChild(el('div', '٢. أنشئ تطبيقًا (الاسم أي شيء)، وانسخ الرقمين: App api_id وApp api_hash.'));
+      const id = tgAccField('api_id (أرقام)'), hash = tgAccField('api_hash (٣٢ حرفًا)', 'password'), phone = tgAccField('رقم هاتفك بصيغة دولية +9665…');
+      tgAccBody.append(id, hash, phone, telegramButton('أرسل لي الرمز', async () => renderTgAcc(await api('/api/assistant/telegram/account/start', { api_id: id.value, api_hash: hash.value, phone: phone.value }))));
+    };
+    api('/api/assistant/telegram/account/status').then(renderTgAcc).catch(tgAccError);
+
     // بطاقة واتساب: التنبيهات والتقرير الصباحي (الوقت والمحتوى والشكل)
     const waCard = makeSettingsCard('واتساب: التنبيهات والتقرير الصباحي', 'يراقب رسائلك الواردة ويرسل إلى Telegram ما يهمّك، وتقريرًا مرتّبًا في الوقت الذي تختاره. لا يرسل شيئًا إلى واتساب.');
     waCard.status.textContent = 'جارٍ تحميل الإعدادات…';
