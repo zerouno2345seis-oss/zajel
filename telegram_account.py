@@ -24,7 +24,7 @@ LISTS = {"fiqh": "كتب شرعية", "lessons": "دروس صوتية", "docs": 
 TYPES = {"all": "الكل", "book": "كتب", "video": "فيديو", "audio": "صوت", "link": "روابط"}
 TYPEDIR = {"book": "كتب", "video": "فيديو", "audio": "صوت", "photo": "صور", "link": "روابط", "file": "ملفات"}
 BOOK_EXT = {"pdf", "epub", "mobi", "azw3", "azw", "djvu", "doc", "docx", "txt", "rtf", "chm", "zip", "rar"}
-DEFAULTS = {"libs": [], "watch": [], "backups": [], "inbox": {"last_id": 0, "items": []}, "hits": [], "backup_hour": 3, "backup_day": "", "dismissed": []}
+DEFAULTS = {"libs": [], "lists": {}, "watch": [], "backups": [], "inbox": {"last_id": 0, "items": []}, "hits": [], "backup_hour": 3, "backup_day": "", "dismissed": []}
 
 
 def init(data_dir):
@@ -296,6 +296,37 @@ def norm(s):
     return s.replace("أ", "ا").replace("إ", "ا").replace("آ", "ا").replace("ة", "ه").replace("ى", "ي").strip().lower()
 
 
+def all_lists():
+    d = dict(LISTS)
+    d.update(_cfg().get("lists") or {})
+    return d
+
+
+def list_name(k):
+    return all_lists().get(k, k)
+
+
+TMP_LIBS = {}     # قنوات مكتشفة لم تُحفظ بعد: لتبقى أزرار التنزيل تعمل على نتائجها
+
+
+def parse_scoped(q):
+    """«أفلام: اسم الفيلم» ← ("أفلام", "اسم الفيلم"). يعيد None إن لم تكن بهذه الصيغة."""
+    q = str(q or "").strip()
+    m = re.match(r"^([^:：/\n]{2,24}?)\s*[:：]\s*(\S.*)$", q)
+    if not m or "http" in m.group(1).lower():
+        return None
+    return m.group(1).strip(), m.group(2).strip()
+
+
+def find_list(topic):
+    t = fz_norm(topic)
+    for k, name in all_lists().items():
+        n = fz_norm(name)
+        if t == n or t == k or (len(t) >= 3 and t in n.split()):
+            return k
+    return None
+
+
 def classify(msg):
     """نوع الرسالة: book/video/audio/photo/link/file/text. يعمل على أي كائن فيه صفات الرسالة (للاختبار بلا شبكة)."""
     f = getattr(msg, "file", None)
@@ -412,7 +443,7 @@ def parse_channel_ref(ref):
 
 def lib_add(ref, lst="fiqh"):
     """يضيف قناة عامة (ولو لم يشترك فيها) إلى قائمة."""
-    if lst not in LISTS:
+    if lst not in all_lists():
         raise ValueError("قائمة غير معروفة.")
     uname = parse_channel_ref(ref)
 
@@ -517,8 +548,65 @@ def fuzzy_rank(items, q, min_score=0.5):
         return items
     scored = [(fuzzy_score(i, q), i) for i in items]
     scored = [x for x in scored if x[0] >= min_score]
-    scored.sort(key=lambda x: (-x[0], str(x[1].get("date", ""))), reverse=False)
+    scored.sort(key=lambda x: (-round(x[0], 1), -int(x[1].get("views", 0) or 0)))
     return [i for _, i in scored]
+
+
+# ================= البحث بالموضوع (دون اشتراك) =================
+def discover(topic, n=15):
+    """قنوات عامة عن موضوع، الأكبر مشتركين أولًا. لا اشتراك ولا انضمام: بحث تيليجرام العام فقط."""
+    topic = str(topic or "").strip()
+
+    async def go():
+        from telethon import functions
+        c = await client()
+        out, seen = [], set()
+        for qq in (topic, topic + " قناة", "قنوات " + topic):
+            r = await call(lambda qq=qq: c(functions.contacts.SearchRequest(q=qq, limit=20)))
+            for ch in r.chats:
+                if ch.id in seen or not getattr(ch, "broadcast", False) or not getattr(ch, "username", None):
+                    continue
+                seen.add(ch.id)
+                out.append({"id": ch.id, "name": ch.title, "username": ch.username, "count": getattr(ch, "participants_count", 0) or 0})
+            if len(out) >= n:
+                break
+        return out
+
+    res = run(go(), 120)
+    res.sort(key=lambda x: -x["count"])
+    return res[:n]
+
+
+def search_scoped(topic, query, type_="all", n=15, progress=None):
+    """«أفلام: اسم الفيلم»: إن كان «أفلام» قائمة موجودة بحثنا فيها، وإلا اكتشفنا أكبر القنوات العامة عنه وبحثنا فيها دون اشتراك."""
+    k = find_list(topic)
+    if k:
+        chosen = pick_libs(k)
+        if not chosen:
+            raise ValueError(f"قائمة «{list_name(k)}» ليس فيها قنوات مفعّلة.")
+    else:
+        found = discover(topic, n)
+        if not found:
+            raise ValueError(f"لم أجد قنوات عامة عن «{topic}». جرّب كلمة أخرى.")
+        chosen = [{"id": x["id"], "name": x["name"], "username": x["username"], "list": "tmp", "on": True, "count": x["count"]} for x in found]
+        for l in chosen:
+            TMP_LIBS[l["id"]] = l
+    r = search(query, type_=type_, per_lib=15, libs_override=chosen, progress=progress)
+    r.update(topic=topic, libs=chosen, discovered=k is None)
+    return r
+
+
+def save_list(topic, chans):
+    """يحفظ القنوات المكتشفة في قائمة باسم الموضوع (مفعّلة) لتُستعمل لاحقًا بلا اكتشاف."""
+    import hashlib
+    key = "t_" + hashlib.md5(topic.encode("utf-8")).hexdigest()[:6]
+    c = _cfg()
+    lists = dict(c.get("lists") or {})
+    lists[key] = topic
+    _save({"lists": lists})
+    for ch in chans:
+        _lib_upsert({"id": ch["id"], "name": ch["name"], "username": ch["username"], "list": key, "on": True})
+    return key
 
 
 # ================= البحث =================
@@ -537,15 +625,15 @@ def to_item(msg, lib):
     f = getattr(msg, "file", None)
     return {"ref": f"{lib['id']}:{msg.id}", "t": t if t in ("book", "video", "audio", "photo", "link") else "file", "title": title_of(msg), "lib": lib["id"], "lib_name": lib["name"],
             "size": getattr(f, "size", 0) or 0, "size_h": human_size(getattr(f, "size", 0)), "meta": meta_of(msg, t), "date": str(getattr(msg, "date", ""))[:10],
-            "link": link_of(lib, msg.id)}
+            "link": link_of(lib, msg.id), "views": getattr(msg, "views", 0) or 0}
 
 
-def search(q, scope="all", type_="all", per_lib=25):
+def search(q, scope="all", type_="all", per_lib=25, libs_override=None, progress=None):
     """يبحث في المكتبات المفعّلة. يعيد {items, counts}: counts عدد النتائج لكل نوع قبل التصفية بالنوع."""
     q = str(q or "").strip()
     if not q:
         raise ValueError("اكتب ما تبحث عنه.")
-    chosen = pick_libs(scope)
+    chosen = libs_override if libs_override is not None else pick_libs(scope)
     if not chosen:
         raise ValueError("لا قوائم مفعّلة للبحث. فعّل قناة من «مكتباتي».")
 
@@ -577,18 +665,23 @@ def search(q, scope="all", type_="all", per_lib=25):
                     raise
                 # قناة محظورة أو محذوفة: لا نوقف البحث كله
 
-        for lib in chosen:
+        for n, lib in enumerate(chosen, 1):
             await one(lib, q)
+            if progress:
+                try:
+                    progress(n, len(chosen), lib["name"])
+                except Exception:
+                    pass
         # تقريبي: إن قلّت النتائج الحرفية نبحث بكل كلمة مهمة على حدة (يصلح مع الأخطاء الإملائية والترتيب المختلف) ثم نرتّب بالتشابه
         if len(items) < 8:
-            for t in fuzzy_terms(q)[:3]:
+            for t in fuzzy_terms(q)[: (2 if len(chosen) > 8 else 3)]:
                 if t == fz_norm(q):
                     continue
                 for lib in chosen:
                     await one(lib, t)
         return items
 
-    items = fuzzy_rank(run(go(), 300), q)
+    items = fuzzy_rank(run(go(), 600), q)
     counts = {k: sum(1 for i in items if i["t"] == k) for k in TYPES if k not in ("all",)}
     counts["all"] = len(items)
     if type_ != "all":
@@ -603,7 +696,7 @@ DL_LOCK = threading.Lock()
 
 def get_message(ref):
     lid, _, mid = str(ref).partition(":")
-    lib = next((l for l in libs() if str(l["id"]) == lid), None)
+    lib = next((l for l in libs() if str(l["id"]) == lid), None) or next((l for k, l in TMP_LIBS.items() if str(k) == lid), None)
     if not lib or not mid.isdigit():
         raise ValueError("عنصر غير معروف.")
     return lib, int(mid)

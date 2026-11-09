@@ -39,7 +39,7 @@ def screen(name):
 
 
 def screen_search():
-    AWAIT_PROMPT = "اكتب اسم الكتاب أو الدرس أو الفيلم في رسالة، أو اختر بحثًا سابقًا:"
+    AWAIT_PROMPT = "اكتب اسم الكتاب أو الدرس أو الفيلم في رسالة، أو اختر بحثًا سابقًا.\nللبحث في قنوات موضوع دون اشتراك اكتب: الموضوع: الاسم (مثل  أفلام: secreto de sus ojos):"
     on = A.pick_libs("all")
     head = f"البحث في تيليجرام ({len(on)} قائمة مفعّلة)\n{AWAIT_PROMPT}"
     kb = [[_b(q, "ta:q:" + q) for q in RECENT[:2]], [_b(q, "ta:q:" + q) for q in RECENT[2:4]]]
@@ -58,7 +58,14 @@ def screen_results(chat, type_="all"):
     dl = [[_b(f"⬇ {n}", "ta:g:" + i["ref"], "success") for n, i in enumerate(top[:4], 1) if i["t"] != "link"]]
     dl = [x for x in dl if x]
     types = [_b(f"{A.TYPES[k]} {r['counts'].get(k, 0)}", "ta:ty:" + k) for k in ("book", "audio", "video")]
-    kb = dl + [[_b("حمّل الكل", "ta:ga", "success")] if len(top) > 1 else [], types, HOME]
+    sc = r.get("scoped")
+    if sc:
+        names = "، ".join(l["name"][:18] for l in sc["libs"][:6]) + (" …" if len(sc["libs"]) > 6 else "")
+        head += f"\nبحثتُ في {len(sc['libs'])} قناة عامة دون اشتراك: {names}"
+    kb = dl + [[_b("حمّل الكل", "ta:ga", "success")] if len(top) > 1 else [], types]
+    if sc and sc["discovered"]:
+        kb.append([_b(f"💾 احفظ هذه القنوات في قائمة «{sc['topic'][:16]}»", "ta:sl", "primary")])
+    kb.append(HOME)
     return head + "\n" + ("\n".join(lines) if lines else "لا نتائج. جرّب كلمة أخرى أو فعّل قنوات أكثر."), [r for r in kb if r]
 
 
@@ -117,12 +124,23 @@ def _notify_to(chat):
 
 
 def do_search(chat, q):
-    note = TL.send(f"أبحث عن «{q}» في قوائمك…", chat)
+    sc = A.parse_scoped(q)
+    note = TL.send(f"أبحث عن «{sc[1] if sc else q}»" + (f" في قنوات «{sc[0]}»…" if sc else " في قوائمك…"), chat)
 
     def run():
         try:
-            r = A.search(q)
-            RES[chat] = {"q": q, "items": r["items"], "counts": r["counts"]}
+            if sc:
+                last = [0.0]
+
+                def prog(i, n, name):
+                    if time.time() - last[0] > 4 and i < n:
+                        last[0] = time.time()
+                        TL.edit(chat, note, f"أبحث عن «{sc[1]}» في قنوات «{sc[0]}»… {i}/{n}\n{name[:40]}", [])
+                r = A.search_scoped(sc[0], sc[1], progress=prog)
+                RES[chat] = {"q": sc[1], "items": r["items"], "counts": r["counts"], "scoped": {"topic": sc[0], "libs": r["libs"], "discovered": r["discovered"]}}
+            else:
+                r = A.search(q)
+                RES[chat] = {"q": q, "items": r["items"], "counts": r["counts"]}
             if q not in RECENT:
                 RECENT.insert(0, q)
                 del RECENT[6:]
@@ -235,6 +253,11 @@ def on_callback(chat, mid, rest):
         elif act == "la":
             AWAIT[chat] = "addlib"
             TL.send("اكتب كلمة للبحث عن قنوات (مثل: فقه، تفسير، كتب)، فأعرض لك قنوات تختار منها واحدة أو أكثر.\nأو أرسل @اسم_القناة أو رابطها إن كنت تعرفها.", chat)
+        elif act == "sl":
+            sc = (RES.get(chat) or {}).get("scoped")
+            if sc:
+                A.save_list(sc["topic"], sc["libs"])
+                TL.send(f"حفظتُ {len(sc['libs'])} قناة في قائمة «{sc['topic']}». سيبحث فيها `/search {sc['topic']}: …` مباشرة دون اكتشاف.", chat)
         elif act == "ps":
             sg = SUGG.get(chat)
             if sg and arg.isdigit() and int(arg) < len(sg["items"]):
@@ -288,7 +311,7 @@ def screen_sugg(chat):
 
 def screen_libs():
     ls = A.libs()
-    lines = [f"{'✓' if l['on'] else '—'} {l['name'][:40]} ({A.LISTS.get(l['list'])})" for l in ls]
+    lines = [f"{'✓' if l['on'] else '—'} {l['name'][:40]} ({A.list_name(l['list'])})" for l in ls]
     kb = [[_b(("أوقف " if l["on"] else "فعّل ") + l["name"][:24], "ta:lt:" + str(l["id"]))] for l in ls[:8]]
     return "مكتباتي\n" + ("\n".join(lines) or "لا قوائم بعد. اضغط «أضف قناة» أو «استورد قنواتي»."), kb + [[_b("➕ أضف قناة", "ta:la", "success"), _b("📥 استورد قنواتي", "ta:ls")], [_b("‹ البحث", "scr:search")]]
 

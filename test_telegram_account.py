@@ -220,6 +220,45 @@ class Search(Base):
         with self.assertRaises(ValueError):
             A.search("   ")
 
+    def test_scoped_syntax(self):
+        self.assertEqual(A.parse_scoped("أفلام: secreto de sus ojos"), ("أفلام", "secreto de sus ojos"))
+        self.assertEqual(A.parse_scoped("افلام：ojos"), ("افلام", "ojos"))
+        self.assertIsNone(A.parse_scoped("الروض المربع"))
+        self.assertIsNone(A.parse_scoped("https://t.me/x: y"))
+        self.assertIsNone(A.parse_scoped("أفلام:"))
+
+    def test_scoped_uses_existing_list_without_discovery(self):
+        self.fake.store = {"lib_a": [msg(1, name="الروض المربع.pdf", ext=".pdf", mime="application/pdf", size=1024 ** 2)]}
+        A._save({"libs": [{"id": 1, "name": "أ", "username": "lib_a", "list": "fiqh", "on": True}]})
+        with mock.patch.object(A, "discover") as d:
+            r = A.search_scoped("كتب", "الروض")
+            d.assert_not_called()
+        self.assertEqual(r["counts"]["all"], 1)
+        self.assertFalse(r["discovered"])
+
+    def test_scoped_discovers_and_saves_list(self):
+        self.fake.store = {"big_chan": [msg(1, name="El secreto de sus ojos.mp4", ext=".mp4", mime="video/mp4", size=9 * 1024 ** 2)]}
+        found = [{"id": 5, "name": "كبيرة", "username": "big_chan", "count": 900}]
+        seen = []
+        with mock.patch.object(A, "discover", return_value=found):
+            r = A.search_scoped("peliculas", "secreto de sus ojos", progress=lambda i, n, nm: seen.append((i, n)))
+        self.assertTrue(r["discovered"])
+        self.assertEqual(r["counts"]["all"], 1)
+        self.assertEqual(seen, [(1, 1)])
+        # الاكتشاف يُبقي التنزيل ممكنًا قبل الحفظ
+        self.assertEqual(A.get_message("5:1")[0]["username"], "big_chan")
+        self.assertEqual(A.libs(), [])                                       # لا حفظ تلقائي
+        key = A.save_list("peliculas", r["libs"])
+        self.assertEqual(A.list_name(key), "peliculas")
+        self.assertEqual(A.find_list("peliculas"), key)
+        self.assertEqual([l["username"] for l in A.libs()], ["big_chan"])
+        self.assertTrue(A.libs()[0]["on"])
+        A.lib_set(5, False)                                                  # القائمة المحفوظة تعمل مع بقية الأدوات
+
+    def test_rank_ties_by_views(self):
+        items = [{"title": "الروض المربع", "views": 5, "date": "2020"}, {"title": "الروض المربع", "views": 900, "date": "2019"}]
+        self.assertEqual(A.fuzzy_rank(items, "الروض المربع")[0]["views"], 900)
+
     def test_search_without_enabled_lists(self):
         A._save({"libs": [{"id": 1, "name": "أ", "username": "a", "list": "fiqh", "on": False}]})
         with self.assertRaises(ValueError):
@@ -403,6 +442,21 @@ class BotScreens(Base):
             AB.AWAIT[5] = "addlib"
             self.assertTrue(AB.pending_text(5, "@zzz_chan"))
             la.assert_called_with("@zzz_chan")
+
+    def test_bot_scoped_search_and_save(self):
+        sent = []
+        libs = [{"id": 5, "name": "كبيرة", "username": "big", "list": "tmp", "on": True}]
+        res = {"items": [], "counts": {"all": 0}, "libs": libs, "discovered": True, "topic": "افلام"}
+        with mock.patch.object(AB.TL, "send", lambda t, c, **k: sent.append(t) or 1), mock.patch.object(AB.TL, "edit", lambda *a, **k: sent.append(a[2])), \
+                mock.patch.object(AB.A, "search_scoped", return_value=res) as ss, mock.patch.object(AB.A, "save_list") as sv, \
+                mock.patch.object(AB.threading, "Thread", lambda target, daemon=None: types.SimpleNamespace(start=target)):
+            AB.do_search(3, "افلام: ojos")
+            self.assertEqual(ss.call_args[0][:2], ("افلام", "ojos"))
+            text, kb = AB.screen_results(3)
+            self.assertIn("دون اشتراك", text)
+            self.assertIn("ta:sl", [b["callback_data"] for r in kb for b in r])
+            AB.on_callback(3, 1, "sl")
+            sv.assert_called_once_with("افلام", libs)
 
     def test_commands(self):
         with mock.patch.object(AB, "do_search") as ds:
