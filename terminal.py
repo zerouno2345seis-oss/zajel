@@ -455,19 +455,21 @@ def restart(i, cwd=""):
 
 def send(i, text="", keys=None, paste=False):
     n = _name(i)
-    if _t("has-session", "-t", n).returncode != 0:
-        raise ValueError("الجلسة غير شغّالة؛ شغّلها أولًا.")
+    # لا نفحص الجلسة بأمر مستقل (عملية إضافية في كل ضغطة)؛ فشل أول أمر إرسال يعني أنها غير شغّالة
+    ks = [str(k) for k in (keys or [])[:100]]
+    for k in ks:
+        if not KEY_RE.match(k):
+            raise ValueError("مفتاح غير مسموح: " + k[:20])
+    dead = ValueError("الجلسة غير شغّالة؛ شغّلها أولًا.")
     if text:
         text = text[:20000]
         if paste:
-            _t("load-buffer", "-b", "zpaste", "-", inp=text)
-            _t("paste-buffer", "-p", "-d", "-b", "zpaste", "-t", n)
-        else:
-            _t("send-keys", "-t", n, "-l", "--", text)
-    for k in (keys or [])[:50]:
-        if not KEY_RE.match(str(k)):
-            raise ValueError("مفتاح غير مسموح: " + str(k)[:20])
-        _t("send-keys", "-t", n, str(k))
+            if _t("load-buffer", "-b", "zpaste", "-", inp=text).returncode != 0 or _t("paste-buffer", "-p", "-d", "-b", "zpaste", "-t", n).returncode != 0:
+                raise dead
+        elif _t("send-keys", "-t", n, "-l", "--", text).returncode != 0:
+            raise dead
+    if ks and _t("send-keys", "-t", n, *ks).returncode != 0:   # كل المفاتيح بأمر واحد بدل عملية لكل مفتاح
+        raise dead
     return {"ok": True}
 
 
@@ -528,15 +530,19 @@ def screen(i, since="", hist=0):
     args = ["capture-pane", "-p", "-e", "-J", "-t", n]
     if hist:
         args += ["-S", "-" + str(max(1, min(5000, int(hist))))]
-    r = _t(*args)
+    # لقطة الشاشة ومعلومات المؤشر بعملية tmux واحدة (سطر المعلومات هو آخر سطر في المخرجات)
+    r = _t(*args, ";", "display-message", "-p", "-t", n, "#{cursor_x} #{cursor_y} #{pane_width} #{pane_height} #{alternate_on}")
     if r.returncode != 0:
         return {"alive": False, "text": "", "hash": ""}
-    info = _t("display-message", "-p", "-t", n, "#{cursor_x} #{cursor_y} #{pane_width} #{pane_height} #{alternate_on}").stdout.split()
-    h = hashlib.md5((r.stdout + " ".join(info)).encode("utf-8", "replace")).hexdigest()[:12]
+    out = r.stdout
+    cut = out.rstrip("\n").rfind("\n")
+    info = out[cut + 1:].split()
+    body = out[:cut + 1]
+    h = hashlib.md5((body + " ".join(info)).encode("utf-8", "replace")).hexdigest()[:12]
     if since and since == h:
         return {"alive": True, "unchanged": True, "hash": h}
     cx, cy, w, hh, alt = (info + ["0"] * 5)[:5]
-    text = r.stdout
+    text = body
     if hist and alt != "1":
         text = _keep_history(i, text)
         h = hashlib.md5((text + " ".join(info)).encode("utf-8", "replace")).hexdigest()[:12]

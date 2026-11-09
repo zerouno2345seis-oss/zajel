@@ -8637,7 +8637,7 @@
     controlPanelEl = el('aside', '', 'as-panel as-control-panel', { id: 'zajel-control-panel', role: 'region', 'aria-label': 'مركز التحكم' });
     controlPanelEl.hidden = true;
     controlPanelEl.style.display = 'none';
-    controlPanelEl.style.cssText = 'position:fixed;inset:12px 12px 12px auto;z-index:10001;display:flex;flex-direction:column;width:min(1040px,96vw);height:calc(100vh - 24px);background:var(--bg);box-shadow:0 8px 40px #0005;border-radius:12px;overflow:hidden';
+    controlPanelEl.style.cssText = 'position:fixed;inset:12px 12px 12px auto;z-index:10001;display:flex;flex-direction:column;width:min(1040px,96vw);height:calc(100vh - 24px);height:calc(100dvh - 24px);background:var(--bg);box-shadow:0 8px 40px #0005;border-radius:12px;overflow:hidden';
     const controlHead = el('header', '', 'as-head');
     controlHead.append(el('strong', 'مركز التحكم', 'as-head-title'));
     const ctlVer = el('span', '', 'as-head-title');
