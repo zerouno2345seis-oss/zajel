@@ -139,6 +139,12 @@ final class WebWindow: NSObject, WKUIDelegate, WKNavigationDelegate {
         }
     }
 
+    /// إظهار النافذة كما تُركت (بجوابها) دون تحميل صفحة جديدة؛ تُفتح على الصفحة الرئيسية أول مرة فقط
+    static func show() {
+        if let w = shared, w.web.url != nil { w.window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true) }
+        else if let u = URL(string: "https://www.perplexity.ai/") { open(u) }
+    }
+
     static func open(_ url: URL) {
         let w = shared ?? WebWindow(); shared = w
         w.web.load(URLRequest(url: url))
@@ -340,6 +346,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
 
     func userContentController(_ c: WKUserContentController, didReceive m: WKScriptMessage) {
         guard let d = m.body as? [String: Any] else { return }
+        if d["webShow"] != nil { WebWindow.show(); return }
         if let s = d["web"] as? String, let u = URL(string: s), u.scheme == "https" { WebWindow.open(u); return }
         if d["getWeb"] != nil {
             guard let w = WebWindow.shared, w.window.isVisible else { web.evaluateJavaScript("window.__zajelWeb && window.__zajelWeb(null)", completionHandler: nil); return }
@@ -531,7 +538,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
                 for a in runnable { if let i = a["id"] as? String { post("restart", ["id": i]) } }
             }
         case "broadcast": js("ZajelTermApp.broadcast()")
-        case "pplx": if let u = URL(string: "https://www.perplexity.ai/") { WebWindow.open(u) }
+        case "pplx": WebWindow.show()
         case "main":
             if let u = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.mohamad.phonebackup") {
                 NSWorkspace.shared.openApplication(at: u, configuration: NSWorkspace.OpenConfiguration(), completionHandler: nil)

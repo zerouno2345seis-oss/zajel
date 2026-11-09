@@ -1900,7 +1900,7 @@
   function openPerplexity(text) {
     const url = 'https://www.perplexity.ai/' + (text ? 'search?q=' + encodeURIComponent(text) : '');
     const h = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.zajel;
-    if (h) h.postMessage({ web: url }); else window.open(url, '_blank');
+    if (h) h.postMessage(text ? { web: url } : { webShow: 1 }); else window.open(url, '_blank');   // الزر بلا سؤال يُظهر النافذة بجوابها كما هو
   }
 
   window.ZajelTermApp = {

@@ -373,6 +373,12 @@ def _other_gateway():
 def _dispatch(u):
     chat = None
     try:
+        if u.get("zajel_failover"):
+            m = u.get("message") or {}
+            chat = (m.get("chat") or {}).get("id")
+            if _authorized(chat):
+                _ask(chat, m.get("text") or "", failover=u["zajel_failover"])
+            return
         cb = u.get("callback_query")
         if cb:
             chat = cb["message"]["chat"]["id"]
@@ -508,16 +514,6 @@ def _on_voice(chat, v):
     _ask(chat, text)
 
 
-def _pick_agent():
-    import agent_runner
-    s = agent_runner.settings()
-    order = [s["default_agent"]] + [a for a in agent_runner.ORDER if a != s["default_agent"]]
-    for a in order:
-        if agent_runner._which(agent_runner.AGENTS[a]["bin"]):
-            return a
-    raise ValueError("لا يوجد وكيل مثبّت على هذا الجهاز. ثبّت أحدهم (مثل Claude أو Antigravity) ثم أعد المحاولة.")
-
-
 def _opts_kb(text):
     m = re.search(r"\[\[خيارات:(.*?)\]\]", text, flags=re.S)
     if not m:
@@ -535,42 +531,104 @@ def uuid_short():
     return "%06x" % random.randint(0, 0xFFFFFF)
 
 
-def _ask(chat, q):
-    """الطريق نفسه الذي تسلكه رسالتك في نافذة المساعد: الوكيل نفسه، والأدوات نفسها، والذاكرة نفسها، والمحادثة نفسها تظهر في زاجل."""
+# ترتيب التبديل التلقائي (اختيار المستخدم): وكيل لا يستجيب ← التالي؛ لا يستجيب أحد ← الجهاز الآخر بالترتيب نفسه
+FAILOVER = ["agy", "hermes", "pi", "opencode", "codex", "claude"]
+SILENCE = 120           # ثانية بلا أي كتابة ولا خطوة = لم يستجب
+FAIL_RE = re.compile(r"(quota|usage limit|rate limit|429|expired|unauthori[sz]ed|401|403|not logged in|log ?in|sign ?in|credit|billing|api key|رصيد|حدّ الاستخدام|منته)", re.I)
+
+
+def _candidates():
+    """الوكلاء بالترتيب: المختار يدويًا وحده، وإلا ترتيب التبديل (المثبّت وغير المعطّل فقط)."""
     import agent_runner
-    if not q.strip():
-        raise ValueError("السؤال فارغ.")
-    agent = _pick_agent()
-    r = agent_runner.start_chat(agent, q, "", _cfg()["conv"])
+    fixed = _cfg().get("agent_fixed") or ""
+    order = [fixed] if fixed in agent_runner.AGENTS else FAILOVER
+    out = []
+    for a in order:
+        spec = agent_runner.AGENTS.get(a)
+        if not spec or not agent_runner._which(spec["bin"]):
+            continue
+        try:
+            import agent_health
+            if (agent_health.status().get(a) or {}).get("status") in ("missing", "broken") and not fixed:
+                continue
+        except Exception:
+            pass
+        out.append(a)
+    return out, bool(fixed)
+
+
+def _try_agent(chat, mid, agent, q):
+    """يسأل وكيلًا واحدًا ويتابعه. يعيد (الحالة، النص، السبب): done | fail | running."""
+    import agent_runner
+    name = agent_runner.AGENTS[agent]["name"]
+    try:
+        r = agent_runner.start_chat(agent, q, "", _cfg()["conv"])
+    except ValueError as e:
+        return "fail", "", str(e)[:120]
     if r.get("conversation") and r["conversation"] != _cfg()["conv"]:
-        _save_cfg({"conv": r["conversation"]})     # المحادثة الفعلية تأخذ معرّفًا جديدًا؛ بدون حفظه تبدأ كل رسالة محادثة جديدة بلا ذاكرة، وتُرفض الرسالة التالية بـ«يعمل على محادثة أخرى»
+        _save_cfg({"conv": r["conversation"]})     # المحادثة الفعلية تأخذ معرّفًا جديدًا؛ بدونه تبدأ كل رسالة بلا ذاكرة
     jid = r["job"]
-    mid = send("أعمل على طلبك…", chat)
-    last, t0, tick = "", time.time(), 0
+    last, t0, sig, quiet_since = "", time.time(), None, time.time()
     while time.time() - t0 < 1200 and not _stop.is_set():
         v = agent_runner.job_view(jid)
         if v["state"] != "running":
             break
+        job = agent_runner.JOBS.get(jid) or {}
+        steps = job.get("steps") or []
+        cur = (len(steps), len(v.get("text") or ""))
+        if cur != sig:
+            sig, quiet_since = cur, time.time()
+        elif time.time() - quiet_since > SILENCE:          # سكت دقيقتين بلا كتابة ولا خطوة
+            agent_runner.stop(jid, "لم يستجب، انتقل إلى غيره")
+            return "fail", "", "سكت دقيقتين دون أن يكتب شيئًا"
         _quiet("sendChatAction", {"chat_id": chat, "action": "typing"})
-        steps = (agent_runner.JOBS.get(jid) or {}).get("steps") or []
         label = steps[-1]["label"] if steps else "أفكّر…"
-        if label != last and tick % 1 == 0:
-            edit(chat, mid, "أعمل على طلبك…\n" + label)
+        if label != last:
+            edit(chat, mid, f"يعمل على طلبك {name}…\n" + label)
             last = label
         _check_pending(chat, jid)
-        tick += 1
         time.sleep(3)
     else:
-        edit(chat, mid, "ما زال يعمل. ستجد الردّ في محادثتك داخل زاجل.")
+        return "running", "", ""
+    text = (v.get("text") or "").strip()
+    if v["state"] == "done" and text and not (len(text) < 300 and FAIL_RE.search(text)):
+        return "done", text, ""
+    why = (v.get("error") or text or "لا ردّ").strip()
+    return "fail", "", agent_runner.friendly(why)[:120] if hasattr(agent_runner, "friendly") else why[:120]
+
+
+def _ask(chat, q, failover=None):
+    """الطريق نفسه الذي تسلكه رسالتك في نافذة المساعد، مع التبديل التلقائي بين الوكلاء ثم الأجهزة.
+    failover: {"from": جهاز, "tried": [أجهزة], "notes": [...]} حين يصل الطلب محوَّلًا من الجهاز الآخر."""
+    import agent_runner
+    if not q.strip():
+        raise ValueError("السؤال فارغ.")
+    cands, fixed = _candidates()
+    notes = list((failover or {}).get("notes") or [])
+    tried_hosts = list((failover or {}).get("tried") or []) + [HOST]
+    mid = send("أعمل على طلبك…", chat)
+    for agent in cands:
+        name = agent_runner.AGENTS[agent]["name"]
+        st, text, why = _try_agent(chat, mid, agent, q)
+        if st == "running":
+            edit(chat, mid, f"ما زال {name} يعمل على {HOST}. ستجد الردّ في محادثتك داخل زاجل.")
+            return
+        if st == "done":
+            _quiet("deleteMessage", {"chat_id": chat, "message_id": mid})
+            out, kb = _opts_kb(text)
+            head = ("↪︎ " + "؛ ".join(notes) + "\n\n") if notes else ""
+            send(head + out + f"\n\n— {HOST} · {name}", chat, kb=kb)
+            return
+        notes.append(f"{name} على {HOST} لم يستجب ({why})")
+    # لم يستجب أحد هنا: الجهاز الآخر بالترتيب نفسه، مرة واحدة فقط (لا ذهاب وإياب)
+    other = next((h for h, p in sorted(_presence().items()) if h not in tried_hosts and time.time() - p.get("ts", 0) < GW_FRESH), "") if not fixed else ""
+    if other and _mail_repo():
+        edit(chat, mid, f"لم يستجب أي وكيل على {HOST}؛ أرسلت طلبك إلى {other} ليجرّب بالترتيب نفسه.")
+        u = {"update_id": int(time.time() * 1000), "message": {"chat": {"id": chat}, "text": q},
+             "zajel_failover": {"from": HOST, "tried": tried_hosts, "notes": notes}}
+        _forward(u, other)
         return
-    _quiet("deleteMessage", {"chat_id": chat, "message_id": mid})
-    out, kb = _opts_kb(v["text"] or "")
-    if v["state"] == "done" and out:
-        if len(_presence()) > 1:
-            out += f"\n\n— {HOST}"
-        send(out, chat, kb=kb)
-    else:
-        send("تعذّر: " + (v["error"] or "لا ردّ") if v["state"] == "error" else "أُوقفت المهمة.", chat)
+    edit(chat, mid, "تعذّر: لم يستجب أي وكيل" + ("" if fixed else " على أي جهاز") + ".\n• " + "\n• ".join(notes or ["لا وكيل مثبّت"]))
 
 
 def _desc_pending(p):
@@ -684,8 +742,12 @@ def _on_callback(chat, mid, data):
         _ask(chat, assistant_store.prompts_list()[int(rest)].get("text") or "")
     elif kind == "cv":
         _save_cfg({"conv": rest}); edit(chat, mid, "تابعنا المحادثة المختارة. اكتب رسالتك.", [])
+    elif kind == "def" and rest == "auto":
+        _save_cfg({"agent_fixed": ""})
+        edit(chat, mid, "صار الاختيار تلقائيًا: " + "، ".join(FAILOVER) + "، ثم الجهاز الآخر بالترتيب نفسه.", [[_b("رجوع", "scr:agents")]])
     elif kind == "def":
         import agent_runner
+        _save_cfg({"agent_fixed": rest})
         agent_runner.set_settings({"default_agent": rest})
         _save_cfg({"conv": "telegram-" + time.strftime("%m%d%H%M%S")})      # مساعد جديد ← محادثة جديدة
         edit(chat, mid, "صار المساعد: " + agent_runner.AGENTS[rest]["name"] + ". بدأت محادثة جديدة معه.", [[_b("رجوع", "scr:agents")]])
@@ -757,8 +819,10 @@ def _screen(name):
         lines = [f"{names.get(a['id'], a['id'])}: {lab[a['status']]}" + (f" — وسيط {a['median']} ثانية" if a["median"] else "") + (f" ({a['why']})" if a["status"] == "down" else "") for a in s["agents"]]
         cur = agent_runner.settings()["default_agent"]
         inst = {a["id"]: a["installed"] for a in agent_runner.agents()}
-        kb = [[_b("فحص " + names.get(a["id"], a["id"]), "ping:" + a["id"])] + ([_b("اجعله المساعد", "def:" + a["id"])] if inst.get(a["id"]) and a["id"] != cur else []) for a in s["agents"]]
-        return f"المساعد الحالي: {names.get(cur, cur)}\n\n" + "\n".join(lines), kb + back
+        kb = [[_b("فحص " + names.get(a["id"], a["id"]), "ping:" + a["id"])] + ([_b("اجعله المساعد", "def:" + a["id"])] if inst.get(a["id"]) and a["id"] != (_cfg().get("agent_fixed") or "") else []) for a in s["agents"]]
+        fx = _cfg().get("agent_fixed") or ""
+        mode = (f"المساعد: {names.get(fx, fx)} (اخترته يدويًا؛ لا تبديل)" if fx else "الاختيار تلقائي بالترتيب: " + " ← ".join(names.get(a, a) for a in FAILOVER) + "، ثم الجهاز الآخر")
+        return mode + "\n\n" + "\n".join(lines), ([[_b("تلقائي بالترتيب", "def:auto")]] if fx else []) + kb + back
     if name == "mem":
         rows = assistant_store.memory_list()[-8:]
         txt = "الذاكرة: %d عنصرًا\n" % len(assistant_store.memory_list()) + "\n".join("• " + r["text"][:90] for r in rows)
@@ -1008,6 +1072,10 @@ def _pickup_watch(u, host):
             return
         f.unlink()
         _push("تيليجرام: استرجاع طلب لم يُستلم من " + host)
+    if u.get("zajel_failover"):        # تحويل بعد فشل كل الوكلاء هنا: لا نعيد التجربة نفسها
+        fo = u["zajel_failover"]
+        send("تعذّر: لم يستجب أي وكيل على " + HOST + "، ولم يستلم " + host + " الطلب (قد يكون نائمًا أو مغلقًا).\n• " + "\n• ".join(fo.get("notes") or []), (u.get("message") or {}).get("chat", {}).get("id"))
+        return
     send(f"لم يستلم {host} طلبك خلال دقيقة ونصف (قد يكون نائمًا أو مغلقًا)، فنفّذته هنا على {HOST}.")
     _dispatch(u)
 
