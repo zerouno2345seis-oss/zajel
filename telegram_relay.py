@@ -87,8 +87,8 @@ def _loop():
             continue
         try:
             poll_once()
-        except (urllib.error.URLError, OSError, ValueError) as e:
-            STATE.update(ok=False, error=str(getattr(e, "reason", e))[:100])
+        except Exception as e:      # أي عطل (ولو غير متوقع مثل انقطاع القراءة) لا يقتل الحلقة بصمت
+            STATE.update(ok=False, error=(str(getattr(e, "reason", e)) or type(e).__name__)[:100])
             _stop.wait(10)
     STATE["running"] = False
 

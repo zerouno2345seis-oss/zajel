@@ -59,3 +59,23 @@ class UserAgent(unittest.TestCase):
         with mock.patch.object(R, "url", lambda: "https://x.workers.dev"), mock.patch.object(R, "_key", lambda: "k"), mock.patch.object(R.urllib.request, "urlopen", fake):
             R._http("GET", "/mac/poll")
         self.assertEqual(seen["ua"], "zajel-mac/1.0")
+
+
+class LoopSurvives(unittest.TestCase):
+    def test_unexpected_exception_does_not_kill_polling(self):
+        import http.client
+        import telegram_relay as R
+        calls = []
+
+        def poll():
+            calls.append(1)
+            if len(calls) == 1:
+                raise http.client.IncompleteRead(b"x")          # ليس URLError ولا OSError
+            R._stop.set()
+            return 0
+        R._stop.clear()
+        with mock.patch.object(R, "url", lambda: "https://x"), mock.patch.object(R, "_key", lambda: "k"), mock.patch.object(R, "poll_once", poll), \
+                mock.patch.object(R._stop, "wait", lambda t=None: False):
+            R._loop()
+        self.assertEqual(len(calls), 2)                          # استمرّ بعد العطل ونجح في الدورة الثانية
+        R._stop.clear()
