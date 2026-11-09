@@ -7,6 +7,7 @@ import telegram_account as A
 import telegram_link as TL
 
 RES = {}                 # محادثة ← {"q","items","counts"}
+SUGG = {}                # محادثة ← {"items": قنوات مقترحة, "sel": مجموعة مواضع محددة}
 AWAIT = {}               # محادثة ← "search" ينتظر نص البحث
 RECENT = ["زاد المستقنع", "المغني", "الموافقات"]
 ICON = {"book": "📘", "video": "🎬", "audio": "🎧", "link": "🔗", "photo": "🖼", "file": "📄"}
@@ -152,9 +153,21 @@ def pending_text(chat, text):
         do_search(chat, text)
         return True
     if what == "addlib":
+        ref = text.strip()
+        direct = ref.startswith("@") or "t.me/" in ref or "telegram.me/" in ref
         try:
-            A.lib_add(text)
-            TL.send("أضفتُ القناة وفعّلتُها للبحث ✓", chat, kb=[[_b("مكتباتي", "ta:libs")]])
+            if direct:
+                A.lib_add(ref)
+                TL.send("أضفتُ القناة وفعّلتُها للبحث ✓", chat, kb=[[_b("مكتباتي", "ta:libs")]])
+            else:
+                items = A.suggestions(ref)
+                if not items:
+                    AWAIT[chat] = "addlib"
+                    TL.send("لم أجد قنوات عامة بهذا الاسم. جرّب كلمة أخرى، أو أرسل @اسم_القناة.", chat)
+                else:
+                    SUGG[chat] = {"items": items, "sel": set(), "q": ref}
+                    t, kb = screen_sugg(chat)
+                    TL.send(t, chat, kb=kb)
         except ValueError as e:
             AWAIT[chat] = "addlib"
             TL.send(str(e), chat)
@@ -221,7 +234,24 @@ def on_callback(chat, mid, rest):
             TL.edit(chat, mid, *screen_libs())
         elif act == "la":
             AWAIT[chat] = "addlib"
-            TL.send("أرسل رابط القناة العامة (t.me/…) أو اسمها مبدوءًا بـ @، مثل @kitab", chat)
+            TL.send("اكتب كلمة للبحث عن قنوات (مثل: فقه، تفسير، كتب)، فأعرض لك قنوات تختار منها واحدة أو أكثر.\nأو أرسل @اسم_القناة أو رابطها إن كنت تعرفها.", chat)
+        elif act == "ps":
+            sg = SUGG.get(chat)
+            if sg and arg.isdigit() and int(arg) < len(sg["items"]):
+                sg["sel"] ^= {int(arg)}
+                TL.edit(chat, mid, *screen_sugg(chat))
+        elif act == "pa":
+            sg = SUGG.pop(chat, None)
+            added, failed = [], []
+            for i in sorted((sg or {}).get("sel", ())):
+                it = sg["items"][i]
+                try:
+                    A.lib_add(it["username"])
+                    added.append(it["name"][:30])
+                except ValueError:
+                    failed.append(it["name"][:30])
+            msg = ("أضفتُ وفعّلتُ: " + "، ".join(added) if added else "لم تُحدَّد قنوات.") + ("\nتعذّر: " + "، ".join(failed) if failed else "")
+            TL.edit(chat, mid, msg, [[_b("مكتباتي", "ta:libs")], [_b("‹ البحث", "scr:search")]])
         elif act == "ls":
             TL.send("أستورد قنواتك ومجموعاتك (تبقى مطفأة حتى تفعّلها)…", chat)
             A.libs_sync_mine()
@@ -244,6 +274,16 @@ def _bk(chat):
         TL.send(f"اكتمل النسخ: {n} رسالة جديدة.", chat)
     except ValueError as e:
         TL.send("تعذّر النسخ: " + str(e), chat)
+
+
+def screen_sugg(chat):
+    sg = SUGG.get(chat) or {"items": [], "sel": set(), "q": ""}
+    kb = [[_b(("☑ " if i in sg["sel"] else "☐ ") + it["name"][:26] + " · " + it["who"], "ta:ps:" + str(i), "success" if i in sg["sel"] else None)]
+          for i, it in enumerate(sg["items"])]
+    n = len(sg["sel"])
+    kb.append([_b(f"✅ أضف المحدد ({n})", "ta:pa", "success")] if n else [])
+    kb.append([_b("‹ مكتباتي", "ta:libs")])
+    return f"قنوات عامة لـ «{sg['q']}»: اضغط على واحدة أو أكثر ثم «أضف المحدد».", [r for r in kb if r]
 
 
 def screen_libs():

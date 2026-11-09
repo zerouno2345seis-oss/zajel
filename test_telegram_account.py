@@ -358,6 +358,26 @@ class BotScreens(Base):
         self.assertIn("ta:la", datas)
         self.assertIn("ta:ls", datas)
 
+    def test_pick_channels_from_search(self):
+        sent = []
+        items = [{"id": 1, "name": "قناة أ", "username": "a_chan", "who": "10 مشترك"}, {"id": 2, "name": "قناة ب", "username": "b_chan", "who": "5 مشترك"}]
+        edits = []
+        with mock.patch.object(AB.TL, "send", lambda t, c, **k: sent.append((t, k))), mock.patch.object(AB.TL, "edit", lambda c, m, t, kb=None: edits.append(t)), \
+                mock.patch.object(AB.A, "suggestions", return_value=items), mock.patch.object(AB.A, "lib_add") as la:
+            AB.AWAIT[5] = "addlib"
+            self.assertTrue(AB.pending_text(5, "فقه"))
+            self.assertEqual(len(AB.SUGG[5]["items"]), 2)
+            AB.on_callback(5, 1, "ps:0")
+            AB.on_callback(5, 1, "ps:1")
+            AB.on_callback(5, 1, "ps:1")        # إلغاء التحديد
+            AB.on_callback(5, 1, "pa")
+            la.assert_called_once_with("a_chan")
+            self.assertIn("قناة أ", edits[-1])
+            self.assertNotIn(5, AB.SUGG)
+            AB.AWAIT[5] = "addlib"
+            self.assertTrue(AB.pending_text(5, "@zzz_chan"))
+            la.assert_called_with("@zzz_chan")
+
     def test_commands(self):
         with mock.patch.object(AB, "do_search") as ds:
             self.assertTrue(AB.on_command(7, "search", "المغني"))

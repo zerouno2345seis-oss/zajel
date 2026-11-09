@@ -455,7 +455,7 @@ def suggestions(q):
     async def go():
         from telethon import functions
         c = await client()
-        r = await call(lambda: c(functions.contacts.SearchRequest(q=q, limit=8)))
+        r = await call(lambda: c(functions.contacts.SearchRequest(q=q, limit=12)))
         return [{"id": ch.id, "name": ch.title, "username": getattr(ch, "username", None), "who": f"{getattr(ch, 'participants_count', 0) or 0} مشترك"}
                 for ch in r.chats if getattr(ch, "broadcast", False) or getattr(ch, "megagroup", False)]
 
