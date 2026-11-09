@@ -458,6 +458,22 @@ class BotScreens(Base):
             AB.on_callback(3, 1, "sl")
             sv.assert_called_once_with("افلام", libs)
 
+    def test_interactive_general_search_two_steps(self):
+        sent = []
+        with mock.patch.object(AB.TL, "send", lambda t, c, **k: sent.append(t) or 1), mock.patch.object(AB, "do_search") as ds:
+            AB.on_callback(8, 1, "gs")
+            self.assertEqual(AB.AWAIT[8], "gtopic")
+            self.assertTrue(AB.pending_text(8, "أفلام"))
+            self.assertEqual((AB.AWAIT[8], AB.TOPIC[8]), ("gquery", "أفلام"))
+            self.assertTrue(AB.pending_text(8, "secreto de sus ojos"))
+            ds.assert_called_once_with(8, "secreto de sus ojos", topic="أفلام")
+            self.assertNotIn(8, AB.AWAIT)
+            AB.on_callback(8, 1, "gq")                      # «بحث آخر» بنفس النوع
+            self.assertEqual(AB.AWAIT[8], "gquery")
+        self.assertTrue(any("الخطوة ١ من ٢" in x for x in sent) and any("الخطوة ٢ من ٢" in x for x in sent))
+        datas = [b["callback_data"] for r in AB.screen_search()[1] for b in r]
+        self.assertIn("ta:gs", datas)
+
     def test_commands(self):
         with mock.patch.object(AB, "do_search") as ds:
             self.assertTrue(AB.on_command(7, "search", "المغني"))

@@ -7,6 +7,7 @@ import telegram_account as A
 import telegram_link as TL
 
 RES = {}                 # محادثة ← {"q","items","counts"}
+TOPIC = {}               # محادثة ← الموضوع الذي اختاره في البحث العام (خطوة ٢)
 SUGG = {}                # محادثة ← {"items": قنوات مقترحة, "sel": مجموعة مواضع محددة}
 AWAIT = {}               # محادثة ← "search" ينتظر نص البحث
 RECENT = ["زاد المستقنع", "المغني", "الموافقات"]
@@ -39,12 +40,12 @@ def screen(name):
 
 
 def screen_search():
-    AWAIT_PROMPT = "اكتب اسم الكتاب أو الدرس أو الفيلم في رسالة، أو اختر بحثًا سابقًا.\nللبحث في قنوات موضوع دون اشتراك اكتب: الموضوع: الاسم (مثل  أفلام: secreto de sus ojos):"
+    AWAIT_PROMPT = "اكتب اسم الكتاب أو الدرس أو الفيلم في رسالة، أو اختر بحثًا سابقًا.\nولا تعرف القناة؟ اضغط «بحث عام» فأسألك عن النوع ثم عن الاسم:"
     on = A.pick_libs("all")
     head = f"البحث في تيليجرام ({len(on)} قائمة مفعّلة)\n{AWAIT_PROMPT}"
     kb = [[_b(q, "ta:q:" + q) for q in RECENT[:2]], [_b(q, "ta:q:" + q) for q in RECENT[2:4]]]
     kb = [r for r in kb if r]
-    return head, kb + [[_b("مكتباتي", "ta:libs", None)], HOME]
+    return head, kb + [[_b("🌐 بحث عام (أفلام، كتب، دروس…)", "ta:gs", "primary")], [_b("مكتباتي", "ta:libs", None)], HOME]
 
 
 def screen_results(chat, type_="all"):
@@ -65,6 +66,8 @@ def screen_results(chat, type_="all"):
     kb = dl + [[_b("حمّل الكل", "ta:ga", "success")] if len(top) > 1 else [], types]
     if sc and sc["discovered"]:
         kb.append([_b(f"💾 احفظ هذه القنوات في قائمة «{sc['topic'][:16]}»", "ta:sl", "primary")])
+    if sc:
+        kb.append([_b(f"🔎 بحث آخر في «{sc['topic'][:14]}»", "ta:gq"), _b("غيّر النوع", "ta:gs")])
     kb.append(HOME)
     return head + "\n" + ("\n".join(lines) if lines else "لا نتائج. جرّب كلمة أخرى أو فعّل قنوات أكثر."), [r for r in kb if r]
 
@@ -123,8 +126,8 @@ def _notify_to(chat):
     return n
 
 
-def do_search(chat, q):
-    sc = A.parse_scoped(q)
+def do_search(chat, q, topic=None):
+    sc = (topic, q) if topic else A.parse_scoped(q)
     note = TL.send(f"أبحث عن «{sc[1] if sc else q}»" + (f" في قنوات «{sc[0]}»…" if sc else " في قوائمك…"), chat)
 
     def run():
@@ -136,6 +139,7 @@ def do_search(chat, q):
                     if time.time() - last[0] > 4 and i < n:
                         last[0] = time.time()
                         TL.edit(chat, note, f"أبحث عن «{sc[1]}» في قنوات «{sc[0]}»… {i}/{n}\n{name[:40]}", [])
+                TOPIC[chat] = sc[0]
                 r = A.search_scoped(sc[0], sc[1], progress=prog)
                 RES[chat] = {"q": sc[1], "items": r["items"], "counts": r["counts"], "scoped": {"topic": sc[0], "libs": r["libs"], "discovered": r["discovered"]}}
             else:
@@ -169,6 +173,20 @@ def pending_text(chat, text):
     what = AWAIT.pop(chat, None)
     if what == "search":
         do_search(chat, text)
+        return True
+    if what == "gtopic":
+        topic = text.strip()[:40]
+        TOPIC[chat] = topic
+        AWAIT[chat] = "gquery"
+        TL.send(f"النوع: «{topic}» ✓\nالخطوة ٢ من ٢: اكتب ما تبحث عنه (اسم الفيلم أو الكتاب أو الدرس…).", chat, kb=[[_b("غيّر النوع", "ta:gs")], HOME])
+        return True
+    if what == "gquery":
+        topic = TOPIC.get(chat)
+        if not topic:
+            AWAIT[chat] = "gtopic"
+            TL.send("ما النوع؟ (مثل: أفلام، كتب، دروس)", chat)
+        else:
+            do_search(chat, text.strip(), topic=topic)
         return True
     if what == "addlib":
         ref = text.strip()
@@ -253,6 +271,22 @@ def on_callback(chat, mid, rest):
         elif act == "la":
             AWAIT[chat] = "addlib"
             TL.send("اكتب كلمة للبحث عن قنوات (مثل: فقه، تفسير، كتب)، فأعرض لك قنوات تختار منها واحدة أو أكثر.\nأو أرسل @اسم_القناة أو رابطها إن كنت تعرفها.", chat)
+        elif act == "gs":
+            AWAIT[chat] = "gtopic"
+            saved = [(k, n) for k, n in A.all_lists().items() if k.startswith("t_")]
+            TL.send("البحث العام — الخطوة ١ من ٢: اكتب النوع الذي تبحث فيه (مثل: أفلام، كتب، دروس، وثائقيات)."
+                    + ("\nأو اختر قائمة محفوظة:" if saved else ""), chat,
+                    kb=[[_b(n[:24], "ta:gt:" + k)] for k, n in saved[:6]] + [HOME])
+        elif act == "gt":
+            name = A.all_lists().get(arg)
+            if name:
+                TOPIC[chat] = name
+                AWAIT[chat] = "gquery"
+                TL.send(f"النوع: «{name}» ✓\nالخطوة ٢ من ٢: اكتب ما تبحث عنه.", chat, kb=[[_b("غيّر النوع", "ta:gs")], HOME])
+        elif act == "gq":
+            if TOPIC.get(chat):
+                AWAIT[chat] = "gquery"
+                TL.send(f"اكتب ما تبحث عنه في «{TOPIC[chat]}»:", chat, kb=[[_b("غيّر النوع", "ta:gs")], HOME])
         elif act == "sl":
             sc = (RES.get(chat) or {}).get("scoped")
             if sc:
