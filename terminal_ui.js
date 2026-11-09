@@ -56,9 +56,9 @@
   }
   let themeHooked=false;
   function applyTheme(){const T=window.ZajelTermTheme;if(!T||!root)return;T.apply(root);if(themeHooked)return;themeHooked=true;T.onChange(()=>{if(root)T.apply(root);slots.forEach(x=>{x.hash='';});refreshScreens(true);});}
-  const agentColors = { claude: '#c96442', codex: '#3a4a5c', hermes: '#6b4bb8', agy: '#2f6fd6', opencode: '#2a8a72', pi: '#ec4899', grok: '#111827', shell: '#374151', shell2: '#374151' };
+  const agentColors = { claude: '#c96442', codex: '#3a4a5c', hermes: '#6b4bb8', agy: '#2f6fd6', opencode: '#2a8a72', pi: '#ec4899', grok: '#111827', perplexity: '#20808d', shell: '#374151', shell2: '#374151' };
   // رمز يدلّ على كل وكيل في الشريط (المطويّ خاصة)؛ الوكيل الذي يضيفه المستخدم يأخذ أول حرف من اسمه
-  const agentGlyphs = { shell: '▸_', shell2: '▸2', claude: '✻', codex: '⬡', hermes: '☤', agy: '✦', opencode: '{}', pi: 'π', grok: '◐' };
+  const agentGlyphs = { shell: '▸_', shell2: '▸2', claude: '✻', codex: '⬡', hermes: '☤', agy: '✦', opencode: '{}', pi: 'π', grok: '◐', perplexity: '⁂' };
   const glyphOf = (id, name) => agentGlyphs[id] || String(name || id || '?').trim().charAt(0).toUpperCase();
   const colorOf = id => {
     if (agentColors[id]) return agentColors[id];
@@ -1034,7 +1034,7 @@
 
   function updateSlotBadges() {
     slots.forEach(slot => {
-      if (!slot.badgeEl || !slot.id) return;
+      if (!slot.badgeEl || !slot.id || slot.id === 'perplexity') return;   // شارة Perplexity تديرها شاشته
       const a = agents.find(x => x.id === slot.id);
       if (!a) {
         slot.badgeEl.style.display = 'none';
@@ -1338,16 +1338,21 @@
 
       try {
         if (includePerplexity) {
-          openPerplexity(text);
+          openPerplexity(text, true);        // في الخلفية: جوابه يظهر في شاشته بين الشاشات
+        }
+        if (ids.length === 0 && includePerplexity) {
+          layout = 1; slots = [{ id: 'perplexity', hash: '', pre: null, select: null, card: null }]; build(); closeBroadcastPanel(); return;
         }
 
         if (ids.length > 0) {
-          const res = await req('broadcast', { ids, text });
+          const res = await req('broadcast', { ids, text: text + CITE_NOTE });
           if (res && res.error) throw new Error(res.error);
 
-          layout = Math.min(9, Math.max(1, ids.length));
+          const shown = includePerplexity ? [...ids.slice(0, 8), 'perplexity'] : ids;
+          layout = Math.min(9, Math.max(1, shown.length));
           while (slots.length < layout) slots.push({ id: '', hash: '', pre: null, select: null, card: null });
-          ids.slice(0, layout).forEach((id, k) => {
+          slots = slots.slice(0, layout);
+          shown.slice(0, layout).forEach((id, k) => {
             slots[k].id = id;
             slots[k].hash = '';
           });
@@ -1428,7 +1433,7 @@
         try{
           // جواب نافذة Perplexity إن كانت مفتوحة (يقرؤه البرنامج من الصفحة)
           const h=window.webkit&&window.webkit.messageHandlers&&window.webkit.messageHandlers.zajel;
-          const web=h?await new Promise(res=>{const t=setTimeout(()=>res(null),2500);window.__zajelWeb=j=>{clearTimeout(t);res(j);};h.postMessage({getWeb:1});}):null;
+          const web=h?await getWebAnswer():null;
           const r=await req('export_all',{ids,extra:web&&web.answer?[web]:[]});
           if(r&&r.error)throw new Error(r.error);
           showToast('حُفظ في التنزيلات: '+(r.title||'المستند')+(r.missing&&r.missing.length?' · لم يكتمل: '+r.missing.join('، '):''));
@@ -1700,6 +1705,7 @@
       wireKeys(slot);
 
       updateSlotIdentity(slot);
+      if (slot.id === 'perplexity') pplxSlot(slot);
     });
 
     const agentStyle=document.createElement('style');
@@ -1775,12 +1781,12 @@
   }
   // عدد الأعمدة يُقاس بخط الشاشة نفسه (كان يُقاس بخط أصغر فيُعطى الوكيل عرضًا أكبر من الظاهر: كلام يخرج عن الشاشة وخطوط مكسورة)،
   // ولا يُرسل المقاس إلا إذا تغيّر فعلًا (كان كل ظهور لشريط التمرير يغيّر العرض فيعيد الوكيل الرسم فترتجف الشاشة)
-  function resizeSlot(slot){if(!slot.id||!slot.pre)return;const cs=getComputedStyle(slot.pre);const probe=document.createElement('span');probe.textContent='MMMMMMMMMM';probe.style.cssText='position:absolute;visibility:hidden;white-space:pre;font:'+cs.font;slot.pre.appendChild(probe);const cw=(probe.getBoundingClientRect().width/10)||7.6,ch=parseFloat(cs.lineHeight)||17.5;probe.remove();const padX=(parseFloat(cs.paddingLeft)||0)+(parseFloat(cs.paddingRight)||0),padY=(parseFloat(cs.paddingTop)||0)+(parseFloat(cs.paddingBottom)||0);const cols=Math.max(20,Math.floor((slot.pre.clientWidth-padX-2)/cw)),rows=Math.max(5,Math.floor((slot.pre.clientHeight-padY)/ch));const key=slot.id+':'+cols+'x'+rows;if(slot.lastSize===key)return;clearTimeout(slot.resizeTimer);slot.resizeTimer=setTimeout(()=>{slot.lastSize=key;req('resize',{id:slot.id,cols,rows}).catch(()=>{slot.lastSize='';});},250);}
+  function resizeSlot(slot){if(!slot.id||!slot.pre||slot.id==='perplexity')return;const cs=getComputedStyle(slot.pre);const probe=document.createElement('span');probe.textContent='MMMMMMMMMM';probe.style.cssText='position:absolute;visibility:hidden;white-space:pre;font:'+cs.font;slot.pre.appendChild(probe);const cw=(probe.getBoundingClientRect().width/10)||7.6,ch=parseFloat(cs.lineHeight)||17.5;probe.remove();const padX=(parseFloat(cs.paddingLeft)||0)+(parseFloat(cs.paddingRight)||0),padY=(parseFloat(cs.paddingTop)||0)+(parseFloat(cs.paddingBottom)||0);const cols=Math.max(20,Math.floor((slot.pre.clientWidth-padX-2)/cw)),rows=Math.max(5,Math.floor((slot.pre.clientHeight-padY)/ch));const key=slot.id+':'+cols+'x'+rows;if(slot.lastSize===key)return;clearTimeout(slot.resizeTimer);slot.resizeTimer=setTimeout(()=>{slot.lastSize=key;req('resize',{id:slot.id,cols,rows}).catch(()=>{slot.lastSize='';});},250);}
   function showAgent(id){req('health',{id,check:true}).catch(()=>{});selectAgentForActiveSlot(id);}
   function showAgents(ids){if(!root)return false;ids=(ids||[]).filter(Boolean).slice(0,5);if(!ids.length)return false;layout=ids.length;slots=ids.map(id=>({id,hash:'',pre:null,select:null,card:null}));activeSlot=0;build();builtLayout=layout;refreshList();refreshScreens(true);return true;}
   function syncSelects(){slots.forEach((slot,i)=>{if(!slot.select)return;if(!slot.id&&agents[i])slot.id=agents[i].id||agents[0]?.id||'';if(!slot.id&&agents[0])slot.id=agents[0].id;const sel=slot.select;sel.replaceChildren();agents.forEach(a=>{const o=document.createElement('option');o.value=a.id;o.textContent=a.name+' · '+(a.label||a.state||'');sel.appendChild(o);});if(slot.id)sel.value=slot.id;});}
   async function refreshList(){if(!root||listBusy)return;listBusy=true;try{const [data,customData]=await Promise.all([req('list'),fetch('/api/term/custom').then(r=>r.json()).catch(()=>({shortcuts:[]}))]);agents=Array.isArray(data.agents)?data.agents:[];shortcuts=Array.isArray(customData.shortcuts)?customData.shortcuts:[];notify=!!data.notify;guard=data.guard!==false;const hint=root.querySelector('.as-memory-hint'),app=root.querySelector('.as-terminal');if(data.available===false){if(hint){hint.hidden=false;hint.textContent=data.hint||'الطرفية غير متاحة';}if(app)app.hidden=true;}else{if(hint)hint.hidden=true;if(app)app.hidden=false;if(builtLayout!==layout){build();builtLayout=layout;}else if(!railBusy())renderRail();syncSelects();}}catch(e){const hint=root.querySelector('.as-memory-hint');if(hint){hint.hidden=false;hint.textContent='تعذر تحميل قائمة الطرفيات: '+e.message;}}finally{listBusy=false;}}
-  async function refreshScreens(force){if(!root||root.hidden)return;root.style.setProperty('--tt-size',termFont+'px');for(const slot of slots){if(!slot.id||!slot.pre)continue;try{if(!force&&slot.holdSel&&slot.holdSel())continue;const d=await req('screen?id='+encodeURIComponent(slot.id)+'&since='+encodeURIComponent(force?'':slot.hash)+'&hist='+hist);if(d.hash)slot.hash=d.hash;if(!d.unchanged&&typeof d.text==='string'){slot.cur=d.cursor?{cx:d.cursor[0],cy:d.cursor[1],rows:d.rows,cols:d.cols,alt:!!d.alt}:null;const pre=slot.pre,stick=pre.scrollHeight-pre.scrollTop-pre.clientHeight<40||!pre.dataset.init;pre.innerHTML=ansiHtml(d.text);pre.dataset.init='1';if(stick)pre.scrollTop=pre.scrollHeight;}if(d.alive===false)slot.pre.dataset.dead='true';}catch(_){}}}
+  async function refreshScreens(force){if(!root||root.hidden)return;root.style.setProperty('--tt-size',termFont+'px');for(const slot of slots){if(!slot.id||!slot.pre||slot.id==='perplexity')continue;try{if(!force&&slot.holdSel&&slot.holdSel())continue;const d=await req('screen?id='+encodeURIComponent(slot.id)+'&since='+encodeURIComponent(force?'':slot.hash)+'&hist='+hist);if(d.hash)slot.hash=d.hash;if(!d.unchanged&&typeof d.text==='string'){slot.cur=d.cursor?{cx:d.cursor[0],cy:d.cursor[1],rows:d.rows,cols:d.cols,alt:!!d.alt}:null;const pre=slot.pre,stick=pre.scrollHeight-pre.scrollTop-pre.clientHeight<40||!pre.dataset.init;pre.innerHTML=ansiHtml(d.text);pre.dataset.init='1';if(stick)pre.scrollTop=pre.scrollHeight;}if(d.alive===false)slot.pre.dataset.dead='true';}catch(_){}}}
 
 
   function activate(el){if(!el)return;if(root&&root.parentNode===el&&listTimer)return;const host=document.createElement('div');el.replaceChildren(host);root=host;hist=1500;builtLayout=0;build();builtLayout=layout;refreshList();clearInterval(listTimer);listTimer=setInterval(refreshList,2000);clearInterval(screenTimer);screenTimer=setInterval(()=>refreshScreens(false),500);refreshScreens(true);}
@@ -1896,11 +1902,66 @@
   function mdHtml(t){const e=x=>esc(x).replace(/\*\*([^*]+)\*\*/g,'<b>$1</b>').replace(/`([^`]+)`/g,'<code>$1</code>');const out=[];let list=null,code=null;for(const raw of String(t||'').split('\n')){const l=raw.trimEnd();if(code!==null){if(/^\s*```/.test(l)){out.push('<pre dir="ltr">'+esc(code)+'</pre>');code=null;}else code+=(code?'\n':'')+raw;continue;}if(/^\s*```/.test(l)){code='';continue;}const m=l.match(/^\s*(#{1,6})\s+(.*)/),li=l.match(/^\s*(?:[-•*·]|\d+[.)])\s+(.*)/);if(!li&&list){out.push('</'+list+'>');list=null;}if(m)out.push('<h'+Math.min(4,m[1].length+1)+'>'+e(m[2])+'</h'+Math.min(4,m[1].length+1)+'>');else if(li){const tag=/^\s*\d/.test(l)?'ol':'ul';if(list!==tag){if(list)out.push('</'+list+'>');out.push('<'+tag+'>');list=tag;}out.push('<li>'+e(li[1])+'</li>');}else if(l.trim())out.push('<p dir="auto">'+e(l)+'</p>');}if(list)out.push('</'+list+'>');if(code!==null)out.push('<pre dir="ltr">'+esc(code)+'</pre>');return out.join('');}
   async function openReader(slot){if(!slot||!slot.card||!slot.id)return;slot.card.querySelector('.as-reader')?.remove();const box=document.createElement('div');box.className='as-reader';box.dir='rtl';box.style.cssText='position:absolute;inset:34px 0 0 0;z-index:20;background:var(--panel);color:var(--ink);overflow-y:auto;padding:14px 18px 40px;font:15px/1.75 "SF Arabic","Geeza Pro",system-ui,sans-serif;border-top:2px solid '+colorOf(slot.id);const close=document.createElement('button');close.type='button';close.className='btn';close.textContent='✕ إغلاق';close.style.cssText='position:sticky;top:0;float:left;z-index:1';close.onclick=()=>box.remove();box.appendChild(close);const body=document.createElement('div');body.textContent='يقرأ الجواب…';box.appendChild(body);slot.card.appendChild(box);box.addEventListener('keydown',e=>{if(e.key==='Escape')box.remove();});try{const r=await fetch('/api/term/last_answer?id='+encodeURIComponent(slot.id)).then(x=>x.json());if(r.error)throw new Error(r.error);if(!r.answer){body.textContent=r.question?'لم يكتمل جواب آخر سؤال بعد.':'لم أجد سؤالًا عند هذا الوكيل بعد.';return;}body.innerHTML='<div style="background:var(--side);border-inline-start:3px solid '+colorOf(slot.id)+';padding:8px 12px;border-radius:8px;margin:6px 0 14px"><b>السؤال</b><p dir="auto" style="margin:4px 0 0">'+esc(r.question)+'</p></div><div class="as-reader-md">'+mdHtml(r.answer)+'</div>';}catch(e){body.textContent=e.message||'تعذّرت القراءة';}}
 
+  // التوثيق دائمًا: يُلحق بكل سؤال يُرسل إلى الوكلاء، بصيغة تتحول في Word إلى حواشٍ سفلية
+  const CITE_NOTE = '\n\n(وثّق كل معلومة بمصدرها: ضع بعدها رقمًا بين معقوفين مثل [1]، واختم الجواب بقسم «المصادر» فيه كل رقم ومصدره كاملًا: المؤلف، الكتاب، الجزء والصفحة أو الرابط.)';
+
+  // جواب نافذة Perplexity: يقرؤه البرنامج من الصفحة ويعيده عبر __zajelWeb (طابور لأكثر من طالب)
+  window.__zajelWebQ = window.__zajelWebQ || [];
+  window.__zajelWeb = j => { window.__zajelWebQ.splice(0).forEach(f => f(j)); };
+  function getWebAnswer() {
+    const h = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.zajel;
+    if (!h) return Promise.resolve(null);
+    return new Promise(res => { const t = setTimeout(() => res(null), 2500); window.__zajelWebQ.push(j => { clearTimeout(t); res(j); }); h.postMessage({ getWeb: 1 }); });
+  }
+
+  // شاشة Perplexity بين الشاشات: ليست طرفية؛ تعرض جوابه منسّقًا وهو يكتب، ثم «✓ انتهى»، ومعها Word والنافذة الكاملة
+  function pplxSlot(slot) {
+    const card = slot.card;
+    if (!card) return;
+    if (slot.select) slot.select.style.display = 'none';
+    if (slot.pre) slot.pre.style.display = 'none';
+    if (slot.input) slot.input.disabled = true;
+    card.querySelectorAll('.as-terminal-fs').forEach(b => { b.style.display = 'none'; });
+    if (slot.nameEl) slot.nameEl.textContent = 'Perplexity';
+    if (slot.avatarEl) { slot.avatarEl.textContent = glyphOf('perplexity'); slot.avatarEl.style.background = colorOf('perplexity'); }
+    const head = card.querySelector('.as-terminal-window-head') || card.firstElementChild;
+    const mk = (t, title, fn) => { const b = document.createElement('button'); b.type = 'button'; b.className = 'btn'; b.textContent = t; b.title = title; b.onclick = fn; head && head.appendChild(b); return b; };
+    const h = () => window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.zajel;
+    mk('📄 Word', 'احفظ جواب Perplexity في مستند Word', () => { h() ? h().postMessage({ webWord: 1 }) : showToast('متاح داخل البرنامج فقط'); });
+    mk('↗', 'افتح نافذة Perplexity الكاملة', () => { h() ? h().postMessage({ webShow: 1 }) : null; });
+    const body = document.createElement('div');
+    body.className = 'as-reader as-pplx';
+    body.dir = 'rtl';
+    body.style.cssText = 'flex:1;min-height:0;overflow-y:auto;padding:12px 16px;background:var(--panel);color:var(--ink);font:calc(var(--tt-size,12.5px) + 2px)/1.75 "SF Arabic","Geeza Pro",system-ui,sans-serif';
+    body.innerHTML = '<p style="opacity:.7">ينتظر جواب Perplexity…</p>';
+    card.appendChild(body);
+    let last = '', same = 0;
+    const tick = async () => {
+      if (!card.isConnected) return;
+      const j = await getWebAnswer();
+      if (!card.isConnected) return;
+      const ans = j && j.answer ? j.answer : '';
+      if (ans && ans !== last) {
+        const atEnd = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
+        body.innerHTML = '<div style="background:var(--side);border-inline-start:3px solid ' + colorOf('perplexity') + ';padding:6px 10px;border-radius:8px;margin-bottom:10px"><b>السؤال</b><p dir="auto" style="margin:2px 0 0">' + esc(j.question || '') + '</p></div>' + mdHtml(ans);
+        if (atEnd) body.scrollTop = body.scrollHeight;
+        last = ans; same = 0;
+      } else if (ans) same++;
+      if (slot.badgeEl) {
+        slot.badgeEl.style.display = 'inline-block';
+        slot.badgeEl.textContent = !ans ? '⏳ ينتظر' : same >= 3 ? '✓ انتهى' : '⏳ يكتب';
+        slot.badgeEl.style.color = same >= 3 ? '#16a34a' : 'var(--ink)';
+      }
+      setTimeout(tick, same >= 3 ? 6000 : 2000);
+    };
+    tick();
+  }
+
   // داخل البرنامج: نافذة Perplexity تابعة لزاجل (تتذكر الدخول)؛ في المتصفح العادي: تبويب جديد
-  function openPerplexity(text) {
+  function openPerplexity(text, background) {
     const url = 'https://www.perplexity.ai/' + (text ? 'search?q=' + encodeURIComponent(text) : '');
     const h = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.zajel;
-    if (h) h.postMessage(text ? { web: url } : { webShow: 1 }); else window.open(url, '_blank');   // الزر بلا سؤال يُظهر النافذة بجوابها كما هو
+    if (h) h.postMessage(text ? { web: url, background: !!background } : { webShow: 1 }); else window.open(url, '_blank');   // الزر بلا سؤال يُظهر النافذة بجوابها كما هو
   }
 
   window.ZajelTermApp = {

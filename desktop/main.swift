@@ -98,7 +98,8 @@ final class WebWindow: NSObject, WKUIDelegate, WKNavigationDelegate {
     (() => {
       const md = el => { let out = [];
         const walk = n => { for (const c of n.children) { const t = c.tagName;
-          if (/^H[1-6]$/.test(t)) out.push('#'.repeat(Math.min(3, +t[1])) + ' ' + c.innerText.trim());
+          if (t === 'IMG') { if (c.src && c.naturalWidth > 120) out.push('![' + (c.alt || '').replace(/[\\[\\]]/g, '') + '](' + c.src + ')'); }
+          else if (/^H[1-6]$/.test(t)) out.push('#'.repeat(Math.min(3, +t[1])) + ' ' + c.innerText.trim());
           else if (t === 'UL' || t === 'OL') [...c.children].forEach((li, k) => out.push((t === 'OL' ? (k + 1) + '. ' : '- ') + li.innerText.trim().replace(/\\n+/g, ' ')));
           else if (t === 'TABLE') [...c.querySelectorAll('tr')].forEach(tr => out.push('| ' + [...tr.children].map(td => td.innerText.trim().replace(/\\|/g, '/')).join(' | ') + ' |'));
           else if (t === 'PRE') out.push('```\\n' + c.innerText + '\\n```');
@@ -145,11 +146,12 @@ final class WebWindow: NSObject, WKUIDelegate, WKNavigationDelegate {
         else if let u = URL(string: "https://www.perplexity.ai/") { open(u) }
     }
 
-    static func open(_ url: URL) {
+    /// background: تُحمَّل خلف نافذة الطرفيات، وجوابها يظهر في شاشته بين الشاشات (تبقى مرئية للنظام كي لا يوقف الصفحة)
+    static func open(_ url: URL, background: Bool = false) {
         let w = shared ?? WebWindow(); shared = w
         w.web.load(URLRequest(url: url))
-        w.window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        if background { w.window.orderBack(nil) }
+        else { w.window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true) }
     }
     // نوافذ الدخول المنبثقة (Google وApple) تُفتح في النافذة نفسها
     func webView(_ w: WKWebView, createWebViewWith c: WKWebViewConfiguration, for a: WKNavigationAction, windowFeatures f: WKWindowFeatures) -> WKWebView? {
@@ -347,7 +349,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
     func userContentController(_ c: WKUserContentController, didReceive m: WKScriptMessage) {
         guard let d = m.body as? [String: Any] else { return }
         if d["webShow"] != nil { WebWindow.show(); return }
-        if let s = d["web"] as? String, let u = URL(string: s), u.scheme == "https" { WebWindow.open(u); return }
+        if let s = d["web"] as? String, let u = URL(string: s), u.scheme == "https" { WebWindow.open(u, background: (d["background"] as? Bool) == true); return }
+        if d["webWord"] != nil { WebWindow.shared?.saveWord(nil); return }
         if d["getWeb"] != nil {
             guard let w = WebWindow.shared, w.window.isVisible else { web.evaluateJavaScript("window.__zajelWeb && window.__zajelWeb(null)", completionHandler: nil); return }
             w.extract { j in

@@ -418,14 +418,27 @@ def _table(doc, rows):
     t = doc.add_table(rows=len(cells), cols=n)
     t.style = "Table Grid"
     from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
     t._tbl.tblPr.append(OxmlElement("w:bidiVisual"))
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
     for i, r in enumerate(cells):
         for j in range(n):
             cell = t.cell(i, j)
             cell.text = ""
             p = cell.paragraphs[0]
-            _inline(p, r[j] if j < len(r) else "", size=12, base_bold=(i == 0))
-            _rtl(p)
+            txt = r[j] if j < len(r) else ""
+            _inline(p, txt, size=12, base_bold=(i == 0))
+            if _latin(txt) and txt.strip():
+                p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+            else:
+                _rtl(p)
+            if i == 0:
+                tcpr = cell._tc.get_or_add_tcPr()
+                sh = OxmlElement("w:shd")
+                sh.set(qn("w:val"), "clear")
+                sh.set(qn("w:fill"), "E8EEF6")
+                tcpr.append(sh)
+    doc.add_paragraph()
 
 
 _NOTES = None
@@ -456,6 +469,10 @@ def _body(doc, answer):
             for r in p.runs:
                 _font(r, name="Menlo", size=10)
             _shade(p, "F2F5F9")
+        elif re.match(r"^!\[[^\]]*\]\([^)]+\)\s*$", s):
+            flush()
+            m = re.match(r"^!\[([^\]]*)\]\(([^)\s]+)", s)
+            _picture(doc, m.group(2), m.group(1))
         elif s.startswith("|") and s.count("|") >= 2:
             flush()
             rows = []
@@ -484,6 +501,35 @@ def _body(doc, answer):
             buf.append(s)
         i += 1
     flush()
+
+
+def _picture(doc, src, alt=""):
+    """صورة من رابط أو مسار في سطر وحدها في الوسط، وتحتها وصفها. الصيغ التي لا يقبلها Word (svg/webp) تُذكر برابطها."""
+    import io
+    import urllib.request
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.shared import Cm
+    data = None
+    try:
+        if src.startswith(("http://", "https://")):
+            req = urllib.request.Request(src, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=12) as r:
+                data = r.read(8 * 1024 * 1024)
+        elif Path(src).expanduser().is_file():
+            data = Path(src).expanduser().read_bytes()
+    except Exception:
+        data = None
+    ok = data and (data[:8].startswith(b"\x89PNG") or data[:3] == b"\xff\xd8\xff" or data[:4] == b"GIF8" or data[:2] == b"BM")
+    if ok:
+        try:
+            doc.add_picture(io.BytesIO(data), width=Cm(15))
+            doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
+            if alt.strip():
+                _para(doc, alt.strip(), size=10, color="6B7587", center=True)
+            return
+        except Exception:
+            pass
+    _para(doc, "[صورة: " + (alt.strip() or "بلا وصف") + "] " + src, size=10, color="6B7587", ltr=_latin(alt))
 
 
 def build_docx(title, question, answer, agent_name, out_path):
