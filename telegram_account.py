@@ -633,7 +633,7 @@ def to_item(msg, lib):
             "link": link_of(lib, msg.id), "views": getattr(msg, "views", 0) or 0}
 
 
-def search(q, scope="all", type_="all", per_lib=25, libs_override=None, progress=None):
+def search(q, scope="all", type_="all", per_lib=25, libs_override=None, progress=None, expand=True):
     """يبحث في المكتبات المفعّلة. يعيد {items, counts}: counts عدد النتائج لكل نوع قبل التصفية بالنوع."""
     q = str(q or "").strip()
     if not q:
@@ -678,7 +678,7 @@ def search(q, scope="all", type_="all", per_lib=25, libs_override=None, progress
                 except Exception:
                     pass
         # تقريبي: إن قلّت النتائج الحرفية نبحث بكل كلمة مهمة على حدة (يصلح مع الأخطاء الإملائية والترتيب المختلف) ثم نرتّب بالتشابه
-        if len(items) < 8:
+        if expand and len(items) < 8:
             for t in fuzzy_terms(q)[: (2 if len(chosen) > 8 else 3)]:
                 if t == fz_norm(q):
                     continue

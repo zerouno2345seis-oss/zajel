@@ -1028,7 +1028,7 @@ def improve_start(text):
 AGENT_LABEL = {"claude": "Claude Haiku", "agy": "Antigravity"}
 
 
-def _oneshot(agent, prompt, sub, locked=False):
+def _oneshot(agent, prompt, sub, locked=False, model=None):
     """locked=True: بلا أي أداة ولا خادم MCP (لنصوص غير موثوقة مثل رسائل واردة)."""
     work_dir = DATA / "assistant_work" / sub
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -1038,7 +1038,7 @@ def _oneshot(agent, prompt, sub, locked=False):
         deny = {"permissions": {"deny": ["command(*)", "write_file(*)", f"read_file({DATA})"]}}
         cmd = [_which("agy"), "-p", prompt, "--model", model, "--mode", "plan", "--print-timeout", "4m", "--settings", json.dumps(deny)]
     else:
-        cmd = [_which("claude"), "-p", prompt, "--model", "haiku", "--tools", ""]
+        cmd = [_which("claude"), "-p", prompt, "--model", model or "haiku", "--tools", ""]
         if locked:
             cmd += ["--mcp-config", '{"mcpServers":{}}', "--strict-mcp-config"]
     r = subprocess.run(cmd, cwd=str(work_dir), env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=270)

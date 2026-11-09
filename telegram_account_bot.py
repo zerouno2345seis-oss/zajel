@@ -45,7 +45,7 @@ def screen_search():
     head = f"البحث في تيليجرام ({len(on)} قائمة مفعّلة)\n{AWAIT_PROMPT}"
     kb = [[_b(q, "ta:q:" + q) for q in RECENT[:2]], [_b(q, "ta:q:" + q) for q in RECENT[2:4]]]
     kb = [r for r in kb if r]
-    return head, kb + [[_b("🌐 بحث عام (أفلام، كتب، دروس…)", "ta:gs", "primary")], [_b("مكتباتي", "ta:libs", None)], HOME]
+    return head, kb + [[_b("🧠 الموظف الذكي: أعطه رؤوس أقلام", "ta:sm", "success")], [_b("🌐 بحث عام (أفلام، كتب، دروس…)", "ta:gs", "primary")], [_b("مكتباتي", "ta:libs", None)], HOME]
 
 
 def screen_results(chat, type_="all"):
@@ -64,13 +64,18 @@ def screen_results(chat, type_="all"):
         names = "، ".join(l["name"][:18] for l in sc["libs"][:6]) + (" …" if len(sc["libs"]) > 6 else "")
         head += f"\nبحثتُ في {len(sc['libs'])} قناة عامة دون اشتراك: {names}"
         if not items:
-            head += "\nلم أجده في هذه القنوات؛ قد لا يكون فيها. «جرّب قنوات أخرى» يبحث في قنوات جديدة، أو غيّر النوع."
+            head += ("\nلم أجده في هذه القنوات؛ قد لا يكون فيها. «أعد بخطة جديدة» يجرّب لغات وإملاءات وقنوات أخرى." if sc.get("smart")
+                     else "\nلم أجده في هذه القنوات؛ قد لا يكون فيها. «جرّب قنوات أخرى» يبحث في قنوات جديدة، أو غيّر النوع.")
     kb = dl + [[_b("حمّل الكل", "ta:ga", "success")] if len(top) > 1 else [], types]
-    if sc and sc["discovered"]:
+    if sc and sc["discovered"] and not sc.get("smart"):
         kb.append([_b(f"💾 احفظ هذه القنوات في قائمة «{sc['topic'][:16]}»", "ta:sl", "primary")])
-    if sc and sc["discovered"] and len(items) < 4:
+    if sc and sc.get("smart"):
+        kb.append([_b("🔄 أعد بخطة جديدة (لغات وإملاءات أخرى)", "ta:sr", "success")] if len(items) < 6 else [])
+        kb.append([_b("🧠 طلب جديد", "ta:sm")])
+        kb = [r for r in kb if r]
+    elif sc and sc["discovered"] and len(items) < 4:
         kb.append([_b("🔄 جرّب قنوات أخرى", "ta:gm", "success")])
-    if sc:
+    if sc and not sc.get("smart"):
         kb.append([_b(f"🔎 بحث آخر في «{sc['topic'][:14]}»", "ta:gq"), _b("غيّر النوع", "ta:gs")])
     kb.append(HOME)
     return head + "\n" + ("\n".join(lines) if lines else "لا نتائج. جرّب كلمة أخرى أو فعّل قنوات أكثر."), [r for r in kb if r]
@@ -184,6 +189,9 @@ def pending_text(chat, text):
     if what == "search":
         do_search(chat, text)
         return True
+    if what in ("smart_brief", "smart_ans"):
+        import telegram_smart as SM_
+        return SM_.pending(chat, what, text)
     if what == "gtopic":
         topic = text.strip()[:40]
         TOPIC[chat] = topic
@@ -281,6 +289,9 @@ def on_callback(chat, mid, rest):
         elif act == "la":
             AWAIT[chat] = "addlib"
             TL.send("اكتب كلمة للبحث عن قنوات (مثل: فقه، تفسير، كتب)، فأعرض لك قنوات تختار منها واحدة أو أكثر.\nأو أرسل @اسم_القناة أو رابطها إن كنت تعرفها.", chat)
+        elif act in ("sm", "sa", "sg", "sr", "ss"):
+            import telegram_smart as SM_
+            SM_.on_cb(chat, act, arg)
         elif act == "gs":
             AWAIT[chat] = "gtopic"
             saved = [(k, n) for k, n in A.all_lists().items() if k.startswith("t_")]
