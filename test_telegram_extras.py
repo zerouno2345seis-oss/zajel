@@ -9,10 +9,12 @@ import terminal as T
 class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
-        self.sent, self.edits = [], []
+        self.sent, self.edits, self.macscreen = [], [], []
+        TL.WAITCODE.clear()
         p = [mock.patch.object(TL, "DATA", self.tmp), mock.patch.object(TL, "send", lambda t, c=None, kb=None, reply_kb=None: self.sent.append((t, kb)) or 1),
              mock.patch.object(TL, "edit", lambda c, m, t, kb=None: self.edits.append((t, kb))),
              mock.patch.object(TL, "_quiet", lambda *a, **k: None),
+             mock.patch.object(TL, "_show_on_mac", lambda label, code: self.macscreen.append(code)),
              mock.patch.object(TL, "_cfg", lambda: {"chat_id": 7, "conv": "x", "approve_red": True})]
         for x in p:
             x.start()
@@ -26,24 +28,25 @@ class Terminal(Base):
     def test_send_needs_code(self):
         sent = []
         with mock.patch.object(T, "send", lambda i, t="", keys=None, paste=False: sent.append((i, t, keys))), \
-                mock.patch.object(X, "_screen_of", lambda i: ("شاشة", [])):
+                mock.patch.object(X, "_screen_of", lambda i: ("شاشة", [])), mock.patch("time.sleep"):
             X.on_special(7, "tsend", "/tsend claude تابع العمل")
-            key, p = next(iter(X.CONFIRM.items()))
+            code = self.macscreen[0]
             self.assertEqual(sent, [])
-            X.on_callback(7, 3, "tm", f"ok:{key}:0000" if p["code"] != "0000" else f"ok:{key}:1111")
+            self.assertFalse(any(code in t for t, _ in self.sent))      # الرمز على شاشة الماك فقط، لا في تيليجرام
+            TL._on_code_text(7, "0000" if code != "0000" else "1111")
             self.assertEqual(sent, [])               # رمز خاطئ
-            X.on_callback(8, 3, "tm", f"ok:{key}:{p['code']}")
+            TL._on_code_text(8, code)
             self.assertEqual(sent, [])               # محادثة أخرى
-            X.on_callback(7, 3, "tm", f"ok:{key}:{p['code']}")
+            TL._on_code_text(7, code)
             self.assertEqual(sent, [("claude", "تابع العمل", ["Enter"])])
-            self.assertNotIn(key, X.CONFIRM)
+            self.assertNotIn(7, TL.WAITCODE)
 
     def test_waiting_text_flow_and_unknown_agent(self):
         with self.assertRaises(ValueError):
             X.on_special(7, "tsend", "/tsend nope hello")
         X.WAITING[7] = "claude"
         self.assertTrue(X.pending_text(7, "اكتب كذا"))
-        self.assertEqual(next(iter(X.CONFIRM.values()))["text"], "اكتب كذا")
+        self.assertIn("اكتب كذا", TL.WAITCODE[7]["label"])
         self.assertFalse(X.pending_text(7, "عادي"))
 
     def test_safe_keys_only(self):
@@ -57,9 +60,8 @@ class Terminal(Base):
         stopped = []
         with mock.patch.object(T, "stop", lambda i: stopped.append(i)):
             X.on_callback(7, 3, "tm", "x:claude")
-            key, p = next(iter(X.CONFIRM.items()))
             self.assertEqual(stopped, [])
-            X.on_callback(7, 3, "tm", f"ok:{key}:{p['code']}")
+            TL._on_code_text(7, self.macscreen[0])
         self.assertEqual(stopped, ["claude"])
 
 
