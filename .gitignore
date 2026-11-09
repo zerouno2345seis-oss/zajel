@@ -13,6 +13,7 @@
 !/icon_terminal.icns
 !/icons/
 !/desktop/
+!/relay/
 /desktop/*.bak
 /assistant.js.bak
 /google_oauth_credentials.*

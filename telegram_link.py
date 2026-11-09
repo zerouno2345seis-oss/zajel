@@ -150,6 +150,12 @@ def start():
         if not (_mail_thread and _mail_thread.is_alive()):
             _mail_thread = threading.Thread(target=_mail_loop, daemon=True)
             _mail_thread.start()
+        try:
+            import telegram_relay
+            if telegram_relay.url():
+                telegram_relay.start()
+        except Exception:
+            pass
         global _pusher
         if not (_pusher and _pusher.is_alive()):
             _pusher = threading.Thread(target=_pending_loop, daemon=True)
@@ -162,6 +168,45 @@ def stop():
     STATE["gateway"] = False
 
 
+def ensure_topics():
+    """قسم لكل جهاز في محادثة البوت (واجهة البوتات ٩.٣ و٩.٤: أقسام في المحادثات الخاصة).
+    يعمل من البوابة وحدها حتى لا ينشئ الجهازان قسمين لكل منهما. إن لم يُفعَّل وضع الأقسام في BotFather يبقى السلوك القديم ويظهر السبب في الحالة."""
+    c = _cfg()
+    if not (c["chat_id"] and _tok() and STATE["gateway"]):
+        return
+    topics = dict(c.get("topics") or {})
+    new = False
+    for h in sorted(_presence()):
+        if h in topics:
+            continue
+        try:
+            topics[h] = _api(_tok(), "createForumTopic", {"chat_id": c["chat_id"], "name": "💻 " + _alias(h)}, timeout=15)["message_thread_id"]
+            new = True
+        except (ValueError, ConflictError) as e:
+            STATE["topics_error"] = "تعذّر إنشاء أقسام الأجهزة: " + str(e)[:80] + " (فعّل «Threaded Mode» للبوت من BotFather)."
+            return
+    if new:
+        STATE["topics_error"] = ""
+        _save_cfg({"topics": topics})
+        try:
+            if _mail_repo():
+                with MAIL_LOCK:
+                    (MAIL["repo"] / "tg").mkdir(exist_ok=True)
+                    (MAIL["repo"] / "tg" / "topics.json").write_text(json.dumps(topics), encoding="utf-8")
+                    _push("تيليجرام: أقسام الأجهزة")
+        except Exception:
+            pass
+
+
+def host_for_thread(thread):
+    if not thread:
+        return ""
+    for h, t in (_cfg().get("topics") or {}).items():
+        if t == thread:
+            return h
+    return ""
+
+
 def _tok():
     global _TOK
     if not _TOK:
@@ -172,16 +217,28 @@ def _tok():
 _TOK = ""
 
 
-def send(text, chat_id=None, kb=None, reply_kb=None):
-    """يرسل نصًّا (يقسّمه إن طال) ويعيد رقم آخر رسالة؛ kb أزرار داخل الرسالة، reply_kb لوحة المفاتيح الدائمة."""
+def my_thread(chat=None):
+    """رقم قسم هذا الجهاز في محادثة البوت (أو None إن لم تُفعَّل الأقسام)."""
+    c = _cfg()
+    if chat and chat != c.get("chat_id"):
+        return None
+    return (c.get("topics") or {}).get(HOST)
+
+
+def send(text, chat_id=None, kb=None, reply_kb=None, thread=None):
+    """يرسل نصًّا (يقسّمه إن طال) ويعيد رقم آخر رسالة؛ kb أزرار داخل الرسالة، reply_kb لوحة المفاتيح الدائمة.
+    الرد يذهب إلى قسم هذا الجهاز تلقائيًا إن كانت الأقسام مفعّلة."""
     chat = chat_id or _cfg()["chat_id"]
     if not _tok() or not chat:
         return 0
+    thread = thread if thread is not None else my_thread(chat)
     text = re.sub(r"^>\s?", "", re.sub(r"\*\*|`", "", str(text)), flags=re.M) or "…"      # تيليجرام هنا نصّ خام: لا تُعرض علامات الماركداون
     parts = [text[i:i + 3900] for i in range(0, len(text), 3900)]
     mid = 0
     for n, part in enumerate(parts):
         p = {"chat_id": chat, "text": part}
+        if thread:
+            p["message_thread_id"] = thread
         if n == len(parts) - 1:
             if kb:
                 p["reply_markup"] = {"inline_keyboard": kb}
@@ -257,7 +314,7 @@ def notify_job(label, state, secs, error="", detail=""):
 
 
 # ================= الاستماع والتوجيه =================
-MAIN_KB = [["الرئيسية", "الأجهزة", "الوكلاء"], ["الطرفية", "واتساب"], ["العمليات", "الأتمتة", "بحث"], ["الذاكرة", "الأوامر", "المساعدة"], ["المزامنة", "التحديث", "حديث"]]
+MAIN_KB = [["الرئيسية", "بحث", "الوارد"], ["المساعد", "المهام", "المزيد"]]
 ONESHOT = {"host": ""}
 
 
@@ -266,7 +323,9 @@ def _alias(h):
 
 
 def _kb():
-    """لوحة المفاتيح الدائمة: صف أول بزر لكل جهاز (▶ الحالي)، ثم الأقسام."""
+    """لوحة المفاتيح الدائمة: ستة أزرار. وأزرار الأجهزة لا تظهر إلا إن لم تُفعَّل أقسام الأجهزة (فالقسم يغني عنها)."""
+    if (_cfg().get("topics") or {}):
+        return MAIN_KB
     hs = sorted(_presence())
     row = [("▶ " if h == _target() else "") + "💻 " + _alias(h) for h in hs] if len(hs) > 1 else []
     return ([row] if row else []) + MAIN_KB
@@ -278,16 +337,17 @@ def _host_by_button(text):
         if t in (h.lower(), _alias(h).lower()):
             return h
     return ""
-BTN = {"الرئيسية": "home", "الأجهزة": "pc", "حديث": "talk", "الوكلاء": "agents", "العمليات": "ops", "الأتمتة": "auto", "بحث": "findhelp",
-       "الذاكرة": "mem", "الأوامر": "cmds", "المهام": "jobs", "المساعدة": "help",
+BTN = {"الرئيسية": "home", "بحث": "search", "الوارد": "inbox", "المساعد": "assistant", "المهام": "jobs", "المزيد": "more",
+       "الأجهزة": "pc", "حديث": "talk", "الوكلاء": "agents", "العمليات": "ops", "الأتمتة": "auto",
+       "الذاكرة": "mem", "الأوامر": "cmds", "المساعدة": "help",
        "الطرفية": "term", "واتساب": "wa", "المزامنة": "sync", "التحديث": "update"}
-COMMANDS = [("home", "الرئيسية: ملخص الجهاز الحالي"), ("pc", "الأجهزة: بدّل بين الكمبيوترين"), ("agents", "الوكلاء: الحال وتبديل المساعد"),
-            ("ops", "العمليات الجارية: إيقاف مؤقت وإلغاء"), ("auto", "الأتمتة: عرض وتشغيل وإيقاف"), ("find", "بحث في كل الأجهزة: /find كلمة"),
-            ("space", "المساحة الحرة"), ("jobs", "المهام والموافقات المعلّقة"), ("mem", "الذاكرة"), ("cmds", "الأوامر الجاهزة"),
-            ("new", "محادثة جديدة مع المساعد"), ("chats", "تابع محادثة من زاجل"), ("settings", "الإعدادات"), ("help", "المساعدة"),
-            ("term", "الطرفية: جلسات الوكلاء"),
-            ("tsend", "إرسال نص لطرفية وكيل: /tsend وكيل نص"), ("sync", "المزامنة بين الجهازين"), ("update", "فحص التحديث وتثبيته"), ("wa", "واتساب: الحال والملخص"),
-            ("mail", "البريد: الحسابات والبحث: /mail كلمة"), ("auth", "حالة دخول الوكلاء"), ("disks", "الأقراص ومساحتها"), ("clean", "التنظيف الكامل بخطة وموافقة"), ("talk", "حديث مباشر مع وكيل في طرفيته"), ("endtalk", "إنهاء الحديث المباشر")]
+# القائمة المائلة كما في التصميم المعتمد (١٧ أمرًا)؛ الأوامر القديمة (/pc /ops …) ما زالت تعمل وإن لم تظهر في القائمة
+COMMANDS = [("home", "الرئيسية: حال الجهاز وما ينتظرك"), ("search", "ابحث في قنوات تيليجرام"), ("inbox", "الوارد من الرسائل المحفوظة"),
+            ("watch", "المراقب وكلماته"), ("dls", "التنزيلات"), ("backup", "نسخ المحادثات"), ("files", "تصفح الملفات"),
+            ("mail", "البريد"), ("term", "الطرفية"), ("phone", "الجوال"), ("clean", "التنظيف"), ("disks", "الأقراص"),
+            ("agents", "الوكلاء"), ("talk", "حادث وكيلًا مباشرة"), ("update", "التحديث"), ("settings", "الإعدادات"), ("help", "المساعدة")]
+LEGACY = ("pc", "ops", "auto", "find", "space", "jobs", "mem", "cmds", "new", "chats", "tsend", "sync", "wa", "auth", "endtalk", "more")
+CMDMAP = {"watch": "watchwords", "files": "files", "start": "home"}      # /watch في التصميم = مراقب الكلمات، وغيره اسم قسم الساعة
 HOST = socket.gethostname().split(".")[0]
 FIND = {}
 OPTS = {}          # خيارات الأزرار المقترحة من المساعد: رقم ← نص
@@ -314,10 +374,14 @@ def _loop():
             continue
         try:
             c = _cfg()
-            ups = _api(tok, "getUpdates", {"offset": c["offset"], "timeout": 25, "allowed_updates": ["message", "callback_query"]}, timeout=40)
+            ups = _api(tok, "getUpdates", {"offset": c["offset"], "timeout": 25, "allowed_updates": ["message", "callback_query", "inline_query", "chosen_inline_result"]}, timeout=40)
             if not STATE["gateway"]:
                 STATE["gw_changed"] = True          # صرنا المستقبِل: سجّل الحضور فورًا ليعرفه الجهاز الآخر
             STATE["gateway"], STATE["error"] = True, ""
+            try:
+                ensure_topics()
+            except Exception:
+                pass
             for u in ups:
                 _save_cfg({"offset": u["update_id"] + 1})
                 threading.Thread(target=_route, args=(u,), daemon=True).start()      # كل طلب في خيط: لا يحجب الاستماع
@@ -379,6 +443,12 @@ def _dispatch(u):
             if _authorized(chat):
                 _ask(chat, m.get("text") or "", failover=u["zajel_failover"])
             return
+        if u.get("inline_query"):
+            _on_inline(u["inline_query"])
+            return
+        if u.get("chosen_inline_result"):
+            _on_chosen(u["chosen_inline_result"])
+            return
         cb = u.get("callback_query")
         if cb:
             chat = cb["message"]["chat"]["id"]
@@ -400,6 +470,73 @@ def _dispatch(u):
             send("تعذّر تنفيذ الطلب: " + str(exc)[:150], chat)
 
 
+# ================= البحث المضمّن: @اسم_البوت كلمة في أي محادثة =================
+INLINE_BUDGET = 6.0         # تيليجرام يريد الجواب سريعًا؛ ما لم يصل خلال هذه المهلة لا ننتظره
+
+
+def _inline_results(q):
+    import concurrent.futures
+    out = []
+    ex = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+    futs = {}
+    try:
+        import telegram_more as M
+        acc = M._account()
+        if acc is not None and acc.linked():
+            futs["lib"] = ex.submit(acc.A.search, q)
+        import agent_server
+        futs["mac"] = ex.submit(agent_server.call, "search_all", {"q": q}, "telegram")
+        deadline = time.time() + INLINE_BUDGET
+        for name, f in futs.items():
+            try:
+                r = f.result(max(0.1, deadline - time.time()))
+            except Exception:
+                continue
+            if name == "lib":
+                for i in r["items"][:8]:
+                    if i["t"] == "link" or not i.get("link"):
+                        continue
+                    out.append({"type": "article", "id": "t" + i["ref"].replace(":", "_"), "title": i["title"][:90], "description": f"{i['lib_name']} · {i['size_h']}",
+                                "input_message_content": {"message_text": f"{i['title']}\n{i['link']}"}})
+            else:
+                for e in ((r.get("result") or {}).get("entries") or [])[:5]:
+                    if e.get("is_dir"):
+                        continue
+                    k = uuid_short()
+                    FIND[k] = (e.get("place") or e.get("sid"), e.get("path"))
+                    out.append({"type": "article", "id": "m" + k, "title": (e.get("name") or "")[:90], "description": "من ملفات " + HOST,
+                                "input_message_content": {"message_text": "📄 " + (e.get("name") or "")}})
+    finally:
+        ex.shutdown(wait=False)
+    return out[:20]
+
+
+def _on_inline(iq):
+    """نتائج من مكتباتك ومن ملفات الماك. لا يُجاب إلا المستخدم المقترن."""
+    me = _cfg().get("chat_id")
+    if not me or (iq.get("from") or {}).get("id") != me:
+        _quiet("answerInlineQuery", {"inline_query_id": iq["id"], "results": [], "cache_time": 1, "is_personal": True})
+        return
+    q = (iq.get("query") or "").strip()
+    res = _inline_results(q) if len(q) >= 2 else []
+    _quiet("answerInlineQuery", {"inline_query_id": iq["id"], "results": res, "cache_time": 5, "is_personal": True,
+                                 **({} if res else {"button": {"text": "اكتب كلمتين أو أكثر للبحث", "start_parameter": "inline"}})})
+
+
+def _on_chosen(cr):
+    """اختار نتيجة من ملفات الماك: تيليجرام لا يسمح للبوت برفع ملف إلى محادثة غيره، فيصلك الملف في محادثة البوت لتحوّله."""
+    me = _cfg().get("chat_id")
+    rid = cr.get("result_id") or ""
+    if not me or (cr.get("from") or {}).get("id") != me or not rid.startswith("m"):
+        return
+    f = FIND.get(rid[1:])
+    if f:
+        import agent_server
+        r = agent_server.call("send_to_telegram", {"place": f[0], "path": f[1]}, agent="telegram")
+        if r.get("error"):
+            send(r["error"], me)
+
+
 def _authorized(chat):
     return bool(_cfg()["chat_id"]) and chat == _cfg()["chat_id"]
 
@@ -415,6 +552,8 @@ def _on_text(chat, text):
         return
     if chat != c["chat_id"]:
         return
+    if _on_code_text(chat, text):
+        return
     if chat in WAITWORD:
         import agent_server
         pid = WAITWORD.pop(chat)
@@ -427,15 +566,27 @@ def _on_text(chat, text):
     import telegram_extras as X
     if X.pending_text(chat, text):
         return
+    if not text.startswith("/"):
+        import telegram_more as _M
+        _acc = _M._account()
+        if _acc is not None and _acc.linked() and _acc.pending_text(chat, text):
+            return
     word = text.split()[0] if text.split() else ""
     name = BTN.get(text) or (word[1:].split("@")[0] if word.startswith("/") else "")
+    name = CMDMAP.get(name, name)
+    import telegram_more as M
+    arg = text.split(None, 1)[1].strip() if len(text.split(None, 1)) > 1 else ""
+    if name in M.ACCOUNT_SCREENS and arg and word.startswith("/"):
+        acc = M._account()
+        if acc is not None and acc.linked() and acc.on_command(chat, name, arg):
+            return
     if name == "tsend" and X.on_special(chat, name, text):
         return
     if name in X.NAMES and X.on_command(chat, name, text):
         return
     if name in X.NAMES:
         _show(chat, name)
-    elif name in ("home", "agents", "mem", "cmds", "jobs", "help", "chats", "settings", "ops", "auto", "space", "pc", "findhelp"):
+    elif name in ("home", "agents", "mem", "cmds", "jobs", "help", "chats", "settings", "ops", "auto", "space", "pc", "findhelp") or name in M.NAMES or name in M.ALIAS:
         _show(chat, name)
     elif name == "find":
         _find(chat, text.split(None, 1)[1] if len(text.split(None, 1)) > 1 else "")
@@ -568,7 +719,9 @@ def _try_agent(chat, mid, agent, q):
     if r.get("conversation") and r["conversation"] != _cfg()["conv"]:
         _save_cfg({"conv": r["conversation"]})     # المحادثة الفعلية تأخذ معرّفًا جديدًا؛ بدونه تبدأ كل رسالة بلا ذاكرة
     jid = r["job"]
-    last, t0, sig, quiet_since = "", time.time(), None, time.time()
+    last, t0, sig, quiet_since, last_edit = "", time.time(), None, time.time(), 0.0
+    stop_kb = [[_b("⏹ أوقف", "stp:" + jid, "danger")]]
+    edit(chat, mid, f"يعمل على طلبك {name}…", stop_kb)
     while time.time() - t0 < 1200 and not _stop.is_set():
         v = agent_runner.job_view(jid)
         if v["state"] != "running":
@@ -581,16 +734,22 @@ def _try_agent(chat, mid, agent, q):
         elif time.time() - quiet_since > SILENCE:          # سكت دقيقتين بلا كتابة ولا خطوة
             agent_runner.stop(jid, "لم يستجب، انتقل إلى غيره")
             return "fail", "", "سكت دقيقتين دون أن يكتب شيئًا"
-        _quiet("sendChatAction", {"chat_id": chat, "action": "typing"})
+        th = my_thread(chat)
+        _quiet("sendChatAction", {"chat_id": chat, "action": "typing", **({"message_thread_id": th} if th else {})})
         label = steps[-1]["label"] if steps else "أفكّر…"
-        if label != last:
-            edit(chat, mid, f"يعمل على طلبك {name}…\n" + label)
-            last = label
+        part = (v.get("text") or "").strip()
+        shown = label + "\n" + part[-3000:]                       # بثّ تدريجي: الجواب يكبر في مكانه، وزر «أوقف» تحته
+        if shown != last and time.time() - last_edit >= 1.5:
+            edit(chat, mid, (f"{name} يكتب…\n\n" + part[-3000:]) if part else f"يعمل على طلبك {name}…\n" + label, stop_kb)
+            last, last_edit = shown, time.time()
         _check_pending(chat, jid)
-        time.sleep(3)
+        time.sleep(1.5)
     else:
         return "running", "", ""
     text = (v.get("text") or "").strip()
+    if v["state"] == "stopped" and jid in STOPPED:
+        STOPPED.discard(jid)
+        return "stopped", text, ""
     if v["state"] == "done" and text and not (len(text) < 300 and FAIL_RE.search(text)):
         return "done", text, ""
     why = (v.get("error") or text or "لا ردّ").strip()
@@ -612,6 +771,9 @@ def _ask(chat, q, failover=None):
         st, text, why = _try_agent(chat, mid, agent, q)
         if st == "running":
             edit(chat, mid, f"ما زال {name} يعمل على {HOST}. ستجد الردّ في محادثتك داخل زاجل.")
+            return
+        if st == "stopped":
+            edit(chat, mid, "⏹ أوقفتَ المساعد." + (("\n\nما كُتب حتى الآن:\n" + text[-3000:]) if text else ""), [])
             return
         if st == "done":
             _quiet("deleteMessage", {"chat_id": chat, "message_id": mid})
@@ -658,9 +820,9 @@ def _push_pending(chat, p):
         send(body + "\n\nاعتماد العمليات من تيليجرام مغلق؛ وافق عليها داخل زاجل.", chat)
     elif p.get("needs_word"):
         send(body + "\n\nعملية حساسة: بعد الضغط على «اعتمد» اكتب كلمة التأكيد.", chat,
-             kb=[[{"text": "✅ اعتمد", "callback_data": "word:" + p["id"]}, {"text": "❌ ارفض", "callback_data": "no:" + p["id"]}]])
+             kb=[[_b("اعتمد", "word:" + p["id"], "danger"), _b("ارفض", "no:" + p["id"])]])
     else:
-        send(body, chat, kb=[[{"text": "✅ راجعتُ، تابع", "callback_data": "ok1:" + p["id"]}, {"text": "❌ ارفض", "callback_data": "no:" + p["id"]}]])
+        send(body, chat, kb=[[_b("وافق برمز", "ok1:" + p["id"], "danger"), _b("ارفض", "no:" + p["id"])]])
 
 
 def _check_pending(chat, jid=None):
@@ -683,9 +845,71 @@ def _pending_loop():
         _stop.wait(4)
 
 
+WAITCODE = {}       # محادثة ← {"code","until","fn","label","tries"}
+CODE_SECS = 300
+
+
+def _show_on_mac(label, code):
+    """يُظهر الرمز على شاشة هذا الماك وحدها (لا يُرسل إلى تيليجرام): من يحمل الهاتف ولا يرى الشاشة لا يستطيع الموافقة."""
+    try:
+        txt = f"رمز الموافقة: {code}\n{label[:80]}\nصالح ٥ دقائق."
+        script = 'display alert "زاجل · عملية حمراء" message ' + json.dumps(txt, ensure_ascii=False) + ' giving up after 300'
+        subprocess.Popen(["osascript", "-e", script], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
+
+def ask_code(chat, label, fn):
+    """عملية حمراء: رمز من أربعة أرقام على شاشة الماك، تكتبه في المحادثة، وتنتهي صلاحيته بعد ٥ دقائق ويبطل بعد ثلاث محاولات خاطئة."""
+    code = "%04d" % random.randint(0, 9999)
+    WAITCODE[chat] = {"code": code, "until": time.time() + CODE_SECS, "fn": fn, "label": label, "tries": 0}
+    _show_on_mac(label, code)
+    send(f"🔴 عملية حمراء\n{label}\n\nاكتب هنا الرمز المكوّن من أربعة أرقام الظاهر الآن على شاشة {HOST}. صالح ٥ دقائق.", chat,
+         kb=[[_b("ألغِ", "cdx", "primary")]])
+
+
+def _on_code_text(chat, text):
+    """يعيد True إن كانت الرسالة جوابًا لرمز معلّق."""
+    w = WAITCODE.get(chat)
+    if not w:
+        return False
+    if w["until"] < time.time():
+        WAITCODE.pop(chat, None)
+        send("انتهت صلاحية الرمز؛ أعد الطلب.", chat)
+        return True
+    if not re.fullmatch(r"\d{4}", text.strip()):
+        return False                       # كلام عادي: لا نبتلعه
+    if text.strip() != w["code"]:
+        w["tries"] += 1
+        if w["tries"] >= 3:
+            WAITCODE.pop(chat, None)
+            send("أُلغيت العملية بعد ثلاث محاولات خاطئة.", chat)
+        else:
+            send("الرمز غير صحيح. انظر إلى شاشة الماك.", chat)
+        return True
+    WAITCODE.pop(chat, None)
+    try:
+        w["fn"]()
+        send("✅ تم التنفيذ.", chat)
+    except Exception as e:
+        send("لم يُنفَّذ: " + str(e)[:150], chat)
+    return True
+
+
+STOPPED = set()
+
+
 def _on_callback(chat, mid, data):
     import agent_server
     kind, _, rest = data.partition(":")
+    if kind == "ta":
+        import telegram_account_bot as AB
+        AB.on_callback(chat, mid, rest)
+        return
+    if kind in ("ay", "ay2", "sv"):
+        import telegram_more
+        telegram_more.on_callback(chat, mid, kind, rest)
+        return
     if kind in ("cg", "cr", "tm", "sy", "up", "wa", "ml", "au", "fc", "tk"):
         import telegram_extras as X
         X.on_callback(chat, mid, kind, rest)
@@ -711,20 +935,19 @@ def _on_callback(chat, mid, data):
             WAITWORD[chat] = rest
             edit(chat, mid, "اكتب الآن كلمة التأكيد «%s» في رسالة للموافقة، أو اكتب غير ذلك للإلغاء." % pv.get("needs_word"), [])
     elif kind == "ok1":
-        code = "%04d" % random.randint(0, 9999)
-        CODES[rest] = code
-        edit(chat, mid, "تأكيد أخير: سيُنفَّذ الطلب فور ضغط الزر.", [[{"text": "نفّذ الآن (" + code + ")", "callback_data": f"ok2:{rest}:{code}"}], [{"text": "ارفض", "callback_data": "no:" + rest}]])
-    elif kind == "ok2":
-        pid, _, code = rest.partition(":")
-        if not _cfg()["approve_red"] or CODES.get(pid) != code:
-            edit(chat, mid, "رمز التأكيد غير صحيح أو أُغلق الاعتماد من تيليجرام.", [])
+        pv = next((x for x in agent_server.pending_list() if x["id"] == rest), None)
+        if not _cfg()["approve_red"] or not pv:
+            edit(chat, mid, "الطلب غير موجود أو انتهت صلاحيته، أو أُغلق الاعتماد من تيليجرام.", [])
             return
-        try:
-            agent_server.approve(pid)
-            CODES.pop(pid, None)
-            edit(chat, mid, "✅ تم تنفيذ الطلب.", [])
-        except ValueError as e:
-            edit(chat, mid, str(e), [])
+        edit(chat, mid, "طُلب الرمز: انظر إلى شاشة الماك.", [])
+        ask_code(chat, _desc_pending(pv).split("\n")[0], lambda: agent_server.approve(rest))
+    elif kind == "cdx":
+        WAITCODE.pop(chat, None)
+        edit(chat, mid, "أُلغيت العملية.", [])
+    elif kind == "stp":
+        STOPPED.add(rest)
+        import agent_runner
+        agent_runner.stop(rest, "أوقفه المستخدم")
     elif kind == "scr":
         _show(chat, rest, mid)
     elif kind == "ping":
@@ -786,20 +1009,44 @@ def _on_callback(chat, mid, data):
         _save_cfg({rest: not _cfg()[rest]}); _show(chat, "settings", mid)
 
 
+def _app_row():
+    """زر يفتح التطبيق المصغّر إن كان الوسيط مضبوطًا."""
+    try:
+        import telegram_relay
+        u = telegram_relay.url()
+    except Exception:
+        u = ""
+    return [[{"text": "افتح التطبيق المصغّر", "web_app": {"url": u + "/"}, "style": "success"}]] if u else []
+
+
 def _show(chat, name, mid=None):
+    import telegram_more as M
+    name = M.ALIAS.get(name, name)
+    if name == "search":
+        acc = M._account()
+        if acc is not None and acc.linked():
+            acc.AWAIT[chat] = "search"             # الرسالة التالية هي نص البحث
     text, kb = _screen(name)
     if mid:
         edit(chat, mid, text, kb)
     else:
-        send(text, chat, kb=kb, reply_kb=_kb() if name in ("help", "home", "pc") else None)
+        send(text, chat, kb=kb, reply_kb=_kb() if name in ("help", "home", "pc", "assistant") else None)
 
 
-def _b(t, d):
-    return {"text": t, "callback_data": d}
+def _b(t, d, style=None):
+    """زر داخل الرسالة؛ style: success (أخضر) أو danger (أحمر) أو primary (أزرق) — حقل style في واجهة البوتات ٩.٤."""
+    b = {"text": t, "callback_data": d}
+    if style in ("success", "danger", "primary"):
+        b["style"] = style
+    return b
 
 
 def _screen(name):
     import agent_runner, agent_metrics, agent_server, assistant_store
+    import telegram_more as M
+    mm = M.screen(name)
+    if mm:
+        return mm
     more = _screen_more(name)
     if more:
         return more
@@ -808,10 +1055,16 @@ def _screen(name):
         ag = agent_metrics.stats(24, {a["id"]: a["installed"] for a in agent_runner.agents()}, [a["id"] for a in agent_runner.agents()])["agents"]
         up = sum(1 for a in ag if a["status"] in ("ok", "slow"))
         pend = len(agent_server.pending_list())
-        return (f"زاجل {_version()} على {HOST}\nالمساعد: {agent_runner.AGENTS[agent_runner.settings()['default_agent']]['name']}\nالوكلاء العاملون: {up} من {len(ag)}\nطلبات تنتظر موافقتك: {pend}\nالمحادثة: {_cfg()['conv']}",
-                [[_b("الأجهزة", "scr:pc"), _b("الوكلاء", "scr:agents")], [_b("العمليات", "scr:ops"), _b("الأتمتة", "scr:auto")], [_b("المساحة", "scr:space"), _b("الذاكرة", "scr:mem")],
-                 [_b("المهام", "scr:jobs"), _b("الأوامر", "scr:cmds")], [_b("الطرفية", "scr:term"), _b("واتساب", "scr:wa")],
-                 [_b("التحديث", "scr:update"), _b("المحادثات", "scr:chats")], [_b("الإعدادات", "scr:settings")]])
+        import shutil
+        du = shutil.disk_usage("/")
+        extra = ""
+        acc = M._account()
+        if acc is not None and acc.linked():
+            extra = "\n" + acc.home_line()
+        return (f"{HOST} · متصل · زاجل {_version()}\nالقرص: {_human(du.used)} من {_human(du.total)}\nالمساعد: {agent_runner.AGENTS[agent_runner.settings()['default_agent']]['name']}\nالوكلاء العاملون: {up} من {len(ag)}\nبانتظار موافقتك: {pend}" + extra,
+                [[_b("بحث", "scr:search", "primary"), _b("الوارد", "scr:inbox"), _b("المراقب", "scr:watchwords")],
+                 [_b("الجوال", "scr:phone"), _b("البريد", "scr:mail"), _b("الطرفية", "scr:term")],
+                 [_b("التنظيف", "scr:clean"), _b("الوكلاء", "scr:agents"), _b("كل الأقسام", "scr:more", "primary")]] + _app_row())
     if name == "agents":
         names = {a["id"]: a["name"] for a in agent_runner.agents()}
         s = agent_metrics.stats(24, {a["id"]: a["installed"] for a in agent_runner.agents()}, list(names))
@@ -1012,6 +1265,12 @@ def _pull():
     except (OSError, ValueError):
         pass
     try:
+        tp = json.loads((d / "topics.json").read_text(encoding="utf-8"))
+        if isinstance(tp, dict) and tp != (_cfg().get("topics") or {}):
+            _save_cfg({"topics": {**(_cfg().get("topics") or {}), **tp}})
+    except (OSError, ValueError):
+        pass
+    try:
         cid = json.loads((d / "chat.json").read_text(encoding="utf-8")).get("chat_id", 0)
         if cid and not _cfg()["chat_id"] and _tok():
             _save_cfg({"chat_id": cid})        # اقترن جهاز آخر بمحادثتك: هذا الجهاز يتبعه تلقائيًا
@@ -1085,7 +1344,7 @@ def _route(u):
     m = u.get("message") or {}
     cb = u.get("callback_query") or {}
     text = (m.get("text") or "").strip()
-    local = text.startswith("/start") or text.startswith("/pc") or text == "الأجهزة" or (cb.get("data") or "").startswith(("pc:", "scr:pc", "one:"))
+    local = "inline_query" in u or "chosen_inline_result" in u or text.startswith("/start") or text.startswith("/pc") or text == "الأجهزة" or (cb.get("data") or "").startswith(("pc:", "scr:pc", "one:"))
     chat = (m.get("chat") or (cb.get("message") or {}).get("chat") or {}).get("id")
     hb = _host_by_button(text) if text else ""
     if hb and _authorized(chat):                # زر جهاز في لوحة المفاتيح: يصير هو الحالي فورًا
@@ -1096,6 +1355,9 @@ def _route(u):
             send(str(e), chat)
         return
     tgt = _target()
+    th_host = host_for_thread(m.get("message_thread_id") or (cb.get("message") or {}).get("message_thread_id"))
+    if th_host and th_host in _presence() and _authorized(chat):
+        tgt = th_host                           # الكتابة في قسم جهاز تعني أنه هو المقصود
     if ONESHOT["host"] and (text or m.get("voice") or m.get("audio")) and not text.startswith("/") and not local:
         tgt, ONESHOT["host"] = ONESHOT["host"], ""
     for h in sorted(_presence(), key=len, reverse=True):     # «اسم الجهاز (أو أوله مثل iMac) ثم الطلب» لمرة واحدة

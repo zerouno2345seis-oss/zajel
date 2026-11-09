@@ -68,17 +68,22 @@ def _screen_of(i):
     return f"{name}:\n{body}", kb
 
 
+def _do_send(chat, agent, text):
+    import terminal
+    terminal.send(agent, text, ["Enter"], paste=len(text) > 300)
+    time.sleep(1)
+    txt, kb = _screen_of(agent)
+    TL.send(txt, chat, kb=kb)
+
+
 def _confirm(chat, kind, agent, text=""):
-    code = "%04d" % random.randint(0, 9999)
-    key = "%06x" % random.randint(0, 0xFFFFFF)
-    CONFIRM[key] = {"chat": chat, "kind": kind, "agent": agent, "text": text, "code": code, "until": time.time() + 300}
+    """الطرفية تحكم كامل بالجهاز: عملية حمراء ← رمز يظهر على شاشة الماك لا في تيليجرام."""
     T = _term_ok()
     name = T.BY_ID[agent]["name"]
     if kind == "send":
-        msg = f"سيُرسل إلى طرفية {name} ثم يُضغط Enter:\n«{text[:600]}»"
+        TL.ask_code(chat, f"إرسال إلى طرفية {name} ثم Enter: «{text[:300]}»", lambda: _do_send(chat, agent, text))
     else:
-        msg = f"سيُغلق جلسة {name} وما فيها."
-    TL.send(msg + "\nالطرفية تحكم كامل بالجهاز؛ أكّد برمزها:", chat, kb=[[_b(f"نفّذ ({code})", f"tm:ok:{key}:{code}")], [_b("ألغِ", "tm:no:" + key)]])
+        TL.ask_code(chat, f"إغلاق جلسة {name} وما فيها", lambda: T.stop(agent))
 
 
 def term_send_command(chat, text):
@@ -110,7 +115,7 @@ def _screen_sync():
     except Exception as e:
         return "تعذّر قراءة حال المزامنة: " + str(e)[:120], [[_b("رجوع", "scr:home")]]
     lines = [f"{k}: {v}" for k, v in st.items() if isinstance(v, (str, int, float, bool)) and v not in ("", None)][:10]
-    return "المزامنة بين الجهازين:\n" + ("\n".join(lines) or "لا معلومات."), [[_b("زامن الآن", "sy:run")], [_b("رجوع", "scr:home")]]
+    return "المزامنة بين الجهازين:\n" + ("\n".join(lines) or "لا معلومات."), [[_b("🟡 زامن الآن", "ay:sync_run")], [_b("رجوع", "scr:home")]]
 
 
 def _screen_update():
@@ -122,7 +127,7 @@ def _screen_update():
     if info.get("error"):
         return info["error"], [[_b("رجوع", "scr:home")]]
     txt = f"الإصدار الحالي على {TL.HOST}: {info['current']}\nالأحدث على GitHub: {info['latest']}"
-    kb = [[_b("ثبّت التحديث (يعيد تشغيل زاجل)", "up:ask")]] if info["available"] else []
+    kb = [[{"text": "ثبّت التحديث (يعيد تشغيل زاجل)", "callback_data": "up:ask", "style": "danger"}]] if info["available"] else []
     return txt + ("" if info["available"] else "\nأنت على آخر إصدار."), kb + [[_b("رجوع", "scr:home")]]
 
 
@@ -204,22 +209,6 @@ def on_callback(chat, mid, kind, rest):
                 TL.send(f"اكتب النص الذي يُرسل إلى {terminal.BY_ID[arg]['name']} (أو «إلغاء»).", chat)
             elif act == "x":
                 _confirm(chat, "stop", arg)
-            elif act == "ok":
-                key, _, code = arg.partition(":")
-                p = CONFIRM.get(key)
-                if not p or p["chat"] != chat or p["code"] != code or p["until"] < time.time():
-                    TL.edit(chat, mid, "الرمز غير صحيح أو انتهت صلاحية الطلب.", [])
-                    return
-                CONFIRM.pop(key, None)
-                if p["kind"] == "send":
-                    terminal.send(p["agent"], p["text"], ["Enter"], paste=len(p["text"]) > 300)
-                    time.sleep(1)
-                    txt, kb = _screen_of(p["agent"])
-                    TL.edit(chat, mid, "✅ أُرسل.", [])
-                    TL.send(txt, chat, kb=kb)
-                else:
-                    terminal.stop(p["agent"])
-                    TL.edit(chat, mid, "✅ أُغلقت الجلسة.", [])
             elif act == "no":
                 CONFIRM.pop(arg, None)
                 TL.edit(chat, mid, "أُلغي.", [])
@@ -240,20 +229,8 @@ def on_callback(chat, mid, kind, rest):
     elif kind == "up":
         import app_update
         if rest == "ask":
-            code = "%04d" % random.randint(0, 9999)
-            CONFIRM["up"] = {"chat": chat, "code": code, "until": time.time() + 300}
-            TL.edit(chat, mid, "سيُنزَّل التحديث ويُعاد تشغيل زاجل على " + TL.HOST + ". أكّد:", [[_b(f"ثبّت ({code})", "up:go:" + code)], [_b("ألغِ", "scr:update")]])
-        elif rest.startswith("go:"):
-            p = CONFIRM.get("up")
-            if not p or p["chat"] != chat or p["code"] != rest[3:] or p["until"] < time.time():
-                TL.edit(chat, mid, "الرمز غير صحيح أو انتهت صلاحيته.", [])
-                return
-            CONFIRM.pop("up", None)
-            try:
-                r = app_update.apply()
-                TL.edit(chat, mid, f"نُزّل الإصدار {r['version']} ويُعاد تشغيل زاجل الآن.", [])
-            except (ValueError, OSError) as e:
-                TL.edit(chat, mid, "تعذّر التحديث: " + str(e)[:150], [])
+            TL.edit(chat, mid, "طُلب الرمز: انظر إلى شاشة الماك.", [])
+            TL.ask_code(chat, "تنزيل التحديث وإعادة تشغيل زاجل على " + TL.HOST, lambda: TL.send(f"نُزّل الإصدار {app_update.apply()['version']} ويُعاد تشغيل زاجل الآن.", chat))
     elif kind == "wa":
         try:
             import whatsapp_watch as W
