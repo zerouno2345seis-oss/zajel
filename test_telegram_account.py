@@ -342,6 +342,22 @@ class BotScreens(Base):
             ds.assert_called_with(7, "المغني")
             self.assertFalse(AB.pending_text(7, "غير منتظر"))
 
+    def test_add_library_from_bot(self):
+        sent = []
+        with mock.patch.object(AB.TL, "send", lambda t, c, **k: sent.append(t)), mock.patch.object(AB.A, "lib_add") as la:
+            AB.on_callback(9, 1, "la")
+            self.assertEqual(AB.AWAIT[9], "addlib")
+            self.assertTrue(AB.pending_text(9, "@kitab"))
+            la.assert_called_with("@kitab")
+            self.assertNotIn(9, AB.AWAIT)
+            la.side_effect = ValueError("اكتب رابط القناة")
+            AB.AWAIT[9] = "addlib"
+            self.assertTrue(AB.pending_text(9, "xx"))
+            self.assertEqual(AB.AWAIT[9], "addlib")
+        datas = [b["callback_data"] for r in AB.screen_libs()[1] for b in r]
+        self.assertIn("ta:la", datas)
+        self.assertIn("ta:ls", datas)
+
     def test_commands(self):
         with mock.patch.object(AB, "do_search") as ds:
             self.assertTrue(AB.on_command(7, "search", "المغني"))

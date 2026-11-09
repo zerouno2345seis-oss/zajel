@@ -147,8 +147,17 @@ def on_command(chat, name, arg):
 
 
 def pending_text(chat, text):
-    if AWAIT.pop(chat, None) == "search":
+    what = AWAIT.pop(chat, None)
+    if what == "search":
         do_search(chat, text)
+        return True
+    if what == "addlib":
+        try:
+            A.lib_add(text)
+            TL.send("أضفتُ القناة وفعّلتُها للبحث ✓", chat, kb=[[_b("مكتباتي", "ta:libs")]])
+        except ValueError as e:
+            AWAIT[chat] = "addlib"
+            TL.send(str(e), chat)
         return True
     return False
 
@@ -210,6 +219,13 @@ def on_callback(chat, mid, rest):
             threading.Thread(target=lambda: _bk(chat), daemon=True).start()
         elif act == "libs":
             TL.edit(chat, mid, *screen_libs())
+        elif act == "la":
+            AWAIT[chat] = "addlib"
+            TL.send("أرسل رابط القناة العامة (t.me/…) أو اسمها مبدوءًا بـ @، مثل @kitab", chat)
+        elif act == "ls":
+            TL.send("أستورد قنواتك ومجموعاتك (تبقى مطفأة حتى تفعّلها)…", chat)
+            A.libs_sync_mine()
+            TL.edit(chat, mid, *screen_libs())
         elif act == "lt":
             for l in A.libs():
                 if str(l["id"]) == arg:
@@ -234,7 +250,7 @@ def screen_libs():
     ls = A.libs()
     lines = [f"{'✓' if l['on'] else '—'} {l['name'][:40]} ({A.LISTS.get(l['list'])})" for l in ls]
     kb = [[_b(("أوقف " if l["on"] else "فعّل ") + l["name"][:24], "ta:lt:" + str(l["id"]))] for l in ls[:8]]
-    return "مكتباتي\n" + ("\n".join(lines) or "لا قوائم بعد. أضف قنوات من زاجل ← تيليجرام ← مكتباتي."), kb + [[_b("‹ البحث", "scr:search")]]
+    return "مكتباتي\n" + ("\n".join(lines) or "لا قوائم بعد. اضغط «أضف قناة» أو «استورد قنواتي»."), kb + [[_b("➕ أضف قناة", "ta:la", "success"), _b("📥 استورد قنواتي", "ta:ls")], [_b("‹ البحث", "scr:search")]]
 
 
 def hit_notifier(h):
