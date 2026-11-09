@@ -165,6 +165,166 @@ def short_title(question, agent_name):
     return (t + " " + agent_name).strip() if t else agent_name
 
 
+# ---------- الحواشي ----------
+# التوثيق في حواشٍ سفلية حقيقية: الرقم في المتن وفي الحاشية بين قوسين صغيرين، بالأحمر، ويبدأ العدّ من ١ في كل صفحة.
+W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+RED = "C00000"
+SRC_HEAD = re.compile(r"^\s*(?:#{1,6}\s*)?\**\s*(المصادر|المراجع|مصادر|مراجع|الإحالات|التوثيق|Sources|References|Citations)\s*\**\s*:?\s*$", re.I)
+FN_DEF = re.compile(r"^\s*\[\^([^\]]+)\]:\s*(.+)$")
+SRC_ITEM = re.compile(r"^\s*(?:[-*•]\s*)?(?:\[(\d{1,3})\]|(\d{1,3})[.)])\s+(.+)$")
+SENT = "\u0000"
+_FN = None          # سياق المستند الجاري: {"root": عنصر الحواشي، "n": آخر رقم، "texts": نصوص الحواشي المؤجلة}
+
+
+def _w(tag):
+    return "{%s}%s" % (W_NS, tag)
+
+
+def _sect_bidi(sect):
+    """الصفحة من اليمين (يجعل خط الحواشي الفاصل في اليمين). مكان bidi في sectPr قبل rtlGutter/docGrid وإلا تجاهله Word."""
+    from lxml import etree
+    b = etree.Element(_w("bidi"))
+    after = [c for c in sect if c.tag in (_w("rtlGutter"), _w("docGrid"))]
+    (after[0].addprevious(b) if after else sect.append(b))
+
+
+def _fn_setup(doc):
+    """يضيف إلى المستند جزء الحواشي (بفاصله) ويجعل الترقيم يبدأ من جديد في كل صفحة."""
+    global _FN
+    from docx.opc.constants import RELATIONSHIP_TYPE as RT
+    from docx.opc.packuri import PackURI
+    from docx.opc.part import Part
+    from lxml import etree
+    xml = ('<w:footnotes xmlns:w="%s"><w:footnote w:type="separator" w:id="-1"><w:p><w:pPr><w:bidi/><w:spacing w:after="0"/><w:jc w:val="left"/></w:pPr>'
+           '<w:r><w:separator/></w:r></w:p></w:footnote><w:footnote w:type="continuationSeparator" w:id="0"><w:p><w:pPr><w:bidi/>'
+           '<w:spacing w:after="0"/></w:pPr><w:r><w:continuationSeparator/></w:r></w:p></w:footnote></w:footnotes>') % W_NS
+    part = Part(PackURI("/word/footnotes.xml"), "application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml",
+                xml.encode("utf-8"), doc.part.package)
+    doc.part.relate_to(part, RT.FOOTNOTES)
+    sect = doc.sections[0]._sectPr
+    fpr = etree.SubElement(sect, _w("footnotePr"))
+    etree.SubElement(fpr, _w("numRestart")).set(_w("val"), "eachPage")
+    # ترتيب عناصر sectPr: footnotePr بعد مراجع الرأس والتذييل وقبل type/pgSz
+    sect.remove(fpr)
+    idx = sum(1 for c in sect if c.tag in (_w("headerReference"), _w("footerReference")))
+    sect.insert(idx, fpr)
+    # Word يرسم الخط الفاصل من الحاشيتين ‎-1 و0 المسجّلتين في الإعدادات؛ بدونهما يرسم خطه الافتراضي في اليسار
+    st = doc.settings.element
+    sfp = etree.Element(_w("footnotePr"))
+    for i in ("-1", "0"):
+        etree.SubElement(sfp, _w("footnote")).set(_w("id"), i)
+    nxt = [c for c in st if c.tag in (_w("endnotePr"), _w("compat"), _w("docVars"), _w("rsids"))]
+    (nxt[0].addprevious(sfp) if nxt else st.append(sfp))
+    _FN = {"part": part, "root": etree.fromstring(xml.encode("utf-8")), "n": 0}
+
+
+def _fn_finish():
+    global _FN
+    if _FN:
+        from lxml import etree
+        _FN["part"]._blob = etree.tostring(_FN["root"], xml_declaration=True, encoding="UTF-8", standalone=True)
+    _FN = None
+
+
+def _red_run(parent, text, size, sup=False, ref_id=None, ref_tag=None):
+    from lxml import etree
+    r = etree.SubElement(parent, _w("r"))
+    rpr = etree.SubElement(r, _w("rPr"))
+    fonts = etree.SubElement(rpr, _w("rFonts"))
+    for k in ("ascii", "hAnsi", "cs"):
+        fonts.set(_w(k), "Geeza Pro")
+    etree.SubElement(rpr, _w("color")).set(_w("val"), RED)
+    for t in ("sz", "szCs"):
+        etree.SubElement(rpr, _w(t)).set(_w("val"), str(int(size * 2)))
+    if sup:
+        etree.SubElement(rpr, _w("vertAlign")).set(_w("val"), "superscript")
+    etree.SubElement(rpr, _w("rtl"))
+    if ref_tag:
+        el = etree.SubElement(r, _w(ref_tag))
+        if ref_id is not None:
+            el.set(_w("id"), str(ref_id))
+    else:
+        t = etree.SubElement(r, _w("t"))
+        t.text = text
+        t.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+    return r
+
+
+def _add_footnote(paragraph, note):
+    """(١) أحمر صغير في المتن، وحاشية سفلية تبدأ بـ(١) أحمر ثم نص التوثيق."""
+    from lxml import etree
+    _FN["n"] += 1
+    n = _FN["n"]
+    p = paragraph._p
+    for txt, tag in (("(", None), (None, "footnoteReference"), (")", None)):
+        _red_run(p, txt, 10, sup=True, ref_id=n if tag else None, ref_tag=tag)
+    fn = etree.SubElement(_FN["root"], _w("footnote"))
+    fn.set(_w("id"), str(n))
+    fp = etree.SubElement(fn, _w("p"))
+    ppr = etree.SubElement(fp, _w("pPr"))
+    etree.SubElement(ppr, _w("bidi"))
+    sp = etree.SubElement(ppr, _w("spacing"))      # ترتيب عناصر pPr في المخطط: bidi ثم spacing ثم jc
+    sp.set(_w("after"), "0")
+    etree.SubElement(ppr, _w("jc")).set(_w("val"), "both")
+    for txt, tag in (("(", None), (None, "footnoteRef"), (")", None)):
+        _red_run(fp, txt, 9, ref_tag=tag)
+    r = etree.SubElement(fp, _w("r"))
+    rpr = etree.SubElement(r, _w("rPr"))
+    f = etree.SubElement(rpr, _w("rFonts"))
+    for k in ("ascii", "hAnsi", "cs"):
+        f.set(_w(k), "Geeza Pro")
+    for t in ("sz", "szCs"):
+        etree.SubElement(rpr, _w(t)).set(_w("val"), "22")
+    etree.SubElement(rpr, _w("rtl"))
+    t = etree.SubElement(r, _w("t"))
+    t.text = " " + re.sub(r"\s+", " ", note).strip()
+    t.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+
+
+def citations(answer):
+    """يفصل التوثيق عن المتن: حواشي Markdown ‎[^1]، والأرقام ‎[1] مع قائمة «المصادر» في آخر الجواب، والروابط ‎[نص](رابط).
+    يعيد المتن وفيه علامات الحواشي، وقائمة نصوص الحواشي بالترتيب."""
+    lines = (answer or "").splitlines()
+    defs, srcs, body, in_src = {}, {}, [], False
+    for ln in lines:
+        m = FN_DEF.match(ln)
+        if m:
+            defs[m.group(1)] = m.group(2).strip()
+            continue
+        if SRC_HEAD.match(ln):
+            in_src = True
+            continue
+        if in_src:
+            m = SRC_ITEM.match(ln)
+            if m:
+                srcs[m.group(1) or m.group(2)] = m.group(3).strip()
+                continue
+            if not ln.strip():
+                continue
+            if re.match(r"^\s*#", ln):
+                in_src = False
+            else:
+                srcs[str(len(srcs) + 1)] = ln.strip().lstrip("-*• ").strip()
+                continue
+        body.append(ln)
+    notes = []
+
+    def mark(note):
+        notes.append(note)
+        return SENT + str(len(notes) - 1) + SENT
+    text = "\n".join(body)
+
+    def one(m):                      # مرور واحد بترتيب النص: حاشية Markdown، أو أرقام مصادر، أو رابط
+        if m.group(1) is not None:
+            return mark(defs[m.group(1)]) if m.group(1) in defs else m.group(0)
+        if m.group(2) is not None:
+            ids = [x.strip() for x in re.split(r"[,،]", m.group(2))]
+            return "".join(mark(srcs[i]) if i in srcs else "[" + i + "]" for i in ids) if srcs else m.group(0)
+        return m.group(3) + mark(m.group(4))
+    text = re.sub(r"\[\^([^\]]+)\]|\[(\d{1,3}(?:\s*[,،]\s*\d{1,3})*)\]|(?<!!)\[([^\]\n]+)\]\((https?://[^)\s]+)\)", one, text)
+    return text, notes
+
+
 # ---------- Word ----------
 def _rtl(paragraph):
     from docx.oxml.ns import qn
@@ -212,9 +372,13 @@ def _latin(s):
 
 
 def _inline(par, text, size=14, base_bold=False):
-    """**عريض** و`كود` داخل السطر."""
-    for part in re.split(r"(\*\*[^*]+\*\*|`[^`]+`)", text):
+    """**عريض** و`كود` داخل السطر، وعلامات الحواشي."""
+    for part in re.split(r"(\*\*[^*]+\*\*|`[^`]+`|\u0000\d+\u0000)", text):
         if not part:
+            continue
+        if part.startswith(SENT):
+            if _FN is not None and _NOTES is not None:
+                _add_footnote(par, _NOTES[int(part.strip(SENT))])
             continue
         if part.startswith("**") and part.endswith("**"):
             _font(par.add_run(part[2:-2]), size=size, bold=True)
@@ -234,12 +398,13 @@ def _para(doc, text, style=None, size=14, bold=False, ltr=False, color=None, cen
     if color:
         for r in p.runs:
             _font(r, size=size, bold=bold or None, color=color)
+    # في الفقرة العربية (bidi) يقلب Word «يمين» و«يسار»: «right» تظهر يسارًا. فالعربية «ضبط الطرفين» تبدأ من اليمين
     if center:
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     elif ltr:
         p.alignment = WD_ALIGN_PARAGRAPH.LEFT
     else:
-        p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+        p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
     if not ltr:
         _rtl(p)
     return p
@@ -263,7 +428,12 @@ def _table(doc, rows):
             _rtl(p)
 
 
+_NOTES = None
+
+
 def _body(doc, answer):
+    global _NOTES
+    answer, _NOTES = citations(answer)
     lines = (answer or "").splitlines()
     i, buf = 0, []
 
@@ -325,7 +495,8 @@ def build_docx(title, question, answer, agent_name, out_path):
     for side in ("left_margin", "right_margin", "top_margin", "bottom_margin"):
         setattr(sec, side, Cm(2.2))
     from docx.oxml import OxmlElement
-    sec._sectPr.append(OxmlElement("w:bidi"))
+    _sect_bidi(sec._sectPr)
+    _fn_setup(doc)
     _para(doc, title, size=20, bold=True, color="183478", center=True)
     _para(doc, f"الوكيل: {agent_name} · التاريخ: {time.strftime('%Y-%m-%d %H:%M')}", size=10, color="6B7587", center=True)
     lab = _para(doc, "السؤال", size=12, bold=True, color="183478")
@@ -339,6 +510,7 @@ def build_docx(title, question, answer, agent_name, out_path):
     fp = sec.footer.paragraphs[0]
     _font(fp.add_run(f"زاجل · {agent_name}"), size=9, color="8B95A7")
     _rtl(fp)
+    _fn_finish()
     doc.save(str(out_path))
     return out_path
 
@@ -353,7 +525,8 @@ def build_many(title, items, out_path):
     sec.page_height, sec.page_width = Cm(29.7), Cm(21)
     for side in ("left_margin", "right_margin", "top_margin", "bottom_margin"):
         setattr(sec, side, Cm(2.2))
-    sec._sectPr.append(OxmlElement("w:bidi"))
+    _sect_bidi(sec._sectPr)
+    _fn_setup(doc)
     _para(doc, title, size=20, bold=True, color="183478", center=True)
     _para(doc, "الوكلاء: " + "، ".join(n for n, _, _ in items) + " · " + time.strftime("%Y-%m-%d %H:%M"), size=10, color="6B7587", center=True)
     same_q = len({q.strip() for _, q, _ in items}) == 1
@@ -371,6 +544,7 @@ def build_many(title, items, out_path):
     fp = sec.footer.paragraphs[0]
     _font(fp.add_run("زاجل · " + "، ".join(n for n, _, _ in items)), size=9, color="8B95A7")
     _rtl(fp)
+    _fn_finish()
     doc.save(str(out_path))
     return out_path
 

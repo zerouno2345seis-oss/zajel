@@ -35,6 +35,27 @@ class Screen(unittest.TestCase):
         self.assertEqual(A.short_title("أريد أن تبحث لي في حكم الجمع في حالة المطر، والدليل", "Codex"), "حكم الجمع في حالة المطر Codex")
 
 
+class Footnotes(unittest.TestCase):
+    def test_citations_become_footnotes(self):
+        ans = "جائز [1]، وقيل لا [2].\nوانظر [الموسوعة](https://x.org/a) وحديث مسلم[^m].\n\n## المصادر\n[1] المغني، 2/202.\n[2] المبسوط، 1/149.\n\n[^m]: صحيح مسلم، 705."
+        text, notes = A.citations(ans)
+        self.assertEqual(notes, ["المغني، 2/202.", "المبسوط، 1/149.", "https://x.org/a", "صحيح مسلم، 705."])
+        self.assertNotIn("المصادر", text)
+        self.assertNotIn("[1]", text)
+
+    def test_docx_has_red_footnotes_restarting_each_page(self):
+        import zipfile
+        with tempfile.TemporaryDirectory() as d:
+            r = A.export_text("Codex", "سؤال؟", "جائز [1].\n\n## المصادر\n[1] المغني، 2/202.", out_dir=d)
+            z = zipfile.ZipFile(r["path"])
+            doc, fn, st = z.read("word/document.xml").decode(), z.read("word/footnotes.xml").decode(), z.read("word/settings.xml").decode()
+            self.assertIn('w:footnoteReference w:id="1"', doc)
+            self.assertIn('numRestart w:val="eachPage"', doc)
+            self.assertIn("المغني", fn)
+            self.assertIn('w:color w:val="C00000"', fn)
+            self.assertIn("footnotePr", st)
+
+
 class Docx(unittest.TestCase):
     def test_build_and_no_overwrite(self):
         from docx import Document
