@@ -78,3 +78,55 @@ class Failover(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class GatewayElection(unittest.TestCase):
+    def test_desktop_wins_even_if_laptop_announces_gateway(self):
+        now = 10000
+        with mock.patch.object(TL.time, "time", return_value=now), mock.patch.object(TL, "HOST", "iMac"), \
+             mock.patch.object(TL, "LAPTOP", False), mock.patch.dict(TL.MAIL, {"presence": {"MacBook": {"ts": now, "laptop": True, "gateway": True}}}):
+            self.assertEqual(TL._other_gateway(), "")
+        with mock.patch.object(TL.time, "time", return_value=now), mock.patch.object(TL, "HOST", "MacBook"), \
+             mock.patch.object(TL, "LAPTOP", True), mock.patch.dict(TL.MAIL, {"presence": {"iMac": {"ts": now, "laptop": False, "gateway": False}}}):
+            self.assertEqual(TL._other_gateway(), "iMac")
+
+    def test_stale_desktop_allows_laptop_and_tie_has_one_winner(self):
+        with mock.patch.object(TL.time, "time", return_value=10000), mock.patch.object(TL, "HOST", "a"), \
+             mock.patch.object(TL, "LAPTOP", True), mock.patch.dict(TL.STATE, {"gateway": False}), \
+             mock.patch.dict(TL.MAIL, {"presence": {"desktop": {"ts": 1, "laptop": False}, "b": {"ts": 10000, "laptop": True, "gateway": True}}}):
+            self.assertEqual(TL._other_gateway(), "")
+
+    def test_idle_return_and_activity(self):
+        presence = {"iMac-kenana-2": {"ts": 10000, "laptop": False}, "MacBook": {"ts": 10000, "laptop": True}}
+        with mock.patch.object(TL.time, "time", return_value=10000), mock.patch.object(TL, "_presence", return_value=presence), \
+             mock.patch.object(TL, "_set_target") as target, mock.patch.object(TL, "send") as send, \
+             mock.patch.dict(TL.STATE, {"gateway": True}), mock.patch.dict(TL.MAIL, {"target": "MacBook", "activity": 8201}):
+            TL._revert_idle_target()
+            target.assert_not_called()
+            TL.MAIL["activity"] = 8200
+            TL._revert_idle_target()
+            target.assert_called_once_with("iMac-kenana-2")
+            send.assert_called_once_with("رجعتُ إلى iMac-kenana-2")
+
+class RoundFlow(unittest.TestCase):
+    def test_selection_and_start(self):
+        judge = types.SimpleNamespace(get_default_judge=lambda: "claude", set_default_judge=mock.Mock(),
+                                      start_round=mock.Mock(return_value={"round_id": "r1", "agents": {}, "judge_state": "idle"}))
+        runner = types.SimpleNamespace(agents=lambda: [{"id": a, "name": a, "installed": True} for a in ("claude", "codex", "gemini")])
+        with mock.patch.dict("sys.modules", {"judge": judge, "agent_runner": runner}), \
+             mock.patch.object(TL, "send"), mock.patch.object(TL, "edit"), mock.patch.object(TL.threading, "Thread") as thread:
+            TL._round_begin(7)
+            TL.ROUND_DRAFT[7].update(awaiting=False, question="ما الجواب؟")
+            TL._round_callback(7, 1, "j:codex")
+            self.assertNotIn("codex", TL.ROUND_DRAFT[7]["answerers"])
+            TL._round_callback(7, 1, "auto")
+            TL._round_callback(7, 1, "deep")
+            TL._round_callback(7, 1, "send")
+            judge.start_round.assert_called_once_with("ما الجواب؟", ["gemini"], judge="codex", auto_judge=True, deep=True)
+            thread.return_value.start.assert_called_once()
+
+    def test_status_needs_input_and_answer_is_sent_as_text(self):
+        status = {"round_id": "r1", "judge_state": "idle", "agents": {"codex": {"name": "Codex", "state": "needs_input", "answer": "**جواب**"}}}
+        self.assertIn("Codex ⚠️ ينتظر ردّك", TL._round_status_view(status)[0])
+        with mock.patch.dict("sys.modules", {"judge": types.SimpleNamespace(round_status=lambda rid: status)}), mock.patch.object(TL, "send") as send:
+            TL._round_callback(7, 1, "view:r1:codex")
+            send.assert_called_once_with("**جواب**", 7)

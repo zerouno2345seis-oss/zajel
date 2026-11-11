@@ -33,7 +33,7 @@ class Buttons(Base):
         self.assertNotIn("style", TL._b("ن", "d", "bogus"))
 
     def test_commands_match_design(self):
-        self.assertEqual([c for c, _ in TL.COMMANDS], "home search inbox watch dls backup files mail term phone clean disks agents talk update settings help".split())
+        self.assertEqual([c for c, _ in TL.COMMANDS], "home search inbox watch dls backup files mail term phone clean disks round agents talk update settings help".split())
         self.assertTrue(all(d for _, d in TL.COMMANDS))
 
     def test_reply_keyboard_six_buttons(self):
