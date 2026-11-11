@@ -338,14 +338,14 @@ def _host_by_button(text):
             return h
     return ""
 BTN = {"الرئيسية": "home", "بحث": "search", "الوارد": "inbox", "المساعد": "assistant", "المهام": "jobs", "المزيد": "more",
-       "الأجهزة": "pc", "حديث": "talk", "الوكلاء": "agents", "العمليات": "ops", "الأتمتة": "auto",
+       "سؤال لعدة وكلاء": "round", "الأجهزة": "pc", "حديث": "talk", "الوكلاء": "agents", "العمليات": "ops", "الأتمتة": "auto",
        "الذاكرة": "mem", "الأوامر": "cmds", "المساعدة": "help",
        "الطرفية": "term", "واتساب": "wa", "المزامنة": "sync", "التحديث": "update"}
 # القائمة المائلة كما في التصميم المعتمد (١٧ أمرًا)؛ الأوامر القديمة (/pc /ops …) ما زالت تعمل وإن لم تظهر في القائمة
 COMMANDS = [("home", "الرئيسية: حال الجهاز وما ينتظرك"), ("search", "ابحث في قنوات تيليجرام"), ("inbox", "الوارد من الرسائل المحفوظة"),
             ("watch", "المراقب وكلماته"), ("dls", "التنزيلات"), ("backup", "نسخ المحادثات"), ("files", "تصفح الملفات"),
             ("mail", "البريد"), ("term", "الطرفية"), ("phone", "الجوال"), ("clean", "التنظيف"), ("disks", "الأقراص"),
-            ("agents", "الوكلاء"), ("talk", "حادث وكيلًا مباشرة"), ("update", "التحديث"), ("settings", "الإعدادات"), ("help", "المساعدة")]
+            ("round", "سؤال لعدة وكلاء"), ("agents", "الوكلاء"), ("talk", "حادث وكيلًا مباشرة"), ("update", "التحديث"), ("settings", "الإعدادات"), ("help", "المساعدة")]
 LEGACY = ("pc", "ops", "auto", "find", "space", "jobs", "mem", "cmds", "new", "chats", "tsend", "sync", "wa", "auth", "endtalk", "more")
 CMDMAP = {"watch": "watchwords", "files": "files", "start": "home"}      # /watch في التصميم = مراقب الكلمات، وغيره اسم قسم الساعة
 HOST = socket.gethostname().split(".")[0]
@@ -369,7 +369,7 @@ def _loop():
         if other:                                   # جهاز آخر يستقبل وحضوره حديث: لا ننازعه (كل طلب استقبال يقطع طلب الآخر)
             if STATE["gateway"]:
                 STATE["gw_changed"] = True
-            STATE["gateway"], STATE["error"] = False, f"الجهاز {other} يستقبل رسائل البوت الآن؛ هذا الجهاز يجيب حين تختاره من «الأجهزة»، ويتولى الاستقبال تلقائيًا إن أُغلق ذاك."
+            STATE["gateway"], STATE["error"] = False, f"الجهاز {other} يستقبل رسائل البوت الآن؛ المكتبي أولى باستقبال البوت ما دام حضوره حديثًا؛ يجيب الجهاز المختار من «الأجهزة»."
             _stop.wait(30)
             continue
         try:
@@ -401,6 +401,7 @@ def _loop():
     STATE["gateway"] = False
 
 
+TARGET_IDLE_MIN = 30
 GW_FRESH = 420      # الحضور يُعدّ حيًّا ٧ دقائق (يُجدَّد كل ٣ دقائق)
 
 
@@ -428,7 +429,7 @@ def _other_gateway():
             return desk[0]                  # جهاز مكتبي حيّ: هو المستقبِل
     for h, p in sorted(fresh.items()):
         if p.get("gateway") and bool(p.get("laptop")) == bool(LAPTOP):
-            if STATE["gateway"] and HOST < h:
+            if HOST < h:
                 continue
             return h
     return ""
@@ -552,6 +553,11 @@ def _on_text(chat, text):
         return
     if chat != c["chat_id"]:
         return
+    if chat in ROUND_DRAFT and ROUND_DRAFT[chat].get("awaiting") and not text.startswith("/"):
+        ROUND_DRAFT[chat]["question"] = text
+        ROUND_DRAFT[chat]["awaiting"] = False
+        _round_options(chat)
+        return
     if _on_code_text(chat, text):
         return
     if chat in WAITWORD:
@@ -580,6 +586,9 @@ def _on_text(chat, text):
         acc = M._account()
         if acc is not None and acc.linked() and acc.on_command(chat, name, arg):
             return
+    if name == "round":
+        _round_begin(chat)
+        return
     if name == "tsend" and X.on_special(chat, name, text):
         return
     if name in X.NAMES and X.on_command(chat, name, text):
@@ -896,12 +905,135 @@ def _on_code_text(chat, text):
     return True
 
 
+
+# جلسة إعداد السؤال محفوظة على الجهاز الذي يستقبل الطلب المحوّل.
+ROUND_DRAFT = {}
+
+
+def _round_begin(chat):
+    try:
+        import judge
+        import agent_runner
+        agents = {a["id"]: a["name"] for a in agent_runner.agents() if a.get("installed")}
+        judge_id = judge.get_default_judge()
+        if judge_id and judge_id not in agents:
+            agents[judge_id] = judge_id
+        ROUND_DRAFT[chat] = {"awaiting": True, "agents": agents, "judge": judge_id,
+                             "answerers": set(agents) - {judge_id}, "auto": False, "deep": False}
+        send("اكتب سؤال الوكلاء الآن.", chat)
+    except ImportError:
+        send("ميزة سؤال عدة وكلاء غير متاحة على هذا الجهاز بعد.", chat)
+
+
+def _round_options(chat, mid=None):
+    d = ROUND_DRAFT[chat]
+    kb = [[_b(("☑️ " if a in d["answerers"] else "⬜ ") + name, "rnd:a:" + a),
+           _b(("⚖️ " if a == d["judge"] else "اختر محكّمًا: ") + name, "rnd:j:" + a)]
+          for a, name in d["agents"].items()]
+    kb += [[_b(("☑️ " if d["auto"] else "⬜ ") + "تحكيم تلقائي", "rnd:auto"),
+            _b(("☑️ " if d["deep"] else "⬜ ") + "بحث متعمق", "rnd:deep")], [_b("أرسل", "rnd:send")]]
+    text = "سؤالك: " + d["question"][:1800] + "\nاختر المجيبين ومحكّمًا."
+    if mid:
+        edit(chat, mid, text, kb)
+    else:
+        send(text, chat, kb=kb)
+
+
+def _round_status_view(status):
+    labels = {"waiting": "⏳ ينتظر", "writing": "⏳ يكتب", "needs_input": "⚠️ ينتظر ردّك",
+              "done": "✓", "timeout": "⌛ انتهت المهلة", "error": "⚠️ خطأ"}
+    agents = status.get("agents") or {}
+    text = " · ".join((a.get("name") or key) + " " + labels.get(a.get("state"), a.get("state", "")) for key, a in agents.items()) or "ينتظر الوكلاء…"
+    js = {"idle": "بانتظار التحكيم", "waiting_answers": "ينتظر الأجوبة", "running": "يحكّم", "needs_input": "ينتظر ردّك", "done": "اكتمل", "error": "تعذّر التحكيم"}
+    text += "\n⚖️ " + js.get(status.get("judge_state"), "بانتظار التحكيم")
+    rid = status["round_id"]
+    kb = [[_b("عرض جواب " + (a.get("name") or key), "rnd:view:" + rid + ":" + key)] for key, a in agents.items()]
+    kb.append([_b("⚖️ حكّم", "rnd:judge:" + rid)])
+    return text, kb
+
+
+def _round_watch(chat, mid, rid):
+    try:
+        import judge
+        previous = None
+        for _ in range(8640):
+            status = judge.round_status(rid)
+            view = _round_status_view(status)
+            if view != previous:
+                edit(chat, mid, *view)
+                previous = view
+            if status.get("judge_state") == "done":
+                verdict = status.get("verdict") or "اكتمل التحكيم."
+                send(verdict[:3800] + ("…" if len(verdict) > 3800 else ""), chat)
+                result = judge.export_round(rid)
+                if result.get("ok") and result.get("path"):
+                    send_file(result["path"], result.get("title") or "نتيجة التحكيم")
+                else:
+                    send("تعذّر إعداد ملف Word: " + str(result.get("error") or "الملف غير متاح"), chat)
+                return
+            if _stop.wait(10):
+                return
+    except ImportError:
+        send("ميزة التحكيم غير متاحة على هذا الجهاز بعد.", chat)
+    except Exception as exc:
+        send("تعذّرت متابعة التحكيم: " + str(exc)[:150], chat)
+
+
+def _round_callback(chat, mid, rest):
+    if rest == "new":
+        _round_begin(chat)
+        return
+    try:
+        import judge
+        if rest.startswith("view:"):
+            _, rid, agent = rest.split(":", 2)
+            a = (judge.round_status(rid).get("agents") or {}).get(agent) or {}
+            ans = a.get("answer") or "لم يصل جواب بعد."
+            for i in range(0, min(len(ans), 4 * 3800), 3800):     # حد رسالة تيليجرام ٤٠٩٦ حرفًا
+                send(ans[i:i + 3800], chat)
+            return
+        if rest.startswith("judge:"):
+            judge.run_judge(rest.split(":", 1)[1])
+            return
+        d = ROUND_DRAFT.get(chat)
+        if not d or d.get("awaiting"):
+            edit(chat, mid, "ابدأ سؤالًا جديدًا.", [])
+            return
+        if rest.startswith("a:"):
+            agent = rest[2:]
+            if agent in d["agents"] and agent != d["judge"]:
+                d["answerers"].symmetric_difference_update({agent})
+        elif rest.startswith("j:"):
+            agent = rest[2:]
+            if agent in d["agents"]:
+                d["judge"] = agent
+                d["answerers"].discard(agent)
+                judge.set_default_judge(agent)
+        elif rest in ("auto", "deep"):
+            d[rest] = not d[rest]
+        elif rest == "send":
+            if not d["answerers"] or not d["judge"]:
+                send("اختر مجيبًا واحدًا ومحكّمًا على الأقل.", chat)
+                return
+            status = judge.start_round(d["question"], sorted(d["answerers"]), judge=d["judge"], auto_judge=d["auto"], deep=d["deep"])
+            ROUND_DRAFT.pop(chat, None)
+            edit(chat, mid, *_round_status_view(status))
+            threading.Thread(target=_round_watch, args=(chat, mid, status["round_id"]), daemon=True).start()
+            return
+        _round_options(chat, mid)
+    except ImportError:
+        send("ميزة سؤال عدة وكلاء غير متاحة على هذا الجهاز بعد.", chat)
+
+
 STOPPED = set()
 
 
 def _on_callback(chat, mid, data):
     import agent_server
     kind, _, rest = data.partition(":")
+    if kind == "rnd":
+        _round_callback(chat, mid, rest)
+        return
     if kind == "ta":
         import telegram_account_bot as AB
         AB.on_callback(chat, mid, rest)
@@ -1064,6 +1196,7 @@ def _screen(name):
         return (f"{HOST} · متصل · زاجل {_version()}\nالقرص: {_human(du.used)} من {_human(du.total)}\nالمساعد: {agent_runner.AGENTS[agent_runner.settings()['default_agent']]['name']}\nالوكلاء العاملون: {up} من {len(ag)}\nبانتظار موافقتك: {pend}" + extra,
                 [[_b("بحث", "scr:search", "primary"), _b("الوارد", "scr:inbox"), _b("المراقب", "scr:watchwords")],
                  [_b("الجوال", "scr:phone"), _b("البريد", "scr:mail"), _b("الطرفية", "scr:term")],
+                 [_b("سؤال لعدة وكلاء", "rnd:new")],
                  [_b("التنظيف", "scr:clean"), _b("الوكلاء", "scr:agents"), _b("كل الأقسام", "scr:more", "primary")]] + _app_row())
     if name == "agents":
         names = {a["id"]: a["name"] for a in agent_runner.agents()}
@@ -1261,7 +1394,10 @@ def _pull():
             pass
     MAIL["presence"] = pres
     try:
-        MAIL["target"] = json.loads((d / "target.json").read_text(encoding="utf-8")).get("host", "")
+        target_data = json.loads((d / "target.json").read_text(encoding="utf-8"))
+        if target_data.get("host") != MAIL["target"]:
+            MAIL["activity"] = target_data.get("t", time.time())
+        MAIL["target"] = target_data.get("host", "")
     except (OSError, ValueError):
         pass
     try:
@@ -1280,7 +1416,7 @@ def _pull():
 
 def _presence():
     p = dict(MAIL["presence"])
-    p[HOST] = {"ts": time.time(), "version": _version()}
+    p[HOST] = {"ts": time.time(), "version": _version(), "laptop": bool(LAPTOP if LAPTOP is not None else _is_laptop())}
     return p
 
 
@@ -1306,7 +1442,23 @@ def _set_target(host):
         d.mkdir(exist_ok=True)
         (d / "target.json").write_text(json.dumps({"host": host, "t": time.time()}), encoding="utf-8")
         MAIL["target"] = host
+        MAIL["activity"] = time.time()
         _push("تيليجرام: الجهاز الحالي " + host)
+
+
+
+def _revert_idle_target():
+    if not STATE["gateway"] or not MAIL.get("target"):
+        return
+    pres = _presence()
+    target = MAIL["target"]
+    if not pres.get(target, {}).get("laptop"):
+        return
+    desktops = sorted(h for h, p in pres.items() if not p.get("laptop") and time.time() - p.get("ts", 0) < GW_FRESH)
+    if desktops and time.time() - MAIL.get("activity", time.time()) >= TARGET_IDLE_MIN * 60:
+        host = desktops[0]
+        _set_target(host)
+        send("رجعتُ إلى " + host)
 
 
 def _forward(u, host):
@@ -1346,6 +1498,9 @@ def _route(u):
     text = (m.get("text") or "").strip()
     local = "inline_query" in u or "chosen_inline_result" in u or text.startswith("/start") or text.startswith("/pc") or text == "الأجهزة" or (cb.get("data") or "").startswith(("pc:", "scr:pc", "one:"))
     chat = (m.get("chat") or (cb.get("message") or {}).get("chat") or {}).get("id")
+    if _authorized(chat) and (m or cb):
+        MAIL["activity"] = time.time()
+        MAIL["activity_dirty"] = True
     hb = _host_by_button(text) if text else ""
     if hb and _authorized(chat):                # زر جهاز في لوحة المفاتيح: يصير هو الحالي فورًا
         try:
@@ -1386,6 +1541,11 @@ def _mail_tick():
     with MAIL_LOCK:
         if time.time() - MAIL["last_pull"] > (30 if STATE["gateway"] else 10):
             _pull()
+        if MAIL.get("activity_dirty") and MAIL.get("target") and time.time() - MAIL.get("activity_written", 0) > 300:     # مرة كل ٥ دقائق على الأكثر: لا دفع للمستودع مع كل رسالة
+            MAIL["activity_dirty"], MAIL["activity_written"] = False, time.time()
+            target_file = MAIL["repo"] / "tg" / "target.json"
+            target_file.parent.mkdir(parents=True, exist_ok=True)
+            target_file.write_text(json.dumps({"host": MAIL["target"], "t": MAIL.get("activity", time.time())}), encoding="utf-8")
         box = MAIL["repo"] / "tg" / "inbox" / HOST
         todo = sorted(box.glob("*.json")) if box.exists() else []
         for f in todo:
@@ -1412,6 +1572,7 @@ def _mail_loop():
             if _cfg()["enabled"] and _mail_repo():
                 for u in _mail_tick():
                     threading.Thread(target=_dispatch, args=(u,), daemon=True).start()
+                _revert_idle_target()
         except Exception as exc:
             STATE["mail_error"] = str(exc)[:120]
         _stop.wait(5)
