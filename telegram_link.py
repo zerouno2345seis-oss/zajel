@@ -952,6 +952,25 @@ def _round_status_view(status):
     return text, kb
 
 
+def _md_plain(md):
+    """Markdown ← نص مرتب لتيليجرام: العناوين بعلامة، وصفوف الجداول أسطرًا بنقاط، بلا ** ولا خطوط |---|."""
+    out = []
+    for ln in str(md or "").splitlines():
+        t = ln.strip()
+        if re.match(r"^\|?\s*:?-{2,}", t):
+            continue                                            # سطر فاصل الجدول
+        h = re.match(r"^#{1,6}\s+(.*)", t)
+        if h:
+            out += ["", "▪️ " + h.group(1).strip()]
+            continue
+        if t.startswith("|") and t.endswith("|"):
+            out.append("• " + " — ".join(c.strip() for c in t.strip("|").split("|") if c.strip()))
+            continue
+        out.append(re.sub(r"^[-*]\s+", "• ", ln))
+    txt = re.sub(r"\*\*([^*]+)\*\*", r"\1", "\n".join(out))
+    return re.sub(r"\n{3,}", "\n\n", txt).strip()
+
+
 def _round_watch(chat, mid, rid):
     try:
         import judge
@@ -963,8 +982,9 @@ def _round_watch(chat, mid, rid):
                 edit(chat, mid, *view)
                 previous = view
             if status.get("judge_state") == "done":
-                verdict = status.get("verdict") or "اكتمل التحكيم."
-                send(verdict[:3800] + ("…" if len(verdict) > 3800 else ""), chat)
+                verdict = _md_plain(status.get("verdict") or "اكتمل التحكيم.")
+                for i in range(0, min(len(verdict), 3 * 3800), 3800):      # الحكم كاملًا في الملف؛ هنا ثلاث رسائل على الأكثر
+                    send(verdict[i:i + 3800], chat)
                 result = judge.export_round(rid)
                 if result.get("ok") and result.get("path"):
                     send_file(result["path"], result.get("title") or "نتيجة التحكيم")
@@ -988,7 +1008,7 @@ def _round_callback(chat, mid, rest):
         if rest.startswith("view:"):
             _, rid, agent = rest.split(":", 2)
             a = (judge.round_status(rid).get("agents") or {}).get(agent) or {}
-            ans = a.get("answer") or "لم يصل جواب بعد."
+            ans = _md_plain(a.get("answer") or "لم يصل جواب بعد.")
             for i in range(0, min(len(ans), 4 * 3800), 3800):     # حد رسالة تيليجرام ٤٠٩٦ حرفًا
                 send(ans[i:i + 3800], chat)
             return

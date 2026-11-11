@@ -209,6 +209,17 @@ def set_selected(round_id, agent_id, selected):
 
 
 # ---------- مراقبة أجوبة الوكلاء ----------
+def _strip_notes(t):
+    """بعض الوكلاء (Hermes من شاشته) يعيدون تعليمات التوثيق أو التعميق الملحقة بالسؤال في أول الجواب: تُحذف."""
+    t = str(t or "").strip()
+    for note in (CITE_NOTE, DEEP_NOTE):
+        head = _norm(note)[:25]
+        if head and _norm(t[:400]).startswith(head):
+            end = t.find(")") if note is CITE_NOTE else t.find("\n\n")
+            t = t[end + 1:].strip() if 0 <= end < 1500 else t
+    return t
+
+
 def _poll_agent(r, aid, ag, probe):
     """يحدّث ag بحسب ما في الطرفية. probe: حالة ثابتة بين القراءات (عدّاد الثبات)."""
     T_ = _t()
@@ -224,7 +235,7 @@ def _poll_agent(r, aid, ag, probe):
         res = T_.last_answer(aid)
     except Exception:
         return
-    text = str(res.get("answer") or "").strip() if _same_q(res.get("question"), r["question"]) else ""
+    text = _strip_notes(str(res.get("answer") or "")) if _same_q(res.get("question"), r["question"]) else ""
     try:
         st = T_.state_of(aid)[0]
     except Exception:

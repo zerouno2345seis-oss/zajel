@@ -129,4 +129,4 @@ class RoundFlow(unittest.TestCase):
         self.assertIn("Codex ⚠️ ينتظر ردّك", TL._round_status_view(status)[0])
         with mock.patch.dict("sys.modules", {"judge": types.SimpleNamespace(round_status=lambda rid: status)}), mock.patch.object(TL, "send") as send:
             TL._round_callback(7, 1, "view:r1:codex")
-            send.assert_called_once_with("**جواب**", 7)
+            send.assert_called_once_with("جواب", 7)       # يُرسل نصًّا مرتبًا بلا علامات Markdown
