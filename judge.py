@@ -20,7 +20,7 @@ TIMEOUT_MIN = 10
 DEEP_TIMEOUT_MIN = 30
 JUDGE_WAIT = 25 * 60   # أقصى انتظار لجواب المحكِّم (والتعميق)
 SEND_WAIT = 90         # أقصى انتظار لوصول الرسالة إلى الطرفية
-MAX_TERM = 5           # حد terminal.broadcast
+MAX_TERM = 9           # حد terminal.broadcast (MAX_BROADCAST)
 PERPLEXITY = "perplexity"
 FINAL = ("done", "timeout", "error")
 LETTERS = ["أ", "ب", "ج", "د", "هـ", "و"]
@@ -145,7 +145,8 @@ def set_default_judge(agent_id):
 
 
 # ---------- بدء جولة ----------
-def start_round(question, answerers, judge="", auto_judge=False, deep=False, timeout_min=None):
+def start_round(question, answerers, judge="", auto_judge=False, deep=False, timeout_min=None, deep_agents=None):
+    """deep=True: كل المجيبين يبحثون بحثًا متعمقًا؛ deep_agents: من يبحث منهم فقط (مثل Perplexity وحده)."""
     question = str(question or "").strip()
     if not question:
         raise ValueError("اكتب السؤال أولًا.")
@@ -168,14 +169,19 @@ def start_round(question, answerers, judge="", auto_judge=False, deep=False, tim
         raise ValueError("محكِّم غير معروف.")
     if not judge:
         judge = "claude" if "claude" in by_id else (terms[0] if terms else "")
-    tmo = int(timeout_min) if timeout_min else (DEEP_TIMEOUT_MIN if deep else TIMEOUT_MIN)
+    deep_set = set(ans) if deep else {str(a) for a in (deep_agents or []) if str(a) in ans}
+    tmo = int(timeout_min) if timeout_min else (DEEP_TIMEOUT_MIN if deep_set else TIMEOUT_MIN)
     rid = "r_%s_%04x" % (time.strftime("%Y%m%d_%H%M%S"), random.randint(0, 0xFFFF))
-    r = {"round_id": rid, "question": question, "deep": bool(deep), "auto_judge": bool(auto_judge), "judge": judge,
+    r = {"round_id": rid, "question": question, "deep": bool(deep_set), "deep_agents": sorted(deep_set), "auto_judge": bool(auto_judge), "judge": judge,
          "judge_also_answers": bool(judge and judge in ans), "created": time.time(), "timeout_min": tmo,
-         "agents": {a: {"name": _name(a), "state": "waiting", "selected": True, "answer": "", "note": ""} for a in ans},
+         "agents": {a: {"name": _name(a), "state": "waiting", "selected": True, "answer": "", "note": "", "deep": a in deep_set} for a in ans},
          "judge_state": "idle", "verdict": "", "deep_state": "idle", "deep_answer": "", "deep_agent": "", "judge_note": "", "deep_note": ""}
     if terms:
-        _t().broadcast(terms, question + CITE_NOTE + (DEEP_NOTE if deep else ""))
+        plain, deeper = [a for a in terms if a not in deep_set], [a for a in terms if a in deep_set]
+        if plain:
+            _t().broadcast(plain, question + CITE_NOTE)
+        if deeper:
+            _t().broadcast(deeper, question + CITE_NOTE + DEEP_NOTE)
     with _LOCK:
         ROUNDS[rid] = r
         _save(r)

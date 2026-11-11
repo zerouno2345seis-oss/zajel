@@ -71,12 +71,11 @@ class BroadcastTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 T.broadcast([], "مرحبا")
 
-            # 4. >5 ids trimmed and deduplicated
-            ids_input = ["shell", "claude", "codex", "hermes", "agy", "shell2"]
+            # 4. more than five accepted (up to MAX_BROADCAST), duplicates removed
+            ids_input = ["shell", "claude", "codex", "hermes", "agy", "shell2", "claude"]
             res = T.broadcast(ids_input, "رسالة تجربة")
             self.assertTrue(res["ok"])
-            self.assertEqual(len(res["ids"]), 5)
-            self.assertEqual(res["ids"], ["shell", "claude", "codex", "hermes", "agy"])
+            self.assertEqual(res["ids"], ["shell", "claude", "codex", "hermes", "agy", "shell2"])
 
             # 5. Duplicates deduplicated
             res_dedup = T.broadcast(["shell", "shell", "claude", "claude"], "نص")

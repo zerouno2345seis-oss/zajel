@@ -17,6 +17,7 @@ from pathlib import Path
 
 DATA = Path.home()
 SOCK = "zajel"
+MAX_BROADCAST = 9      # كل وكلاء الطرفية في جولة واحدة
 PREFIX = "z-"
 LOCK = threading.Lock()
 EXTRA_PATH = [str(Path.home() / ".local/bin"), "/opt/homebrew/bin", "/usr/local/bin", str(Path.home() / ".opencode/bin"), "/usr/bin", "/bin"]
@@ -1065,7 +1066,7 @@ def broadcast(ids, text):
             raise ValueError(f"جلسة غير معروفة: {i}")
         if i not in clean:
             clean.append(i)
-    clean = clean[:5]
+    clean = clean[:MAX_BROADCAST]
     if not clean:
         raise ValueError("اختر جلسة واحدة على الأقل.")
 
