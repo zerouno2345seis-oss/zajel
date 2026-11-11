@@ -341,8 +341,8 @@
     bar.append(el('small', '/' + RS.bpath, 'muted')); b.append(bar);
     if (d.err) b.append(el('div', d.err, 'empty err'));
     d.entries.forEach(e => {
-      const r = el('div', undefined, 'sy-bar'); r.append(selBox(e.path));
-      const nm = el('span', (e.is_dir ? '📁 ' : '') + e.name + (e.evicted ? ' ☁︎' : ''), 'nm'); nm.style.flex = '1';
+      const r = el('div', undefined, 'sy-bar'); r.dir = 'rtl'; r.append(selBox(e.path));      // كل الصفوف من اليمين، ولو كان الاسم لاتينيًّا
+      const nm = el('span', (e.is_dir ? '📁 ' : '') + e.name + (e.evicted ? ' ☁︎' : ''), 'nm'); nm.style.flex = '1'; nm.dir = 'auto'; nm.style.textAlign = 'right'; nm.style.unicodeBidi = 'plaintext';
       if (e.is_dir) { nm.style.cursor = 'pointer'; nm.onclick = () => loadBrowse(e.path); }
       r.append(nm, el('span', e.size != null ? fsize(e.size) : '', 'v')); b.append(r);
     });
