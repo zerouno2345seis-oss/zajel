@@ -39,6 +39,10 @@ class JudgeTest(unittest.TestCase):
         judge.T, judge.DATA, judge.POLL = self.t, self.tmp, 0.01
         judge.ROUNDS.clear()
 
+    def tearDown(self):
+        judge.ROUNDS.clear()          # خيوط المراقبة تخرج حين تختفي جولتها، فلا تكتب في مجلد الاختبار التالي
+        time.sleep(judge.POLL * 5)
+
     def wait(self, fn, secs=4):
         t0 = time.time()
         while time.time() - t0 < secs:
@@ -148,10 +152,49 @@ class JudgeTest(unittest.TestCase):
         self.assertEqual(self.t.sent[n][0], ["claude"])
         time.sleep(0.2)
         self.assertEqual(judge.round_status(rid)["agents"]["claude"]["state"], "waiting")   # الجواب القديم لا يُلتقط
-        self.t.ans["claude"] = ("س", "جواب ثانٍ")
+        self.t.ans["claude"] = ("س\n" + judge.round_status(rid)["agents"]["claude"]["mark"], "جواب ثانٍ")
         self.wait(lambda: judge.round_status(rid)["agents"]["claude"]["answer"] == "جواب ثانٍ")
         with self.assertRaises(ValueError):
             judge.reask(rid, "agy")              # ليس من المجيبين
+
+    def test_deepen_one_agent_replaces_its_answer(self):
+        r = judge.start_round("س", ["claude", "codex"])
+        rid = r["round_id"]
+        self.t.ans["claude"] = ("س", "جواب قصير")
+        self.wait(lambda: judge.round_status(rid)["agents"]["claude"]["state"] == "done")
+        r = judge.deepen(rid, "claude")
+        self.assertTrue(r["agents"]["claude"]["deep"])
+        self.assertEqual(r["agents"]["claude"]["state"], "waiting")
+        self.assertIn("[بحث متعمق]", self.t.sent[-1][1])
+        self.assertEqual(r["deep_state"], "idle")                 # لا شاشة «بحث متعمق» منفصلة
+        self.t.ans["claude"] = ("س\n" + judge.round_status(rid)["agents"]["claude"]["mark"], "جواب أعمق بمصادر")
+        self.wait(lambda: judge.round_status(rid)["agents"]["claude"]["answer"] == "جواب أعمق بمصادر")
+
+    def test_judge_starts_now_with_finished_answers_only(self):
+        r = judge.start_round("س", ["claude", "codex"], judge="agy")
+        rid = r["round_id"]
+        self.t.ans["claude"] = ("س", "جواب مكتمل")
+        self.wait(lambda: judge.round_status(rid)["agents"]["claude"]["state"] == "done")
+        judge.run_judge(rid)                                   # Codex لم يُجب بعد
+        self.wait(lambda: any("⟦حكم:" in txt for _, txt in self.t.sent))
+        ans = (Path(self.tmp) / "rounds" / rid / "answers.md").read_text(encoding="utf-8")
+        self.assertIn("جواب مكتمل", ans)
+        self.assertNotIn("Codex", ans)
+        self.t.ans["agy"] = (f"⟦حكم:{rid}⟧", "## الخلاصة الموحدة\nحكم")       # يُنهي خيط المحكِّم قبل الاختبار التالي
+        r = self.wait(lambda: (lambda r: r if r["judge_state"] == "done" else None)(judge.round_status(rid)), 10)
+        self.assertIn("لم تدخل هذا التحكيم", r["verdict"])
+
+    def test_reask_accepts_identical_answer(self):
+        r = judge.start_round("س", ["claude"])
+        rid = r["round_id"]
+        self.t.ans["claude"] = ("س", "نفس الجواب")
+        self.wait(lambda: judge.round_status(rid)["agents"]["claude"]["state"] == "done")
+        judge.reask(rid, "claude")
+        time.sleep(0.2)
+        self.assertEqual(judge.round_status(rid)["agents"]["claude"]["state"], "waiting")
+        self.assertIn("⟦إعادة 2⟧", self.t.sent[-1][1])
+        self.t.ans["claude"] = ("س\n⟦إعادة 2⟧", "نفس الجواب")          # الجواب الجديد مطابق للقديم حرفًا
+        self.wait(lambda: judge.round_status(rid)["agents"]["claude"]["state"] == "done")
 
 if __name__ == "__main__":
     unittest.main()

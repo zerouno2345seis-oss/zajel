@@ -111,5 +111,24 @@ class OpenCodeDB(unittest.TestCase):
             finally:
                 A.HOME = old
 
+
+class PiSessions(unittest.TestCase):
+    def test_final_message_without_tool_call_is_the_answer(self):
+        import json
+        with tempfile.TemporaryDirectory() as d:
+            old, A.HOME = A.HOME, Path(d)
+            try:
+                sd = Path(d) / ".pi/agent/sessions" / ("--" + d.strip("/").replace("/", "-") + "--")
+                sd.mkdir(parents=True)
+                msg = lambda role, *parts: json.dumps({"type": "message", "message": {"role": role, "content": list(parts)}})
+                lines = [msg("user", {"type": "text", "text": "ما حكم كذا؟"}),
+                         msg("assistant", {"type": "text", "text": "سأبحث أولًا."}, {"type": "toolCall", "name": "x"}),
+                         msg("toolResult", {"type": "text", "text": "نتيجة"}),
+                         msg("assistant", {"type": "thinking", "thinking": "..."}, {"type": "text", "text": "الجواب: يجوز [1]."})]
+                (sd / "s.jsonl").write_text("\n".join(lines), encoding="utf-8")
+                self.assertEqual(A.from_pi(d), ("ما حكم كذا؟", "الجواب: يجوز [1]."))
+            finally:
+                A.HOME = old
+
 if __name__ == "__main__":
     unittest.main()

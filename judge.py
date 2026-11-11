@@ -190,21 +190,28 @@ def start_round(question, answerers, judge="", auto_judge=False, deep=False, tim
     return round_status(rid)
 
 
-def reask(round_id, agent_id):
-    """يعيد سؤال الجولة نفسه على وكيل واحد: يُمسح جوابه السابق ويُنتظر الجديد (وتمتد مهلة الجولة)."""
+def reask(round_id, agent_id, deep=False):
+    """يعيد سؤال الجولة نفسه على وكيل واحد: يُمسح جوابه السابق ويُنتظر الجديد (وتمتد مهلة الجولة).
+    deep: «عمّق» لهذا الوكيل — السؤال نفسه مع تعليمات البحث المتعمق، والجواب الأعمق يحل محل جوابه في شاشته."""
     with _LOCK:
         r = _get(round_id)
         ag = r["agents"].get(agent_id)
         if not ag or agent_id == PERPLEXITY:
             raise ValueError("لا يمكن إعادة السؤال على هذا الوكيل.")
-        ag.update(state="waiting", answer="", note="أُعيد السؤال", prev=ag.get("answer") or ag.get("prev", ""))   # الجواب القديم لا يُلتقط مرة أخرى
+        if deep:
+            ag["deep"] = True
+            r["timeout_min"] = max(r["timeout_min"], DEEP_TIMEOUT_MIN)
+        ag["asks"] = ag.get("asks", 1) + 1
+        mark = f"⟦إعادة {ag['asks']}⟧"          # يميّز السؤال المُعاد: قد يأتي الجواب الجديد بالنص نفسه حرفًا بحرف
+        ag.update(state="waiting", answer="", note="يعمّق جوابه" if deep else "أُعيد السؤال", mark=mark)
         r["created"] = time.time()                 # مهلة جديدة للجولة كلها
         if r["judge_state"] in ("done", "error"):
             r["judge_state"] = "idle"
         watching = rid_watching(round_id)
         _save(r)
     getattr(_t(), "BROADCAST_STATE", {}).pop(agent_id, None)
-    _t().broadcast([agent_id], r["question"] + CITE_NOTE + (DEEP_NOTE if ag.get("deep") else ""))
+    _t().broadcast([agent_id], r["question"] + CITE_NOTE + (DEEP_NOTE if ag.get("deep") else "")
+                   + ("\n\n(أعد الجواب أعمق وأوثق مما كتبته في المرة السابقة.)" if deep else "") + "\n" + ag["mark"])
     if not watching:
         threading.Thread(target=_watch, args=(round_id,), daemon=True).start()
     return round_status(round_id)
@@ -267,8 +274,8 @@ def _poll_agent(r, aid, ag, probe):
     except Exception:
         return
     text = _strip_notes(str(res.get("answer") or "")) if _same_q(res.get("question"), r["question"]) else ""
-    if text and ag.get("prev") and text == ag["prev"]:
-        text = ""                                 # بعد «أعد السؤال»: ما زال هذا هو الجواب السابق
+    if text and ag.get("mark") and ag["mark"] not in str(res.get("question") or ""):
+        text = ""                                 # بعد «أعد السؤال»: هذا جواب السؤال السابق لا المُعاد
     try:
         st = T_.state_of(aid)[0]
     except Exception:
@@ -355,9 +362,9 @@ def anonymize(text, names=()):
     return re.sub(r"\n{3,}", "\n\n", t).strip()
 
 
-def build_answers_file(r):
-    """يكتب answers.md ويعيد (المسار، مفتاح الرموز {حرف: معرّف}). الأجوبة المختارة وحدها."""
-    items = [(a, ag) for a, ag in r["agents"].items() if ag["selected"] and ag["answer"].strip()]
+def build_answers_file(r, only=None):
+    """يكتب answers.md ويعيد (المسار، مفتاح الرموز {حرف: معرّف}). الأجوبة المختارة وحدها (وفي only إن أُعطي)."""
+    items = [(a, ag) for a, ag in r["agents"].items() if ag["selected"] and ag["answer"].strip() and (only is None or a in only)]
     key = {}
     out = ["# أجوبة الوكلاء عن السؤال", "", "## السؤال", r["question"], ""]
     if r["judge_also_answers"]:
@@ -485,24 +492,21 @@ def _judge_thread(rid, deep_verify):
             if text:
                 r["verdict"] = text
             _save(r)
-    # ينتظر بقية الأجوبة المختارة (حتى مهلة الجولة)
-    while True:
-        with _LOCK:
-            pending = [a for a, ag in r["agents"].items() if ag["selected"] and ag["state"] not in FINAL]
-            late = time.time() > r["created"] + r["timeout_min"] * 60 + POLL * 2
-        if not pending or late:
-            break
-        time.sleep(POLL)
+    # يحكّم بالأجوبة المكتملة الآن ولا ينتظر المتأخرين (طلب المستخدم)؛ ما زال يُكتب لا يدخل
     with _LOCK:
-        if not any(ag["selected"] and ag["answer"].strip() for ag in r["agents"].values()):
-            st("error", "", "لا جواب مختار يُحكَّم فيه")
+        ready = {a for a, ag in r["agents"].items() if ag["selected"] and ag["answer"].strip() and ag["state"] in FINAL}
+        if not ready:
+            st("error", "", "لا جواب مكتمل بعد يُحكَّم فيه")
             return
-        path, key = build_answers_file(r)
+        late = [ag["name"] for a, ag in r["agents"].items() if ag["selected"] and a not in ready]
+        path, key = build_answers_file(r, only=ready)
         prompt = judge_prompt(r, path) + ("" if deep_verify else "\nالتحقق السريع مقبول هذه المرة: تحقق من الاستشهادات الجوهرية وعلّم الباقي ❓.")
         judge = r["judge"]
-    st("running")
+    st("running", "", ("لم يدخل التحكيم (لم يكتمل): " + "، ".join(late)) if late else "")
     state, text = _ask_agent(judge, prompt, f"⟦حكم:{rid}⟧", st)
     if state == "done":
+        if late:
+            text = text.rstrip() + "\n\n---\nلم تدخل هذا التحكيم لأنها لم تكتمل عند بدئه: " + "، ".join(late) + "."
         if r["judge_also_answers"]:
             mine = next((L for L, a in key.items() if a == judge), "")
             text = text.rstrip() + "\n\n---\n"
@@ -516,16 +520,20 @@ def _judge_thread(rid, deep_verify):
 def deepen(round_id, agent_id=""):
     with _LOCK:
         r = _get(round_id)
-        if r["deep_state"] in ("running", "needs_input"):
+        if not agent_id and r["deep_state"] in ("running", "needs_input"):
             return round_status(round_id)
         if agent_id:
             if agent_id not in r["agents"] or agent_id == PERPLEXITY:
                 raise ValueError("وكيل ليس في هذه الجولة.")
-            target = agent_id
+            own = True
         else:
+            own = False
             if not any(ag["selected"] and ag["answer"].strip() for ag in r["agents"].values()):
                 raise ValueError("اختر جوابًا واحدًا على الأقل ليُعمَّق منه.")
             target = r["judge"] or get_default_judge() or next(iter(r["agents"]))
+    if own:
+        return reask(round_id, agent_id, deep=True)       # تعميق وكيل واحد: جوابه الأعمق في شاشته
+    with _LOCK:
         r.update(deep_state="running", deep_answer="", deep_agent=target, deep_note="")
         _save(r)
     threading.Thread(target=_deep_thread, args=(round_id, target, bool(agent_id)), daemon=True).start()

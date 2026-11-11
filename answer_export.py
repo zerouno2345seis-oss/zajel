@@ -136,7 +136,28 @@ def from_opencode(_cwd):
     return (q, "\n\n".join(ans)) if q else None
 
 
-SOURCES = {"claude": from_claude, "codex": from_codex, "hermes": from_hermes, "opencode": from_opencode}
+def from_pi(cwd):
+    """pi يحفظ كل جلسة في ~/.pi/agent/sessions/--<المجلد>--/*.jsonl؛ شاشته لا تُظهر سطر السؤال بعلامة يُعرف بها."""
+    base = HOME / ".pi" / "agent" / "sessions"
+    d = base / ("--" + str(cwd or HOME).strip("/").replace("/", "-") + "--")
+    files = sorted(d.glob("*.jsonl") if d.exists() else base.glob("*/*.jsonl"), key=lambda f: f.stat().st_mtime)
+    if not files:
+        return None
+    q, final, last_text = "", "", ""
+    for r in _read_jsonl(files[-1]):
+        m = r.get("message") or {}
+        parts = m.get("content") if isinstance(m.get("content"), list) else [{"type": "text", "text": m.get("content") or ""}]
+        text = "\n".join(c.get("text", "") for c in parts if isinstance(c, dict) and c.get("type") == "text").strip()
+        if m.get("role") == "user" and _is_user_text(text):
+            q, final, last_text = text, "", ""
+        elif m.get("role") == "assistant" and q and text:
+            last_text = text
+            if not any(isinstance(c, dict) and c.get("type") == "toolCall" for c in parts):
+                final = text                     # الرسالة الأخيرة بلا استدعاء أداة هي الجواب؛ ما قبلها تمهيد
+    return (q, final or last_text) if q else None
+
+
+SOURCES = {"claude": from_claude, "codex": from_codex, "hermes": from_hermes, "opencode": from_opencode, "pi": from_pi}
 
 # ---------- الشاشة (احتياط) ----------
 USER_MARK = {"agy": r"^> (?!\d+\. )", "hermes": r"^● ", "codex": r"^› ", "claude": r"^[>❯] "}
