@@ -1147,7 +1147,7 @@
     let judge='',judgeChanged=false;const rows=[];const warning=document.createElement('small');warning.style.color='#eab308';
     function update(){rows.forEach(r=>{r.answer.checked=selected.has(r.id);if(r.judge)r.judge.checked=judge===r.id;});warning.textContent=judge&&selected.has(judge)?'المحكِّم سيجيب أيضًا؛ تُخفى الأسماء عنه':'';sendBtn.disabled=!ta.value.trim()||!selected.size;}
     const deepSel=new Set();const deep=document.createElement('input');deep.type='checkbox';
-    [...valid,{id:'perplexity',name:'Perplexity'}].forEach(a=>{const row=document.createElement('div');row.style.cssText='border:1px solid var(--line);border-radius:7px;padding:4px 7px;display:flex;flex-wrap:wrap;gap:2px 8px;align-items:center;line-height:1.3';const name=document.createElement('strong');name.textContent=glyphOf(a.id,a.name)+' '+a.name;name.style.cssText='width:100%;font-size:12.5px';const al=document.createElement('label'),answer=document.createElement('input');answer.type='checkbox';al.append(answer,document.createTextNode(' يجيب'));answer.onchange=()=>{answer.checked?selected.add(a.id):selected.delete(a.id);try{localStorage.setItem('zajel_broadcast_ids',JSON.stringify([...selected]));}catch(_){}update();};const dpl=document.createElement('label'),dp=document.createElement('input');dp.type='checkbox';dp.checked=deepSel.has(a.id);dpl.title='بحث متعمق لهذا الوكيل وحده';dpl.append(dp,document.createTextNode(' 🔬'));dp.onchange=()=>{dp.checked?deepSel.add(a.id):deepSel.delete(a.id);if(dp.checked&&!answer.checked){answer.checked=true;answer.onchange();}deep.checked=rows.length>0&&rows.every(x=>!x.answer.checked||deepSel.has(x.id));};row.append(name,al,dpl);let jc=null;if(a.id!=='perplexity'){const jl=document.createElement('label');jc=document.createElement('input');jc.type='radio';jc.name='round-judge';jl.append(jc,document.createTextNode(' ⚖️ يحكّم'));jc.onchange=async()=>{judgeChanged=true;judge=a.id;selected.delete(a.id);update();try{await req('judge_default',{judge});}catch(e){showToast(e.message||'تعذّر حفظ المحكِّم');}};row.appendChild(jl);}grid.appendChild(row);rows.push({id:a.id,answer,judge:jc,dp});});
+    [...valid,{id:'perplexity',name:'Perplexity'}].forEach(a=>{const row=document.createElement('div');row.style.cssText='border:1px solid var(--line);border-radius:7px;padding:4px 7px;display:flex;flex-wrap:wrap;gap:2px 8px;align-items:center;line-height:1.3';const name=document.createElement('strong');name.textContent=glyphOf(a.id,a.name)+' '+a.name;name.style.cssText='width:100%;font-size:12.5px';const al=document.createElement('label'),answer=document.createElement('input');answer.type='checkbox';al.append(answer,document.createTextNode(' يجيب'));answer.onchange=()=>{answer.checked?selected.add(a.id):selected.delete(a.id);try{localStorage.setItem('zajel_broadcast_ids',JSON.stringify([...selected]));}catch(_){}update();};const dpl=document.createElement('label'),dp=document.createElement('input');dp.type='checkbox';dp.checked=deepSel.has(a.id);dpl.title='بحث متعمق لهذا الوكيل وحده';dpl.append(dp,document.createTextNode(' 🔬'));dp.onchange=()=>{dp.checked?deepSel.add(a.id):deepSel.delete(a.id);if(dp.checked&&!answer.checked){answer.checked=true;answer.onchange();}deep.checked=rows.length>0&&rows.every(x=>!x.answer.checked||deepSel.has(x.id));};row.append(name,al,dpl);let jc=null;{const jl=document.createElement('label');jc=document.createElement('input');jc.type='radio';jc.name='round-judge';jl.append(jc,document.createTextNode(' ⚖️ يحكّم'));jc.onchange=async()=>{judgeChanged=true;judge=a.id;selected.delete(a.id);update();try{await req('judge_default',{judge});}catch(e){showToast(e.message||'تعذّر حفظ المحكِّم');}};row.appendChild(jl);}grid.appendChild(row);rows.push({id:a.id,answer,judge:jc,dp});});
     const opts=document.createElement('div');const auto=document.createElement('input');auto.type='checkbox';deep.onchange=()=>rows.forEach(x=>{if(!x.answer.checked)return;x.dp.checked=deep.checked;deep.checked?deepSel.add(x.id):deepSel.delete(x.id);});const al=document.createElement('label'),dl=document.createElement('label');al.append(auto,document.createTextNode(' ⚖️ تحكيم تلقائي'));dl.append(deep,document.createTextNode(' 🔬 بحث متعمق للجميع'));opts.append(al,document.createTextNode('　'),dl);
     const err=document.createElement('small');err.style.color='#ef4444';const sendBtn=document.createElement('button');sendBtn.className='btn pri';sendBtn.textContent='أرسل';ta.oninput=update;
     sendBtn.onclick=async()=>{const question=ta.value.trim(),answerers=[...selected];if(!question||!answerers.length)return;sendBtn.disabled=true;try{const deepAgents=answerers.filter(id=>deepSel.has(id));const r=await req('round/start',{question,answerers,judge,auto_judge:auto.checked,deep_agents:deepAgents});if(r.error)throw new Error(r.error);round=r;webLast=webPosted='';webSame=0;slots=answerers.map(id=>({id,hash:'',view:'answer',manual:false}));layout=slots.length;activeSlot=0;builtLayout=layout;if(answerers.includes('perplexity'))openPerplexity(question,true,deepAgents.includes('perplexity'));closeBroadcastPanel();build();refreshScreens(true);pollRound();}catch(e){err.textContent=e.message||'تعذّر الإرسال';update();}};
@@ -1345,7 +1345,7 @@
       wb.onclick=async()=>{
         wb.disabled=true;
         try{
-          const r=round&&['verdict','deep'].includes(slot.id)?await req('round/export',{round_id:round.round_id}):slot.id==='perplexity'?(window.webkit?.messageHandlers?.zajel?.postMessage({webWord:1}),{title:'جواب Perplexity'}):await req('export_answer',{id:slot.id});
+          const r=round&&['verdict','deep'].includes(slot.id)?await req('round/export',{round_id:round.round_id}):slot.id==='perplexity'?(webWord(),{title:'جواب Perplexity'}):await req('export_answer',{id:slot.id});
           if(r&&r.error)throw new Error(r.error);
           showToast('حُفظ في التنزيلات: '+r.title);
         }catch(e){
@@ -1647,13 +1647,104 @@
   function hydrateMermaid(containerEl){if(!containerEl)return;containerEl.querySelectorAll('figure.as-mermaid:not([data-done])').forEach(async figure=>{figure.dataset.done='1';const code=figure.dataset.code||'';try{let url=mermaidUrls.get(code);if(!url){const res=await fetch('/api/term/mermaid_png',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code})});if(!res.ok)throw new Error('render failed');url=URL.createObjectURL(await res.blob());mermaidUrls.set(code,url);}const img=document.createElement('img');img.alt='مخطط';img.style.cssText='max-width:100%;background:#fff;border-radius:8px';img.src=url;figure.replaceChildren(img);}catch(_){const pre=document.createElement('pre');pre.dir='ltr';pre.textContent=code;const message=document.createElement('div');message.textContent='تعذّر رسم المخطط';figure.replaceChildren(pre,message);}});}
   async function openReader(slot){if(!slot||!slot.card||!slot.id)return;slot.card.querySelector('.as-reader')?.remove();const box=document.createElement('div');box.className='as-reader';box.dir='rtl';box.style.cssText='position:absolute;inset:34px 0 0 0;z-index:20;background:var(--panel);color:var(--ink);overflow-y:auto;padding:14px 18px 40px;font:calc(var(--tt-size,12.5px) + 2.5px)/1.75 "SF Arabic","Geeza Pro",system-ui,sans-serif;border-top:2px solid '+colorOf(slot.id);const close=document.createElement('button');close.type='button';close.className='btn';close.textContent='✕ إغلاق';close.style.cssText='position:sticky;top:0;float:left;z-index:1';close.onclick=()=>box.remove();box.appendChild(close);const body=document.createElement('div');body.textContent='يقرأ الجواب…';box.appendChild(body);slot.card.appendChild(box);box.addEventListener('keydown',e=>{if(e.key==='Escape')box.remove();});try{const r=await fetch('/api/term/last_answer?id='+encodeURIComponent(slot.id)).then(x=>x.json());if(r.error)throw new Error(r.error);if(!r.answer){body.textContent=r.question?'لم يكتمل جواب آخر سؤال بعد.':'لم أجد سؤالًا عند هذا الوكيل بعد.';return;}body.innerHTML='<div style="background:var(--side);border-inline-start:3px solid '+colorOf(slot.id)+';padding:8px 12px;border-radius:8px;margin:6px 0 14px"><b>السؤال</b><p dir="auto" style="margin:4px 0 0">'+esc(r.question)+'</p></div><div class="as-reader-md">'+mdHtml(r.answer)+'</div>';hydrateMermaid(body);}catch(e){body.textContent=e.message||'تعذّرت القراءة';}}
 
-    // جواب نافذة Perplexity: يقرؤه البرنامج من الصفحة ويعيده عبر __zajelWeb (طابور لأكثر من طالب)
-  window.__zajelWebQ = window.__zajelWebQ || [];
-  window.__zajelWeb = j => { window.__zajelWebQ.splice(0).forEach(f => f(j)); };
-  function getWebAnswer() {
+    // نافذة Perplexity: البرنامج ينفّذ فيها سكربتًا (webEval) ويعيد نتيجته نصًّا إلى __zajelWebEvalDone
+  const webEvalQ = new Map(); let webEvalN = 0;
+  window.__zajelWebEvalDone = (id, res) => { const f = webEvalQ.get(id); if (f) { webEvalQ.delete(id); f(res); } };
+  function webEval(js, timeout) {
     const h = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.zajel;
     if (!h) return Promise.resolve(null);
-    return new Promise(res => { const t = setTimeout(() => res(null), 2500); window.__zajelWebQ.push(j => { clearTimeout(t); res(j); }); h.postMessage({ getWeb: 1 }); });
+    return new Promise(res => { const id = ++webEvalN; const t = setTimeout(() => { webEvalQ.delete(id); res(null); }, timeout || 8000); webEvalQ.set(id, v => { clearTimeout(t); res(v); }); h.postMessage({ webEval: js, id }); });
+  }
+  const webJSON = async (js, timeout) => { const s = await webEval(js, timeout); try { return s ? JSON.parse(s) : null; } catch (_) { return null; } };
+  // استخراج آخر جواب من صفحة Perplexity (جسم دالة async). واجهته الحالية تقسم الجواب الواحد على عدة كتل prose
+  // (فقرة، جدول، وفي البحث المعمق قسم بعد كل خطوة بحث)، فيُجمع كل ما بعد آخر فقاعة سؤال لا آخر كتلة وحدها.
+  // noCite: تُحذف شارات المصادر (للمحكِّم الذي يكتب حواشيه بنفسه)؛ وإلا تصير حواشي [^n] بروابطها.
+  const pplxExtractJS = noCite => `const NOCITE=${noCite ? 'true' : 'false'};
+    const bubbles=[...document.querySelectorAll('[data-message-bubble]')], lastB=bubbles[bubbles.length-1]||null;
+    const after=e=>!lastB||!!(lastB.compareDocumentPosition(e)&Node.DOCUMENT_POSITION_FOLLOWING);
+    let pr=[...document.querySelectorAll('[class*="prose"]')].filter(e=>!(e.parentElement&&e.parentElement.closest('[class*="prose"]'))&&!e.closest('[data-message-bubble]')&&after(e)&&e.innerText.trim());
+    const urls=[];
+    const tx=n=>{const c=n.cloneNode(true);c.querySelectorAll('[data-pplx-citation]').forEach(s=>{const u=s.getAttribute('data-pplx-citation-url')||'';let k=-1;if(!NOCITE&&u){k=urls.indexOf(u);if(k<0){urls.push(u);k=urls.length-1;}}s.replaceWith(k<0?'':'[^'+(k+1)+']');});c.querySelectorAll('.citation-nbsp').forEach(s=>s.remove());return (c.textContent||'').replace(/[ \\t\\u00a0]+/g,' ').trim();};
+    const out=[];
+    const walk=n=>{for(const c of n.children){const t=c.tagName;
+      if(t==='IMG'){if(c.src&&c.naturalWidth>120)out.push('![]('+c.src+')');}
+      else if(/^H[1-6]$/.test(t))out.push('#'.repeat(Math.min(3,+t[1]))+' '+tx(c));
+      else if(t==='UL'||t==='OL')[...c.children].forEach((li,k)=>out.push((t==='OL'?(k+1)+'. ':'- ')+tx(li)));
+      else if(t==='TABLE'){[...c.querySelectorAll('tr')].forEach((tr,i)=>{const cells=[...tr.children].map(td=>tx(td).replace(/\\|/g,'/'));out.push('| '+cells.join(' | ')+' |');if(i===0)out.push('|'+cells.map(()=>'---').join('|')+'|');});}
+      else if(t==='PRE')out.push('\`\`\`\\n'+(c.querySelector('code')||c).textContent.replace(/\\n$/,'')+'\\n\`\`\`');
+      else if(t==='BLOCKQUOTE')out.push('> '+tx(c));
+      else if(t==='P')out.push(tx(c));
+      else if(t==='BUTTON'||t==='svg')continue;
+      else if(c.children.length)walk(c);else if(tx(c))out.push(tx(c));
+      out.push('');}};
+    pr.forEach(p=>{walk(p);out.push('');});
+    let ans=out.join('\\n').replace(/\\n{3,}/g,'\\n\\n').trim();
+    if(ans&&urls.length)ans+='\\n\\n'+urls.map((u,i)=>'[^'+(i+1)+']: '+u).join('\\n');
+    let q=lastB?lastB.innerText.trim():'';
+    if(!q)q=(document.title||'').replace(/\\s*[-|·]\\s*Perplexity.*$/i,'');
+    const login=[...document.querySelectorAll('[role=dialog]')].some(d=>d.offsetHeight&&d.querySelector('input[type=email],input[placeholder*="@"],input[placeholder*="correo"],input[placeholder*="mail"]'));
+    const done=!!lastB&&[...document.querySelectorAll('[data-workflow-text-footer]')].some(after);
+    return JSON.stringify({name:'Perplexity',question:q,answer:ans,turns:bubbles.length,done,login,url:location.href});`;
+  // كتابة رسالة في مربع السؤال وإرسالها (محرر Lexical: insertText ثم Enter، وزر الإرسال احتياطًا)
+  const pplxSendJS = text => `const text=${JSON.stringify(text)};const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+    const login=[...document.querySelectorAll('[role=dialog]')].some(d=>d.offsetHeight&&d.querySelector('input[type=email],input[placeholder*="@"],input[placeholder*="correo"],input[placeholder*="mail"]'));
+    if(login)return JSON.stringify({ok:false,error:'login'});
+    const ed=document.querySelector('[data-lexical-editor][contenteditable="true"]')||document.querySelector('#ask-input,textarea');
+    if(!ed)return JSON.stringify({ok:false,error:'noinput'});
+    const before=document.querySelectorAll('[data-message-bubble]').length;
+    ed.focus();const sel=getSelection();sel.selectAllChildren(ed);document.execCommand('delete');document.execCommand('insertText',false,text);
+    await sleep(900);const val=()=>(ed.innerText||ed.value||'').trim();const got=val().length;
+    if(got<Math.min(40,text.length/2))return JSON.stringify({ok:false,error:'insert',got});
+    ed.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true,cancelable:true}));
+    await sleep(1500);
+    if(val()){const b=[...document.querySelectorAll('button')].find(b=>b.getAttribute('data-testid')==='submit-button'||/^(submit|send|enviar|envoyer|إرسال)$/i.test((b.getAttribute('aria-label')||'').trim()));if(b&&!b.disabled)b.click();}
+    for(let i=0;i<20;i++){const n=document.querySelectorAll('[data-message-bubble]').length;if(n>before)return JSON.stringify({ok:true,turns:n,got});await sleep(500);}
+    return JSON.stringify({ok:false,error:'nosubmit',got});`;
+  const getWebAnswer = noCite => webJSON(pplxExtractJS(noCite));
+  async function webWord() { const j = await getWebAnswer(); if (!j || !j.answer) { showToast('لا جواب في نافذة Perplexity'); return; } try { const r = await req('export_text', { name: j.name, question: j.question, answer: j.answer }); if (r && r.error) throw new Error(r.error); showToast('حُفظ المستند: ' + (r.title || 'جواب Perplexity')); } catch (e) { showToast(e.message || 'تعذّر صنع المستند'); } }
+
+  // Perplexity محكِّمًا: الخادم (judge.web_verdict) يقرر كل خطوة، والواجهة تنفّذها في النافذة. البروتوكول موثّق في judge.py
+  let webJudgeBusy = false;
+  async function driveWebJudge(rid) {
+    if (webJudgeBusy) return; webJudgeBusy = true;
+    const sleep = ms => new Promise(r => setTimeout(r, ms));
+    const alive = () => root && round && round.round_id === rid && ['web_pending', 'running'].includes(round.judge_state);
+    const report = body => req('round/web_verdict', { round_id: rid, ...body }).catch(() => ({ action: 'wait' }));
+    const h = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.zajel;
+    try {
+      if (!h) { await report({ error: 'nowindow' }); return; }
+      restart: for (let guard = 0; guard < 6 && alive(); guard++) {
+        const msgs = round.web_judge?.messages || [];
+        h.postMessage({ web: 'https://www.perplexity.ai/', background: true });    // محادثة جديدة لكل محاولة
+        await sleep(5000);
+        let ready = null;
+        for (let i = 0; i < 15 && alive(); i++) { ready = await getWebAnswer(true); if (ready && (ready.login || ready.turns === 0)) break; await sleep(2000); }
+        if (!alive()) return;
+        if (!ready || ready.login) { const a = await report({ error: ready?.login ? 'login' : 'nowindow' }); if (a.action === 'restart') continue restart; return; }
+        // تسليم المادة: كل جزء رسالة، وينتظر ردّ الاستلام قبل التالي
+        for (let k = 0; k < msgs.length; k++) {
+          const s = await webJSON(pplxSendJS(msgs[k]), 30000);
+          if (!s || !s.ok) { const a = await report({ error: s?.error || 'nowindow' }); if (a.action === 'restart') continue restart; return; }
+          if (k === msgs.length - 1) break;
+          let last = '', same = 0;
+          for (let i = 0; i < 90 && alive(); i++) { await sleep(2000); const j = await getWebAnswer(true); const a = j?.answer || ''; if (a && a === last) same++; else { last = a; same = 0; } if (a && (j.done || same >= 3)) break; }
+        }
+        // انتظار التقرير بين العلامتين؛ الخادم يقرر: انتظر، أكمل، أعد من جديد، انتهى
+        let last = '', since = Date.now();
+        while (alive()) {
+          await sleep(2500);
+          const j = await getWebAnswer(false);
+          if (j?.login) { const a = await report({ error: 'login' }); if (a.action === 'restart') continue restart; return; }
+          const raw = j?.answer || '';
+          if (raw !== last) { last = raw; since = Date.now(); }
+          const a = await report({ raw, stable: Math.round((Date.now() - since) / 1000), done: !!j?.done });
+          if (a.status) round = { ...round, ...a.status };
+          if (a.action === 'send' && a.message) { const s = await webJSON(pplxSendJS(a.message), 30000); if (!s || !s.ok) { const b = await report({ error: s?.error || 'nowindow' }); if (b.action === 'restart') continue restart; return; } last = ''; since = Date.now(); }
+          else if (a.action === 'restart') continue restart;
+          else if (a.action !== 'wait') return;
+        }
+      }
+    } finally { webJudgeBusy = false; }
   }
 
   function tileSlots(){if(!root)return;const grid=root.querySelector('.as-terminal-grid'),chips=root.querySelector('.as-hidden-chips');if(!grid||!chips)return;chips.replaceChildren();slots.forEach(s=>{if(!s.card)return;s.card.hidden=!!s.hidden;if(s.hidden){const b=document.createElement('button');b.className='btn';b.textContent=glyphOf(s.id,s.nameEl?.textContent)+' '+(s.nameEl?.textContent||s.id);b.title='إظهار البطاقة';b.onclick=()=>{s.hidden=false;tileSlots();};chips.appendChild(b);}});const n=slots.filter(s=>!s.hidden).length,cols=n<=2?n:n<=4?2:3;grid.style.gridTemplateColumns='repeat('+Math.max(1,cols)+', minmax(0,1fr))';slots.forEach(s=>{s.lastSize='';if(!s.hidden)resizeSlot(s);});}
@@ -1662,7 +1753,9 @@
   function renderAnswer(slot){if(!slot.answerEl||!round)return;const ag=round.agents?.[slot.id],text=slot.id==='verdict'?round.verdict:slot.id==='deep'?round.deep_answer:ag?.answer||'';const key=round.question+'\n'+text;if(slot.answerKey===key)return;const el=slot.answerEl,atEnd=el.scrollHeight-el.scrollTop-el.clientHeight<40||!slot.answerKey;el.innerHTML='<div style="background:var(--side);border-inline-start:3px solid '+colorOf(slot.id)+';padding:6px 10px;border-radius:8px"><b>السؤال</b><p dir="auto">'+esc(round.question)+'</p></div>'+(text?mdHtml(text):'<p>ينتظر الجواب…</p>');slot.answerKey=key;hydrateMermaid(el);if(atEnd)el.scrollTop=el.scrollHeight;}
   async function roundAction(action,extra={}){if(!round)return;try{const r=await req('round/'+action,{round_id:round.round_id,...extra});if(r.error)throw new Error(r.error);if(action==='export')showToast('حُفظ المستند: '+(r.title||'كل الأجوبة')+(r.missing?.length?' · لم يكتمل: '+r.missing.join('، '):''));else {round=r;await pollRound();}}catch(e){showToast(e.message||'تعذّر تنفيذ الطلب');}}
   async function pollRound(){if(!root||!round||roundBusy)return;roundBusy=true;const rid=round.round_id;try{const r=await req('round/status?id='+encodeURIComponent(rid));if(!root||round?.round_id!==rid)return;if(r.error)throw new Error(r.error);const old=round;round=r;let added=false;for(const [id,field,state,name] of [['verdict','verdict','judge_state','⚖️ الحكم'],['deep','deep_answer','deep_state','🔬 بحث متعمق']]){if((r[field]||!['idle','waiting_answers'].includes(r[state]))&&!slots.some(s=>s.id===id)){slots.push({id,view:'answer',manual:false,hash:''});layout=slots.length;added=true;}}if(added){builtLayout=layout;build();}slots.forEach(s=>{const a=r.agents?.[s.id];if(a&&!s.manual&&s.id!=='perplexity'){const prev=old.agents?.[s.id]?.answer||'',live=agents.find(x=>x.id===s.id);if(a.state==='needs_input'||(!a.answer&&Date.now()/1000-r.created>=20))setSlotView(s,'terminal',false);else if(['writing','done'].includes(a.state)&&a.answer&&a.answer!==prev)setSlotView(s,'answer',false);}renderAnswer(s);});updateSlotBadges();const jb=root.querySelector('[data-round-judge]');if(jb)jb.disabled=!Object.values(r.agents||{}).some(a=>a.state==='done');
-      if(r.agents?.perplexity){const j=await getWebAnswer();if(!root||round?.round_id!==rid)return;const ans=j?.answer||'';if(ans&&ans===webLast)webSame++;else{webLast=ans;webSame=0;}if(ans&&webSame>=3&&ans!==webPosted&&(!j.question||j.question.trim().startsWith(r.question.trim()))){await req('round/web_answer',{round_id:rid,question:r.question,answer:ans});webPosted=ans;}}
+      if(r.judge==='perplexity'&&['web_pending','running'].includes(r.judge_state)&&r.web_judge)driveWebJudge(rid);
+      // Perplexity مجيبًا (ليس وهو يحكّم: النافذة واحدة). يُرسل الجواب إذا ظهرت أزرار نهايته وثبت قراءتين، أو ثبت ٦ ث (١٦ ث في البحث المعمق: يتوقف بين خطوات البحث)
+      if(r.agents?.perplexity&&!webJudgeBusy){const j=await getWebAnswer();if(!root||round?.round_id!==rid)return;const ans=j?.answer||'';if(ans&&ans===webLast)webSame++;else{webLast=ans;webSame=0;}const norm=x=>String(x||'').replace(/\s+/g,' ').trim();const ready=j?.done?webSame>=1:webSame>=(r.agents.perplexity.deep?8:3);if(ans&&ready&&ans!==webPosted&&(!j.question||norm(j.question).startsWith(norm(r.question)))){await req('round/web_answer',{round_id:rid,question:r.question,answer:ans});webPosted=ans;}}
     }catch(e){console.warn('round status',e);}finally{roundBusy=false;}}
 
   // داخل البرنامج: نافذة Perplexity تابعة لزاجل (تتذكر الدخول)؛ في المتصفح العادي: تبويب جديد
@@ -1677,6 +1770,7 @@
 
   window.ZajelTermApp = {
     perplexity: openPerplexity,
+    webWord,
     dropPaths,
     async open(id) {
       const isApp = new URLSearchParams(location.search).get('mode') === 'terminal';

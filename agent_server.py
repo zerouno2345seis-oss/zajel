@@ -714,6 +714,8 @@ def handle(h, method):
                     r = judge.export_round(rid)
                     subprocess.Popen(["open", r["path"]], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                     h.send_json(r)
+                elif act == "web_verdict":
+                    h.send_json(judge.web_verdict(rid, b.get("raw", ""), b.get("stable", 0), str(b.get("error", "") or "")))
                 elif act == "web_answer":
                     h.send_json(judge.web_answer(rid, b.get("question", ""), b.get("answer", "")))
                 else:

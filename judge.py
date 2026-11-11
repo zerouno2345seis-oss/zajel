@@ -103,7 +103,7 @@ def _get(rid):
         if ag.get("state") not in FINAL:
             ag["state"] = "timeout" if ag.get("answer") else "error"
             ag["note"] = ag.get("note") or "انقطعت المراقبة بإعادة تشغيل زاجل"
-    if r.get("judge_state") in ("waiting_answers", "running", "needs_input"):
+    if r.get("judge_state") in ("waiting_answers", "running", "needs_input", "web_pending"):
         r["judge_state"] = "error"
     if r.get("deep_state") in ("running", "needs_input"):
         r["deep_state"] = "error"
@@ -137,7 +137,7 @@ def get_default_judge():
 
 def set_default_judge(agent_id):
     agent_id = str(agent_id or "").strip()
-    if agent_id and agent_id not in getattr(_t(), "BY_ID", {}):
+    if agent_id and agent_id != PERPLEXITY and agent_id not in getattr(_t(), "BY_ID", {}):
         raise ValueError("وكيل غير معروف.")
     d = _data()
     d.mkdir(parents=True, exist_ok=True)
@@ -166,7 +166,7 @@ def start_round(question, answerers, judge="", auto_judge=False, deep=False, tim
     if len(terms) > MAX_TERM:
         raise ValueError(f"أكثر من {MAX_TERM} وكلاء في الطرفية دفعة واحدة غير مدعوم.")
     judge = str(judge or "").strip() or get_default_judge()
-    if judge and judge not in by_id:
+    if judge and judge not in by_id and judge != PERPLEXITY:
         raise ValueError("محكِّم غير معروف.")
     if not judge:
         judge = "claude" if "claude" in by_id else (terms[0] if terms else "")
@@ -518,10 +518,10 @@ def _ask_agent(aid, prompt, marker, set_state, wait=JUDGE_WAIT, out_file=None):
 def run_judge(round_id, judge="", deep_verify=True):
     with _LOCK:
         r = _get(round_id)
-        if r["judge_state"] in ("running", "waiting_answers", "needs_input"):
+        if r["judge_state"] in ("running", "waiting_answers", "needs_input", "web_pending"):
             return round_status(round_id)
         if judge:
-            if judge not in _t().BY_ID:
+            if judge not in _t().BY_ID and judge != PERPLEXITY:
                 raise ValueError("محكِّم غير معروف.")
             r["judge"] = judge
             r["judge_also_answers"] = judge in r["agents"]
@@ -557,19 +557,205 @@ def _judge_thread(rid, deep_verify):
             pass
         prompt = judge_prompt(r, path, vpath) + ("" if deep_verify else "\nالتحقق السريع مقبول هذه المرة: تحقق من الاستشهادات الجوهرية وعلّم الباقي ❓.")
         judge = r["judge"]
+        if judge == PERPLEXITY:     # نافذة ويب بلا ملفات: الواجهة تنفّذ البروتوكول (web_verdict)، وهنا مراقب المهلة فقط
+            r["web_judge"] = {"messages": web_judge_messages(r, path.read_text(encoding="utf-8"), deep_verify), "attempt": 1,
+                              "parts": [], "continues": 0, "late": late, "key": key, "started": time.time()}
+            r["judge_state"], r["verdict"] = "web_pending", ""
+            r["judge_note"] = "يرسل المادة إلى نافذة Perplexity" + (("؛ لم يدخل (لم يكتمل): " + "، ".join(late)) if late else "")
+            _save(r)
+    if judge == PERPLEXITY:
+        t0 = time.time()
+        while time.time() - t0 < JUDGE_WAIT:
+            time.sleep(POLL * 5)
+            if r["judge_state"] not in ("web_pending", "running"):
+                return
+        with _LOCK:
+            if r["judge_state"] in ("web_pending", "running"):
+                st("error", "", "انتهت مهلة انتظار حكم Perplexity (هل نافذة الطرفيات مفتوحة؟)")
+        return
     st("running", "", ("لم يدخل التحكيم (لم يكتمل): " + "، ".join(late)) if late else "")
     state, text = _ask_agent(judge, prompt, f"⟦حكم:{rid}⟧", st, out_file=vpath)
-    text = clean_verdict(text)
     if state == "done":
-        if late:
-            text = text.rstrip() + "\n\n---\nلم تدخل هذا التحكيم لأنها لم تكتمل عند بدئه: " + "، ".join(late) + "."
-        if r["judge_also_answers"]:
-            mine = next((L for L, a in key.items() if a == judge), "")
-            text = text.rstrip() + "\n\n---\n"
-            if mine and f"المحكِّم شارك بالجواب ({mine})" not in text:
-                text += f"المحكِّم شارك بالجواب ({mine}).\n"
-            text += "مفتاح الرموز: " + "، ".join(f"{L} = {_name(a)}" for L, a in sorted(key.items())) + "\n"
-        st("done", text)
+        st("done", _finish_verdict(r, clean_verdict(text), late, key, judge))
+
+
+def _finish_verdict(r, text, late, key, judge):
+    """ملحقات الحكم المشتركة بين المحكِّمين: من لم يدخل التحكيم، ومفتاح الرموز إن شارك المحكِّم بالجواب."""
+    if late:
+        text = text.rstrip() + "\n\n---\nلم تدخل هذا التحكيم لأنها لم تكتمل عند بدئه: " + "، ".join(late) + "."
+    if r["judge_also_answers"]:
+        mine = next((L for L, a in key.items() if a == judge), "")
+        text = text.rstrip() + "\n\n---\n"
+        if mine and f"المحكِّم شارك بالجواب ({mine})" not in text:
+            text += f"المحكِّم شارك بالجواب ({mine}).\n"
+        text += "مفتاح الرموز: " + "، ".join(f"{L} = {_name(a)}" for L, a in sorted(key.items())) + "\n"
+    return text
+
+
+# ---------- Perplexity محكِّمًا ----------
+WEB_PROTOCOL_DOC = """بروتوكول تحكيم Perplexity (نافذة ويب داخل زاجل، لا طرفية ولا ملفات ولا أدوات الشاملة، لكن عنده بحث الويب).
+
+الأدوار: الخادم (هذه الدوال) يقرر كل خطوة ويحفظ الحالة في r["web_judge"]؛ الواجهة (driveWebJudge في terminal_ui.js)
+تنفّذها في النافذة بحقن JavaScript (كتابة في مربع السؤال، قراءة آخر جواب) وتبلّغ النتيجة إلى /api/term/round/web_verdict.
+
+١. التسليم: answers.md (الأجوبة المختارة، مجهَّلة إن شارك المحكِّم) يُقسَّم على حدود الأسطر إلى أجزاء ≤ WEB_CHUNK حرف
+   (مربع Perplexity لا يتسع لنص طويل، ولا رفع ملفات بالحقن). إن اتسعت رسالة واحدة: التعليمات ثم المادة في رسالة واحدة.
+   وإلا: رسالة لكل جزء «⟦حكم:…⟧ الجزء k من N … ردّ بسطر: استلمت الجزء k من N» والواجهة تنتظر ردّه قبل التالي،
+   ثم رسالة أخيرة «انتهى الإرسال (N أجزاء)» فيها تعليمات الحكم. كل محاولة في محادثة جديدة.
+٢. التعليمات: WEB_VERIFY (يتحقق من كل إحالة ببحث الويب ويفتح الصفحة الأصلية؛ ما لم يجده ❓؛ لا يضيف مصادر)
+   + OUTPUT_ORDER + STYLE_RULES (متن نظيف، حواشٍ [^n] متسلسلة، جداول Markdown حقيقية) كبقية المحكِّمين.
+٣. العلامتان: أول سطر في جوابه WEB_BEGIN وآخر سطر WEB_END. ما بينهما هو التقرير، ووجود WEB_END هو دليل الاكتمال
+   (لا الثبات وحده). والتقرير نفسه داخل كتلة ```markdown: صفحة Perplexity تحوّل [^n] المكتوبة نصًّا إلى شارات مصادرها\n   وتبتلع تعريفاتها، أما داخل كتلة الكود فيبقى النص خامًا (جُرّب)؛ والأسوار تُنزع في web_verdict_parse.
+   ثم يمر النص على clean_verdict و_finish_verdict كبقية المحكِّمين.
+٤. الأعطال (web_verdict يعيد action):
+   - wait: ما زال يكتب.
+   - send + message: بدأ التقرير وتوقف بلا WEB_END ثابتًا WEB_STALL ث (انقطاع/حد الطول) ← WEB_CONTINUE «أكمل من حيث توقفت»
+     حتى WEB_MAX_CONTINUE مرات؛ الأجزاء تُضمّ. بعدها يُقبل ناقصًا مع تنبيه ⚠️ في آخره.
+   - restart: لا علامة بدء وثبت WEB_REFUSE_STALL ث (رفض أو جواب خارج الموضوع)، أو عطل في النافذة (لا مربع إدخال،
+     لم يُرسل، الإدراج فشل) ← محادثة جديدة وإعادة التسليم كله، حتى WEB_MAX_ATTEMPTS محاولات.
+   - fail: نفدت المحاولات، أو Perplexity يطلب تسجيل الدخول (لا يُسجَّل عنه) ← judge_state=error وملاحظة واضحة.
+   - done: اكتمل (أو قُبل ناقصًا) ← judge_state=done.
+   ومراقب في _judge_thread يُنهي الحالة بخطأ بعد JUDGE_WAIT إن لم تقدها الواجهة (نافذة الطرفيات مغلقة مثلًا)."""
+WEB_BEGIN = "ZAJEL-VERDICT-BEGIN"
+WEB_END = "ZAJEL-VERDICT-END"
+WEB_CHUNK = 6000
+WEB_STALL = 90
+WEB_REFUSE_STALL = 40
+WEB_MAX_CONTINUE = 2
+WEB_MAX_ATTEMPTS = 2
+WEB_VERIFY = ("بروتوكول التحقق (إلزامي؛ ليس عندك ملفات ولا أدوات المكتبة الشاملة، وعندك بحث الويب):\n"
+              "- ابحث في الويب عن كل إحالة في الأجوبة وافتح الصفحة الأصلية (نسخة الكتاب على shamela.ws أو المكتبات الرقمية، أو الموقع المحال إليه) وقارن النص المنقول بها.\n"
+              "- لا تضف أي مصدر من عندك ولا تستشهد بما لم يرد في الأجوبة؛ ما لم تصل إليه بالبحث فعلّمه ❓ ولا تدّعِ أنك تحققت منه.\n"
+              "- الخلاصة الموحدة لا تعتمد إلا على المصادر ✅، وما عداها يُذكر بعلامته ولا يُبنى عليه حكم.\n")
+WEB_CONTINUE = (f"توقف تقريرك قبل علامة النهاية. أكمل من الموضع الذي توقفت عنده تمامًا، دون تكرار ما كتبته ودون مقدمة، "
+                f"وبالقواعد نفسها، واختم بسطر وحده: {WEB_END}")
+_WEB_ERRORS = {"login": "Perplexity يطلب تسجيل الدخول: سجّل دخولك في نافذته (🔎 Perplexity) ثم أعد التحكيم",
+               "noinput": "لم أجد مربع السؤال في صفحة Perplexity", "insert": "لم يقبل مربع Perplexity النص",
+               "nosubmit": "لم تُرسل الرسالة في Perplexity", "nowindow": "نافذة Perplexity غير متاحة"}
+
+
+def _web_split(text, size=WEB_CHUNK):
+    """يقسم النص على حدود الأسطر إلى أجزاء ≤ size (السطر الأطول من size يُقطع)."""
+    parts, cur = [], ""
+    for line in str(text).split("\n"):
+        while len(line) > size:
+            if cur:
+                parts.append(cur)
+                cur = ""
+            parts.append(line[:size])
+            line = line[size:]
+        if cur and len(cur) + 1 + len(line) > size:
+            parts.append(cur)
+            cur = line
+        else:
+            cur = (cur + "\n" + line) if cur else line
+    if cur.strip():
+        parts.append(cur)
+    return parts
+
+
+def web_judge_prompt(r, deep_verify=True):
+    p = [f"⟦حكم:{r['round_id']}⟧ أنت محكِّم محايد بين أجوبة عدة وكلاء عن سؤال واحد (المادة: السؤال ثم الأجوبة).", WEB_VERIFY]
+    if r["judge_also_answers"]:
+        p.append("تنبيه: الأسماء مخفية والأجوبة مرتبة عشوائيًا بالرموز أ ب ج؛ لا بد من درجة لكل معيار مع سبب مكتوب لكل جواب بلا استثناء.")
+    p += [OUTPUT_ORDER, STYLE_RULES,
+          "حدّد حكمك بما تحققت منه فقط: التزام الجواب بصيغة السؤال (كالإيجاز المطلوب) يُحسب له أو عليه، ولا تُدخل في الخلاصة ما لم يثبت ✅."]
+    if not deep_verify:
+        p.append("التحقق السريع مقبول هذه المرة: تحقق من الاستشهادات الجوهرية وعلّم الباقي ❓.")
+    p.append(f"التسليم: اكتب في أول سطر من جوابك {WEB_BEGIN} وحده، ثم التقرير كاملًا داخل كتلة كود واحدة تبدأ بسطر ```markdown وتنتهي بسطر ``` "
+             f"(حتى تبقى علامات الحواشي [^1] وتعريفاتها والجداول نصًّا خامًا كما كتبتها)، ثم في آخر سطر {WEB_END} وحده. "
+             "لا تكتب شيئًا قبل علامة البدء ولا بعد علامة النهاية.")
+    return "\n".join(p)
+
+
+def web_judge_messages(r, answers_text, deep_verify=True, size=WEB_CHUNK):
+    """رسائل التسليم بالترتيب (انظر WEB_PROTOCOL_DOC، البند ١)."""
+    prompt = web_judge_prompt(r, deep_verify)
+    if len(prompt) + len(answers_text) + 40 <= size:
+        return [prompt + "\n\n===== المادة =====\n" + answers_text]
+    chunks = _web_split(answers_text, size - 300)
+    n = len(chunks)
+    msgs = [f"⟦حكم:{r['round_id']}⟧ مادة تحكيم — الجزء {k} من {n}. لا تحلل ولا تبحث الآن؛ احفظ النص فقط، "
+            f"وردّ بسطر واحد: «استلمت الجزء {k} من {n}».\n\n===== الجزء {k} =====\n{c}" for k, c in enumerate(chunks, 1)]
+    msgs.append(f"انتهى الإرسال ({n} أجزاء). المادة هي الأجزاء من 1 إلى {n} أعلاه مجتمعة.\n\n" + prompt)
+    return msgs
+
+
+def web_verdict_parse(raw):
+    """يعيد (النوع، النص): done (بين العلامتين)، partial (بعد البدء بلا نهاية)، tail (قبل النهاية بلا بدء: تكملة)، none."""
+    t = str(raw or "")
+    b = t.find(WEB_BEGIN)
+    e = t.find(WEB_END, b + len(WEB_BEGIN) if b >= 0 else 0)
+    if b >= 0 and e >= 0:
+        return "done", _web_unfence(t[b + len(WEB_BEGIN):e])
+    if b >= 0:
+        return "partial", _web_unfence(t[b + len(WEB_BEGIN):])
+    if e >= 0:
+        return "tail", _web_unfence(t[:e])
+    return "none", t.strip()
+
+
+def _web_unfence(t):
+    """التقرير يُطلب داخل كتلة ```markdown (صفحة Perplexity تحوّل [^n] خارجها إلى شارات مصادرها وتبتلع تعريفاتها): تُنزع الأسوار وحدها."""
+    t = re.sub(r"^\s*```[\w-]*[ \t]*\n", "", str(t).strip())
+    return re.sub(r"\n?```\s*$", "", t).strip()
+
+
+def _web_fail_or_restart(r, wj, why):
+    if why == "login" or wj["attempt"] >= WEB_MAX_ATTEMPTS:
+        r["judge_state"], r["judge_note"] = "error", _WEB_ERRORS.get(why, why)
+        return "fail"
+    wj.update(attempt=wj["attempt"] + 1, parts=[], continues=0)
+    r["judge_note"] = f"إعادة المحاولة {wj['attempt']} من {WEB_MAX_ATTEMPTS}: " + _WEB_ERRORS.get(why, why)
+    return "restart"
+
+
+def web_verdict(round_id, raw="", stable=0, error=""):
+    """خطوة من بروتوكول Perplexity محكِّمًا: الواجهة تبلّغ آخر جواب في النافذة (أو عطلًا)، وتعود {action, message?, status}."""
+    with _LOCK:
+        r = _get(round_id)
+        wj = r.get("web_judge")
+        if r.get("judge") != PERPLEXITY or not wj or r["judge_state"] not in ("web_pending", "running"):
+            return {"action": "stop", "status": round_status(round_id)}
+        msg, stable = "", float(stable or 0)
+        if error:
+            action = _web_fail_or_restart(r, wj, str(error))
+        else:
+            kind, body = web_verdict_parse(raw)
+            cont = bool(wj["parts"]) and kind in ("tail", "none")         # ردّ على «أكمل»: يُضمّ إلى ما سبق
+            full = "\n".join(wj["parts"] + [body]) if cont else body
+            complete = kind == "done" or (kind == "tail" and (cont or DONE_MARK in body))
+            if complete:
+                r["judge_state"], r["judge_note"] = "done", ""
+                r["verdict"] = _finish_verdict(r, clean_verdict(full), wj.get("late") or [], wj.get("key") or {}, PERPLEXITY)
+                action = "done"
+            elif kind == "partial" or cont:
+                r["judge_state"], r["verdict"] = "running", clean_verdict(full)
+                r["judge_note"] = "Perplexity يكتب التقرير"
+                action = "wait"
+                if stable >= WEB_STALL:
+                    if wj["continues"] < WEB_MAX_CONTINUE:
+                        wj["parts"], wj["continues"] = [full], wj["continues"] + 1
+                        action, msg = "send", WEB_CONTINUE
+                        r["judge_note"] = f"توقف قبل علامة النهاية: طُلب منه الإكمال ({wj['continues']})"
+                    else:
+                        r["judge_state"], r["judge_note"] = "done", "التقرير ناقص: لم تصل علامة النهاية"
+                        r["verdict"] = _finish_verdict(r, clean_verdict(full) + "\n\n---\n⚠️ التقرير ناقص: توقف Perplexity قبل علامة النهاية.",
+                                                       wj.get("late") or [], wj.get("key") or {}, PERPLEXITY)
+                        action = "done"
+            elif body and DONE_MARK in body and stable >= WEB_STALL:     # كتب التقرير ونسي العلامتين
+                r["judge_state"], r["judge_note"] = "done", "كتب Perplexity التقرير بلا علامتي البدء والنهاية"
+                r["verdict"] = _finish_verdict(r, clean_verdict(body), wj.get("late") or [], wj.get("key") or {}, PERPLEXITY)
+                action = "done"
+            elif body and stable >= WEB_REFUSE_STALL and DONE_MARK not in body:
+                action = _web_fail_or_restart(r, wj, "لم يبدأ التقرير (رفض أو جواب خارج المطلوب)")
+            else:
+                action = "wait"
+        _save(r)
+        out = {"action": action, "status": round_status(round_id)}
+        if msg:
+            out["message"] = msg
+        return out
 
 
 # ---------- التعميق ----------

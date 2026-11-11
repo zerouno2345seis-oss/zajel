@@ -93,51 +93,9 @@ final class WebWindow: NSObject, WKUIDelegate, WKNavigationDelegate {
         if !window.setFrameUsingName("ZajelWebWindow") { window.center() }
         wordButton?.target = self; wordButton?.action = #selector(saveWord(_:))
     }
-    /// آخر سؤال وجوابه من الصفحة، والجواب بعناوينه ونقاطه وجداوله (Markdown بسيط)
-    static let extractJS = """
-    (() => {
-      const md = el => { let out = [];
-        const walk = n => { for (const c of n.children) { const t = c.tagName;
-          if (t === 'IMG') { if (c.src && c.naturalWidth > 120) out.push('![' + (c.alt || '').replace(/[\\[\\]]/g, '') + '](' + c.src + ')'); }
-          else if (/^H[1-6]$/.test(t)) out.push('#'.repeat(Math.min(3, +t[1])) + ' ' + c.innerText.trim());
-          else if (t === 'UL' || t === 'OL') [...c.children].forEach((li, k) => out.push((t === 'OL' ? (k + 1) + '. ' : '- ') + li.innerText.trim().replace(/\\n+/g, ' ')));
-          else if (t === 'TABLE') [...c.querySelectorAll('tr')].forEach(tr => out.push('| ' + [...tr.children].map(td => td.innerText.trim().replace(/\\|/g, '/')).join(' | ') + ' |'));
-          else if (t === 'PRE') out.push('```\\n' + c.innerText + '\\n```');
-          else if (t === 'P' || t === 'BLOCKQUOTE') out.push(c.innerText.trim());
-          else if (c.children.length) walk(c); else if (c.innerText && c.innerText.trim()) out.push(c.innerText.trim());
-          out.push(''); } };
-        walk(el); return out.join('\\n').replace(/\\n{3,}/g, '\\n\\n').trim(); };
-      const pr = [...document.querySelectorAll('[class*="prose"]')].filter(e => e.innerText.trim().length > 20);
-      const ans = pr.length ? md(pr[pr.length - 1]) : '';
-      const qs = [...document.querySelectorAll('h1, [class*="query"], [data-testid*="query"]')].map(e => e.innerText.trim()).filter(Boolean);
-      let q = qs.length ? qs[qs.length - 1] : '';
-      if (!q) q = (document.title || '').replace(/\\s*[-|·]\\s*Perplexity.*$/i, '');
-      if (!q) { try { q = new URL(location.href).searchParams.get('q') || ''; } catch (e) {} }
-      return JSON.stringify({ name: 'Perplexity', question: q, answer: ans });
-    })()
-    """
-
-    func extract(_ done: @escaping ([String: Any]?) -> Void) {
-        web.evaluateJavaScript(WebWindow.extractJS) { r, _ in
-            guard let s = r as? String, let d = s.data(using: .utf8), let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { done(nil); return }
-            done(j)
-        }
-    }
-
+    /// زر Word: الصفحة الرئيسية تستخرج الجواب (منطق الاستخراج واحد في terminal_ui.js) وتطلب المستند
     @objc func saveWord(_ s: Any?) {
-        extract { j in
-            guard let j = j else { return }
-            var req = URLRequest(url: BASE.appendingPathComponent("api/term/export_text")); req.httpMethod = "POST"; req.timeoutInterval = 60
-            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            req.setValue("http://127.0.0.1:\(PORT)", forHTTPHeaderField: "Origin")
-            req.httpBody = try? JSONSerialization.data(withJSONObject: j)
-            URLSession.shared.dataTask(with: req) { d, _, _ in
-                let r = (d.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }) ?? [:]
-                if let err = r["error"] as? String {
-                    DispatchQueue.main.async { let a = NSAlert(); a.messageText = err; a.addButton(withTitle: "حسنًا"); a.beginSheetModal(for: self.window, completionHandler: nil) }
-                }
-            }.resume()
-        }
+        (NSApp.delegate as? AppDelegate)?.web.evaluateJavaScript("window.ZajelTermApp && window.ZajelTermApp.webWord && window.ZajelTermApp.webWord()", completionHandler: nil)
     }
 
     /// إظهار النافذة كما تُركت (بجوابها) دون تحميل صفحة جديدة؛ تُفتح على الصفحة الرئيسية أول مرة فقط
@@ -351,11 +309,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         if d["webShow"] != nil { WebWindow.show(); return }
         if let s = d["web"] as? String, let u = URL(string: s), u.scheme == "https" { WebWindow.open(u, background: (d["background"] as? Bool) == true); return }
         if d["webWord"] != nil { WebWindow.shared?.saveWord(nil); return }
-        if d["getWeb"] != nil {
-            guard let w = WebWindow.shared, w.window.isVisible else { web.evaluateJavaScript("window.__zajelWeb && window.__zajelWeb(null)", completionHandler: nil); return }
-            w.extract { j in
-                let json = j.flatMap { try? JSONSerialization.data(withJSONObject: $0) }.flatMap { String(data: $0, encoding: .utf8) } ?? "null"
-                self.web.evaluateJavaScript("window.__zajelWeb && window.__zajelWeb(\(json))", completionHandler: nil)
+        // webEval: سكربت (جسم دالة async) يُنفَّذ في صفحة Perplexity، ونتيجته (نص) تعود إلى __zajelWebEvalDone(id, نتيجة)
+        if let js = d["webEval"] as? String {
+            let id = (d["id"] as? Int) ?? 0
+            let reply: (String) -> Void = { json in self.web.evaluateJavaScript("window.__zajelWebEvalDone && window.__zajelWebEvalDone(\(id), \(json))", completionHandler: nil) }
+            guard let w = WebWindow.shared else { reply("null"); return }
+            w.web.callAsyncJavaScript(js, arguments: [:], in: nil, in: .page) { res in
+                var out = "null"
+                if case .success(let v) = res, let str = v as? String,
+                   let data = try? JSONSerialization.data(withJSONObject: [str]), let arr = String(data: data, encoding: .utf8) { out = String(arr.dropFirst().dropLast()) }
+                reply(out)
             }
             return
         }
