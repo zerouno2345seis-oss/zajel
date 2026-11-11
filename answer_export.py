@@ -110,7 +110,33 @@ def from_hermes(_cwd):
     return (q, "\n\n".join(ans)) if q else None
 
 
-SOURCES = {"claude": from_claude, "codex": from_codex, "hermes": from_hermes}
+def from_opencode(_cwd):
+    """OpenCode يحفظ محادثاته في قاعدة SQLite؛ الشاشة الضيقة لا تُظهر جوابه كاملًا."""
+    db = HOME / ".local" / "share" / "opencode" / "opencode.db"
+    if not db.exists():
+        return None
+    try:
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=3)
+        row = con.execute("select session_id from message where json_extract(data,'$.role')='user' order by time_created desc limit 1").fetchone()
+        if not row:
+            return None
+        rows = con.execute("select json_extract(m.data,'$.role'), json_extract(p.data,'$.type'), json_extract(p.data,'$.text') from message m join part p on p.message_id=m.id "
+                           "where m.session_id=? order by m.time_created, p.id", (row[0],)).fetchall()
+        con.close()
+    except sqlite3.Error:
+        return None
+    q, ans = "", []
+    for role, kind, text in rows:
+        if kind != "text" or not (text or "").strip():
+            continue
+        if role == "user" and _is_user_text(text):
+            q, ans = text.strip(), []
+        elif role == "assistant" and q:
+            ans.append(text.strip())
+    return (q, "\n\n".join(ans)) if q else None
+
+
+SOURCES = {"claude": from_claude, "codex": from_codex, "hermes": from_hermes, "opencode": from_opencode}
 
 # ---------- الشاشة (احتياط) ----------
 USER_MARK = {"agy": r"^> (?!\d+\. )", "hermes": r"^● ", "codex": r"^› ", "claude": r"^[>❯] "}

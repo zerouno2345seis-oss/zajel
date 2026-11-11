@@ -13,6 +13,9 @@ DATA = None            # PB_DATA؛ إن لم يُضبط أُخذ من terminal.D
 T = None               # وحدة الطرفية (تُستبدل في الاختبارات)
 POLL = 2.0             # ثوانٍ بين قراءتين لأجوبة الوكلاء
 STABLE_POLLS = 3       # قراءات متتالية بلا تغيّر (والوكيل هادئ) = انتهى الجواب
+ANSWER_STABLE = 8      # أجوبة الوكلاء: ١٦ ثانية بلا تغيّر والوكيل هادئ
+FINAL_SILENCE = 45     # المحكِّم والتعميق: ٩٠ ثانية بلا تغيّر إن لم تظهر «الخلاصة الموحدة»
+DONE_MARK = "الخلاصة الموحدة"
 TIMEOUT_MIN = 10
 DEEP_TIMEOUT_MIN = 30
 JUDGE_WAIT = 25 * 60   # أقصى انتظار لجواب المحكِّم (والتعميق)
@@ -240,7 +243,7 @@ def _poll_agent(r, aid, ag, probe):
         probe["stable"] = 0
         return
     probe["stable"] = probe.get("stable", 0) + 1
-    if probe["stable"] >= STABLE_POLLS and st != "working":
+    if probe["stable"] >= ANSWER_STABLE and st != "working":        # أطول من ثلاث قراءات: الوكيل قد يكتب تمهيدًا ثم يبحث
         ag.update(state="done", note="")
     else:
         ag.update(state="writing", note="")
@@ -395,7 +398,9 @@ def _ask_agent(aid, prompt, marker, set_state, wait=JUDGE_WAIT):
             set_state("running", cur, "")
             continue
         stable += 1
-        if stable >= STABLE_POLLS and st != "working":
+        # المحكِّم يتوقف بين خطواته (قراءة ملف، فتح مصدر) فيبدو منتهيًا بعد جملته الأولى: لا يُعدّ منتهيًا إلا وفي جوابه
+        # الخلاصة الموحدة، أو بعد ثبات طويل (FINAL_SILENCE) إن كتب بغير هذه العناوين
+        if st != "working" and ((stable >= STABLE_POLLS and DONE_MARK in cur) or stable >= FINAL_SILENCE):
             return "done", cur
     set_state("error", prev or "", "انتهت مهلة انتظار الجواب")
     return "error", prev or ""

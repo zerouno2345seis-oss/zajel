@@ -86,5 +86,30 @@ class Docx(unittest.TestCase):
             self.assertEqual(len(Document(str(p)).inline_shapes), 1)
 
 
+
+class OpenCodeDB(unittest.TestCase):
+    def test_last_question_and_answer_from_db(self):
+        import json, sqlite3
+        with tempfile.TemporaryDirectory() as d:
+            old, A.HOME = A.HOME, Path(d)
+            try:
+                db = Path(d) / ".local/share/opencode/opencode.db"
+                db.parent.mkdir(parents=True)
+                con = sqlite3.connect(db)
+                con.execute("create table message(id text, session_id text, time_created int, data text)")
+                con.execute("create table part(id text, message_id text, session_id text, time_created int, data text)")
+                for mid, t, role, parts in [("m1", 1, "user", ["سؤال قديم"]), ("m2", 2, "assistant", ["جواب قديم"]),
+                                            ("m3", 3, "user", ["ما حكم المسح على الجوربين؟"]), ("m4", 4, "assistant", ["يجوز عند الجمهور [1].", "المصادر: المغني"])]:
+                    con.execute("insert into message values(?,?,?,?)", (mid, "s1", t, json.dumps({"role": role})))
+                    for k, txt in enumerate(parts):
+                        con.execute("insert into part values(?,?,?,?,?)", (f"{mid}p{k}", mid, "s1", t, json.dumps({"type": "text", "text": txt})))
+                con.execute("insert into part values('m4z','m4','s1',4,?)", (json.dumps({"type": "step-finish"}),))
+                con.commit(); con.close()
+                q, a = A.from_opencode("")
+                self.assertEqual(q, "ما حكم المسح على الجوربين؟")
+                self.assertEqual(a, "يجوز عند الجمهور [1].\n\nالمصادر: المغني")
+            finally:
+                A.HOME = old
+
 if __name__ == "__main__":
     unittest.main()
