@@ -53,7 +53,8 @@ class BroadcastTests(unittest.TestCase):
         started, readied, typed = [], [], []
         with mock.patch.object(T, "start", lambda i: started.append(i) or {"ok": True, "started": True}), \
              mock.patch.object(T, "_wait_idle", lambda i, timeout=60: readied.append(i) or "idle"), \
-             mock.patch.object(T, "_type_message", lambda i, text: typed.append((i, text))):
+             mock.patch.object(T, "_type_message", lambda i, text: typed.append((i, text))), \
+             mock.patch.object(T, "NEW_SESSION_SETTLE", 0):
 
             # 1. Empty text rejected
             with self.assertRaises(ValueError):

@@ -196,5 +196,25 @@ class JudgeTest(unittest.TestCase):
         self.t.ans["claude"] = ("س\n⟦إعادة 2⟧", "نفس الجواب")          # الجواب الجديد مطابق للقديم حرفًا
         self.wait(lambda: judge.round_status(rid)["agents"]["claude"]["state"] == "done")
 
+    def test_unfence_hermes(self):
+        import judge
+        self.assertEqual(judge._strip_notes("```\nنص الجواب\nسطر ثان\n```"), "نص الجواب\nسطر ثان")
+        self.assertEqual(judge._strip_notes("```\nنص يكتب الآن"), "نص يكتب الآن")
+        keep = "مقدمة\n```py\nx=1\n```\nخاتمة"
+        self.assertEqual(judge._strip_notes(keep), keep)
+
+    def test_clean_verdict(self):
+        import judge
+        raw = "اكتب تقريرك بهذا الترتيب\n## الخلاصة الموحدة — خلاصة واحدة\nتعليمات\n○ Thought for 3m 59s\nالخلاصة الموحدة\nالنص الحقيقي[^1]\n▸ Thought for 43s"
+        self.assertEqual(judge.clean_verdict(raw), "الخلاصة الموحدة\nالنص الحقيقي[^1]")
+
+    def test_prompt_rules(self):
+        import judge
+        rr = {"round_id": "x", "judge_also_answers": False}
+        p = judge.judge_prompt(rr, "/a/answers.md", "/a/verdict.md")
+        for w in ("المتن نظيف", "[^1]", "جداول Markdown", "/a/verdict.md"):
+            self.assertIn(w, p)
+
+
 if __name__ == "__main__":
     unittest.main()

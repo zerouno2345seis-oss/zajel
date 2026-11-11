@@ -220,6 +220,7 @@
     document.addEventListener('mousedown', hide, true);
   })();
 
+  let confirmAll = null;
   function renderRail() {
     if (!root) return;
     const rail = root.querySelector('.rail');
@@ -259,6 +260,31 @@
       renderRail();
     };
     headActs.appendChild(posBtn);
+
+    // إعادة تشغيل كل الوكلاء العاملين دفعة واحدة؛ تُمسح محادثاتهم الجارية فيُطلب تأكيد بضغطة ثانية خلال ٤ ثوانٍ
+    const allBtn = document.createElement('button');
+    allBtn.type = 'button';
+    allBtn.className = 'rail-btn-pos';
+    allBtn.textContent = confirmAll ? 'تأكيد؟' : '↻ الكل';
+    allBtn.title = 'أعد تشغيل كل الوكلاء العاملين (تُمسح محادثاتهم الجارية)';
+    allBtn.setAttribute('aria-label', allBtn.title);
+    allBtn.onclick = async () => {
+      if (!confirmAll) {
+        confirmAll = setTimeout(() => { confirmAll = null; renderRail(); }, 4000);
+        renderRail();
+        return;
+      }
+      clearTimeout(confirmAll); confirmAll = null;
+      const run = agents.filter(x => x.cmd && x.state !== 'stopped');
+      if (!run.length) { showToast('لا وكيل يعمل الآن'); renderRail(); return; }
+      showToast('جارٍ إعادة تشغيل ' + run.length + ' وكلاء…');
+      const res = await Promise.allSettled(run.map(x => req('restart', { id: x.id })));
+      const bad = res.filter(x => x.status === 'rejected').length;
+      showToast(bad ? 'أُعيد تشغيل ' + (run.length - bad) + ' وتعذّر ' + bad : 'أُعيد تشغيل ' + run.length + ' وكلاء');
+      setTimeout(refreshList, 400);
+      renderRail();
+    };
+    headActs.appendChild(allBtn);
 
     const toggleBtn = document.createElement('button');
     toggleBtn.type = 'button';
@@ -1636,13 +1662,15 @@
   function renderAnswer(slot){if(!slot.answerEl||!round)return;const ag=round.agents?.[slot.id],text=slot.id==='verdict'?round.verdict:slot.id==='deep'?round.deep_answer:ag?.answer||'';const key=round.question+'\n'+text;if(slot.answerKey===key)return;const el=slot.answerEl,atEnd=el.scrollHeight-el.scrollTop-el.clientHeight<40||!slot.answerKey;el.innerHTML='<div style="background:var(--side);border-inline-start:3px solid '+colorOf(slot.id)+';padding:6px 10px;border-radius:8px"><b>السؤال</b><p dir="auto">'+esc(round.question)+'</p></div>'+(text?mdHtml(text):'<p>ينتظر الجواب…</p>');slot.answerKey=key;hydrateMermaid(el);if(atEnd)el.scrollTop=el.scrollHeight;}
   async function roundAction(action,extra={}){if(!round)return;try{const r=await req('round/'+action,{round_id:round.round_id,...extra});if(r.error)throw new Error(r.error);if(action==='export')showToast('حُفظ المستند: '+(r.title||'كل الأجوبة')+(r.missing?.length?' · لم يكتمل: '+r.missing.join('، '):''));else {round=r;await pollRound();}}catch(e){showToast(e.message||'تعذّر تنفيذ الطلب');}}
   async function pollRound(){if(!root||!round||roundBusy)return;roundBusy=true;const rid=round.round_id;try{const r=await req('round/status?id='+encodeURIComponent(rid));if(!root||round?.round_id!==rid)return;if(r.error)throw new Error(r.error);const old=round;round=r;let added=false;for(const [id,field,state,name] of [['verdict','verdict','judge_state','⚖️ الحكم'],['deep','deep_answer','deep_state','🔬 بحث متعمق']]){if((r[field]||!['idle','waiting_answers'].includes(r[state]))&&!slots.some(s=>s.id===id)){slots.push({id,view:'answer',manual:false,hash:''});layout=slots.length;added=true;}}if(added){builtLayout=layout;build();}slots.forEach(s=>{const a=r.agents?.[s.id];if(a&&!s.manual&&s.id!=='perplexity'){const prev=old.agents?.[s.id]?.answer||'',live=agents.find(x=>x.id===s.id);if(a.state==='needs_input'||(!a.answer&&Date.now()/1000-r.created>=20))setSlotView(s,'terminal',false);else if(['writing','done'].includes(a.state)&&a.answer&&a.answer!==prev)setSlotView(s,'answer',false);}renderAnswer(s);});updateSlotBadges();const jb=root.querySelector('[data-round-judge]');if(jb)jb.disabled=!Object.values(r.agents||{}).some(a=>a.state==='done');
-      if(r.agents?.perplexity){const j=await getWebAnswer();if(!root||round?.round_id!==rid)return;const ans=j?.answer||'';if(ans&&ans===webLast)webSame++;else{webLast=ans;webSame=0;}if(ans&&webSame>=3&&ans!==webPosted&&(!j.question||j.question.trim()===r.question.trim())){await req('round/web_answer',{round_id:rid,question:r.question,answer:ans});webPosted=ans;}}
+      if(r.agents?.perplexity){const j=await getWebAnswer();if(!root||round?.round_id!==rid)return;const ans=j?.answer||'';if(ans&&ans===webLast)webSame++;else{webLast=ans;webSame=0;}if(ans&&webSame>=3&&ans!==webPosted&&(!j.question||j.question.trim().startsWith(r.question.trim()))){await req('round/web_answer',{round_id:rid,question:r.question,answer:ans});webPosted=ans;}}
     }catch(e){console.warn('round status',e);}finally{roundBusy=false;}}
 
   // داخل البرنامج: نافذة Perplexity تابعة لزاجل (تتذكر الدخول)؛ في المتصفح العادي: تبويب جديد
   function openPerplexity(text, background, deep) {
     // deep: وضع البحث المتعمق (Research) عبر mode=research — معامل غير موثّق رسميًّا، يعمل في واجهة الموقع الحالية
-    const url = 'https://www.perplexity.ai/' + (text ? (deep ? '?q=' + encodeURIComponent(text) + '&mode=research' : 'search?q=' + encodeURIComponent(text)) : '');
+    // وضع Research في الرابط غير موثّق وقد لا تلتزم به الصفحة، فيُكتب طلب البحث المتعمق في نص السؤال نفسه أيضًا فيصل الطلب في كل الأحوال
+    const DEEP_TXT = '\n\n[بحث متعمق] قسّم السؤال إلى أسئلة فرعية وأجب عن كل واحد. ابحث في الإنترنت وفي المكتبة الشاملة معًا، واعتمد ما لا يقل عن ٨ مصادر مختلفة. افتح المصادر الأصلية واقرأها بنفسك ولا تكتفِ بالملخصات، وتحقق من كل نص تنقله قبل أن تكتبه. اذكر مواضع الخلاف بين المصادر والأقوال صراحة. لا تتعجل؛ لك وقت طويل.';
+    const url = 'https://www.perplexity.ai/' + (text ? (deep ? '?q=' + encodeURIComponent(text + DEEP_TXT) + '&mode=research' : 'search?q=' + encodeURIComponent(text)) : '');
     const h = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.zajel;
     if (h) h.postMessage(text ? { web: url, background: !!background } : { webShow: 1 }); else window.open(url, '_blank');   // الزر بلا سؤال يُظهر النافذة بجوابها كما هو
   }

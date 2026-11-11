@@ -130,5 +130,10 @@ class PiSessions(unittest.TestCase):
             finally:
                 A.HOME = old
 
+    def test_wrapped_source_line_joins(self):
+        body, notes = A.citations("نص [1] ثم [2].\n\nالمصادر:\n[1] الراغب، المفردات،\nدار القلم، ص 79.\n[2] ابن منظور، ج10.")
+        self.assertEqual(notes, ["الراغب، المفردات، دار القلم، ص 79.", "ابن منظور، ج10."])
+
+
 if __name__ == "__main__":
     unittest.main()

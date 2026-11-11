@@ -255,6 +255,30 @@ def _strip_notes(t):
         if head and _norm(t[:400]).startswith(head):
             end = t.find(")") if note is CITE_NOTE else t.find("\n\n")
             t = t[end + 1:].strip() if 0 <= end < 1500 else t
+    return _unfence(t)
+
+
+def clean_verdict(t):
+    """نص الحكم الملتقط من الشاشة يبدأ أحيانًا بتعليماتنا نفسها (يردّدها الوكيل) ويلحقه ضجيج واجهة («Thought for …»): يُقصّ من العنوان الحقيقي."""
+    t = str(t or "").strip()
+    heads = list(re.finditer(r"(?m)^[ \t]*(?:#{1,6}[ \t]*)?الخلاصة الموحدة[ \t]*$", t))
+    if heads:
+        t = t[heads[-1].start():]
+    t = re.sub(r"(?m)^[ \t]*[○●◦▸▹]\s*Thought for .*$", "", t)
+    t = re.sub(r"(?m)^[ \t]*\(?Thought for \d.*$", "", t)
+    return t.strip()
+
+
+def _unfence(t):
+    """Hermes يبدأ جوابه أحيانًا بسطر ``` فارغ (ويختمه بآخر): تُنزع الكتلة المحيطة بكل الجواب فقط، وكتل الكود الحقيقية في الوسط تبقى."""
+    lines = t.split("\n")
+    if not lines or lines[0].strip() != "```":
+        return t
+    fences = sum(1 for ln in lines if ln.strip().startswith("```"))
+    if fences % 2 == 1:
+        return "\n".join(lines[1:]).strip()           # فتح بلا إغلاق
+    if lines[-1].strip() == "```" and fences == 2:
+        return "\n".join(lines[1:-1]).strip()          # الجواب كله داخل كتلة واحدة
     return t
 
 
@@ -385,13 +409,22 @@ def build_answers_file(r, only=None):
     return p, key
 
 
-OUTPUT_ORDER = ("اكتب تقريرك بهذا الترتيب بالضبط وبعناوين ## بهذه الأسماء:\n"
-                "١. ## الخلاصة الموحدة — خلاصة واحدة متماسكة تعتمد على المصادر الموسومة ✅ وحدها.\n"
-                "٢. ## جدول الاتفاق والاختلاف — جدول: المسألة | ما اتفقت عليه الأجوبة | مواضع الاختلاف.\n"
-                "٣. ## تقييم كل جواب — لكل جواب ثلاثة معايير: الدقة، التوثيق، الشمول؛ لكل معيار درجة من ١٠ مع سبب مكتوب بجملة. ثم الدرجة الكلية.\n"
-                "٤. ## جدول التحقق من الإحالات — جدول: الجواب | الإحالة | الحالة | ملاحظة. الحالات: ✅ موثّق (وجدت النص في المصدر) · ⚠️ فيه خلل (المصدر موجود لكن النص أو الصفحة أو العزو مختلف) · ❌ غير موجود · ❓ تعذّر التحقق.\n"
+OUTPUT_ORDER = ("اكتب تقريرك بهذا الترتيب بالضبط، وبعناوين ## بهذه الأسماء حرفيًا:\n"
+                "١. ## الخلاصة الموحدة — فقرة أو فقرتان متماسكتان تعتمدان على المصادر الموسومة ✅ وحدها.\n"
+                "٢. ## جدول الاتفاق والاختلاف — أعمدته: المسألة | ما اتفقت عليه الأجوبة | مواضع الاختلاف.\n"
+                "٣. ## تقييم كل جواب — لكل جواب ثلاثة معايير: الدقة، التوثيق، الشمول؛ لكل معيار درجة من ١٠ وسبب بجملة واحدة، ثم الدرجة الكلية.\n"
+                "٤. ## جدول التحقق من الإحالات — أعمدته: الجواب | الإحالة | الحالة | ملاحظة. الحالات: ✅ موثّق (وجدت النص في المصدر) · ⚠️ فيه خلل (المصدر موجود لكن النص أو الصفحة أو العزو مختلف) · ❌ غير موجود · ❓ تعذّر التحقق.\n"
                 "٥. ## تنبيهات — أخطاء وتناقضات وملاحظات منهجية.\n"
                 "٦. ## ما يحتاج تحقق المستخدم — ما لم تستطع حسمه بنفسك.\n")
+
+STYLE_RULES = ("قواعد الكتابة (إلزامية):\n"
+               "- المتن نظيف: جمل الحكم والخلاصة وحدها. لا أقواس توضيحية ولا استدراكات ولا أسماء كتب ولا أرقام صفحات داخل المتن، ولا عبارات من نوع «ويُلاحظ أن» أو «علمًا بأن».\n"
+               "- كل ما يحتاج القارئ إلى توضيحه (استدراك، سبب ترجيح، تنبيه إلى خلاف، شرح مصطلح، حالة التحقق من مصدر، المصدر نفسه) يُكتب في حاشية لا في المتن.\n"
+               "- الحواشي بصيغة Markdown: ضع بعد الكلمة مباشرة علامة مثل [^1] (بلا أقواس حولها)، وأرقامها متسلسلة تبدأ من 1 بترتيب ظهورها في التقرير، بلا تكرار ولا قفز، والعلامة نفسها لا تُستعمل لحاشيتين. "
+               "وفي آخر التقرير اكتب تعريف كل حاشية في سطر واحد كامل لا ينكسر: [^1]: المؤلف، الكتاب، الجزء والصفحة (أو الرابط) — ثم توضيحك إن لزم. لا تكتب قسمًا اسمه «المصادر».\n"
+               "- الجداول جداول Markdown حقيقية: سطر العناوين ثم سطر الفاصل |---|---|، ثم صف لكل سطر. كل خلية عبارة قصيرة (نحو ١٥ كلمة على الأكثر) بلا قوائم ولا أسطر داخلها، ولا علامات حواشٍ داخل الجداول (ضع المصدر في عمود الملاحظة مختصرًا).\n"
+               "- لا تعد كتابة تعليماتي ولا عناوينها في التقرير، ولا تضف جملة افتتاحية أو ختامية خارج الأقسام الستة.\n")
+
 
 VERIFY_PROTO = ("بروتوكول التحقق (إلزامي):\n"
                 "- افتح بنفسك كل مصدر استشهد به أي جواب. للكتب الشرعية استعمل أدوات المكتبة الشاملة إن وُجدت عندك (مثل shamela_verify_quote وshamela_get_page) وإلا فافتح الرابط على الويب.\n"
@@ -399,13 +432,16 @@ VERIFY_PROTO = ("بروتوكول التحقق (إلزامي):\n"
                 "- الخلاصة الموحدة لا تعتمد إلا على المصادر ✅، وما عداها يُذكر بعلامته ولا يُبنى عليه حكم.\n")
 
 
-def judge_prompt(r, answers_path):
+def judge_prompt(r, answers_path, vpath=None):
     p = [f"⟦حكم:{r['round_id']}⟧ أنت محكِّم محايد. اقرأ الملف {answers_path} (فيه السؤال وأجوبة عدة وكلاء) ثم حكّم بينها.", VERIFY_PROTO]
     if r["judge_also_answers"]:
         p.append("تنبيه: أحد الأجوبة كتبه المحكِّم نفسه (أنت)، وقد أُخفيت الأسماء ورُتّبت الأجوبة عشوائيًا بالرموز أ ب ج. لا تجامل جوابًا لظنك أنه جوابك؛ "
                  "ولا بد من درجة لكل معيار مع سبب مكتوب لكل جواب بلا استثناء. اذكر في التقرير: «المحكِّم شارك بالجواب (رمزه)» إن عرفته.")
     p.append(OUTPUT_ORDER)
-    p.append("وثّق في تقريرك كما يلي: ضع بعد المعلومة رقمًا بين معقوفين مثل [1]، واختم بقسم «المصادر» لما ثبت ✅ فقط.")
+    p.append(STYLE_RULES)
+    p.append("حدّد حكمك بما تحققت منه فقط: التزام الجواب بصيغة السؤال (كالإيجاز المطلوب) يُحسب له أو عليه، ولا تُدخل في الخلاصة ما لم يثبت ✅.")
+    if vpath:
+        p.append(f"التسليم: اكتب تقريرك النهائي كاملًا بصيغة Markdown في الملف {vpath} (أنشئه أو استبدل ما فيه)، ثم اكتب في المحادثة سطرًا واحدًا فقط: «تم حفظ التقرير». لا تلصق التقرير في المحادثة.")
     return "\n".join(p)
 
 
@@ -423,7 +459,7 @@ def _after_send(aid, wait=SEND_WAIT):
     return False, "لم تصل الرسالة إلى الوكيل في الوقت المناسب"
 
 
-def _ask_agent(aid, prompt, marker, set_state, wait=JUDGE_WAIT):
+def _ask_agent(aid, prompt, marker, set_state, wait=JUDGE_WAIT, out_file=None):
     """يرسل prompt إلى وكيل ويقرأ جوابه (السؤال المحتوي marker). set_state(state, text, note). يعيد (state, text)."""
     T_ = _t()
     getattr(T_, "BROADCAST_STATE", {}).pop(aid, None)      # لا نقرأ حالة إرسال قديمة
@@ -437,8 +473,20 @@ def _ask_agent(aid, prompt, marker, set_state, wait=JUDGE_WAIT):
         set_state("error", "", note)
         return "error", ""
     text, prev, stable, t0 = "", None, 0, time.time()
+    fprev, fstable = None, 0
     while time.time() - t0 < wait:
         time.sleep(POLL)
+        if out_file:      # التقرير المكتوب في ملف Markdown حقيقي أنظف من نص الشاشة (جداول سليمة، سطور غير مكسورة، بلا ضجيج الواجهة)
+            try:
+                ftxt = Path(out_file).read_text(encoding="utf-8").strip()
+            except OSError:
+                ftxt = ""
+            if ftxt:
+                fstable = fstable + 1 if ftxt == fprev else 0
+                fprev = ftxt
+                set_state("running", ftxt, "")
+                if fstable >= 3 and DONE_MARK in ftxt:
+                    return "done", ftxt
         try:
             res = T_.last_answer(aid)
             st = T_.state_of(aid)[0]
@@ -446,21 +494,23 @@ def _ask_agent(aid, prompt, marker, set_state, wait=JUDGE_WAIT):
             continue
         cur = str(res.get("answer") or "").strip() if marker in str(res.get("question") or "") else ""
         if st == "waiting":
-            set_state("needs_input", cur, "ينتظر ردّك في الطرفية")
+            set_state("needs_input", fprev or cur, "ينتظر ردّك في الطرفية")
             stable = 0
             continue
         if not cur:
-            set_state("running", "", "")
+            if not fprev:
+                set_state("running", "", "")
             continue
         if cur != prev:
             prev, stable = cur, 0
-            set_state("running", cur, "")
+            if not fprev:
+                set_state("running", cur, "")
             continue
         stable += 1
         # المحكِّم يتوقف بين خطواته (قراءة ملف، فتح مصدر) فيبدو منتهيًا بعد جملته الأولى: لا يُعدّ منتهيًا إلا وفي جوابه
         # الخلاصة الموحدة، أو بعد ثبات طويل (FINAL_SILENCE) إن كتب بغير هذه العناوين
         if st != "working" and ((stable >= STABLE_POLLS and DONE_MARK in cur) or stable >= FINAL_SILENCE):
-            return "done", cur
+            return "done", (fprev if out_file and fprev and DONE_MARK in fprev else cur)
     set_state("error", prev or "", "انتهت مهلة انتظار الجواب")
     return "error", prev or ""
 
@@ -500,10 +550,16 @@ def _judge_thread(rid, deep_verify):
             return
         late = [ag["name"] for a, ag in r["agents"].items() if ag["selected"] and a not in ready]
         path, key = build_answers_file(r, only=ready)
-        prompt = judge_prompt(r, path) + ("" if deep_verify else "\nالتحقق السريع مقبول هذه المرة: تحقق من الاستشهادات الجوهرية وعلّم الباقي ❓.")
+        vpath = path.parent / "verdict.md"
+        try:
+            vpath.unlink()
+        except OSError:
+            pass
+        prompt = judge_prompt(r, path, vpath) + ("" if deep_verify else "\nالتحقق السريع مقبول هذه المرة: تحقق من الاستشهادات الجوهرية وعلّم الباقي ❓.")
         judge = r["judge"]
     st("running", "", ("لم يدخل التحكيم (لم يكتمل): " + "، ".join(late)) if late else "")
-    state, text = _ask_agent(judge, prompt, f"⟦حكم:{rid}⟧", st)
+    state, text = _ask_agent(judge, prompt, f"⟦حكم:{rid}⟧", st, out_file=vpath)
+    text = clean_verdict(text)
     if state == "done":
         if late:
             text = text.rstrip() + "\n\n---\nلم تدخل هذا التحكيم لأنها لم تكتمل عند بدئه: " + "، ".join(late) + "."

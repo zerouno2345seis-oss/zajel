@@ -268,7 +268,10 @@ def open_path(i, path):
 SHELLS = {"zsh", "-zsh", "bash", "-bash", "sh", "-sh", "fish", "login"}
 KEY_RE = re.compile(r"^(Enter|Tab|BTab|BSpace|Escape|Up|Down|Left|Right|Home|End|PgUp|PgDn|DC|Space|C-[a-z\\\]\[]|M-[a-z]|F([1-9]|1[0-2]))$")
 WAIT_RE = re.compile(r"(\(y/n\)|\[y/n\]|\[Y/n\]|\(yes/no\)|press enter to|do you want to|would you like to|allow (this|once|always)|approve this|esc to cancel|❯\s*1\.|^\s*[❯›]\s*1\.\s|0:\s*Dismiss)", re.I | re.M)
+# حدّ استعمال الحساب (Claude وغيره): تظهر معه عبارة «esc to cancel» فكان يُحسب سؤالًا ينتظر الردّ
+LIMIT_RE = re.compile(r"(hit your .{0,30}limit|usage limit reached|rate limit(ed)? |quota exceeded|exceeded your (current )?quota)", re.I)
 IDLE_SECS, WORK_SECS = 4, 3
+NEW_SESSION_SETTLE = 5      # ثوانٍ تنتظرها الجلسة الجديدة قبل أن يُكتب فيها أول سؤال
 CFG = {"notify": True, "guard": True, "guarded": []}
 GUARD = {}        # id ← {"bad": عدّاد قراءات سيئة متتالية، "tries": [أوقات محاولات الإنعاش]}
 MON = {}          # id ← {"state","worked_since","last_note"}
@@ -1074,16 +1077,28 @@ def broadcast(ids, text):
         name = BY_ID[target_id]["name"]
         try:
             BROADCAST_STATE[target_id] = {"state": "starting", "note": "يجهز…"}
-            start(target_id)
+            if start(target_id).get("started"):
+                time.sleep(NEW_SESSION_SETTLE)     # واجهة بعض الوكلاء (OpenCode) تُرسم قبل أن تقبل الكتابة بثوانٍ: ما يُكتب قبلها يضيع
             # لا يُكتب في وكيل يعرض سؤالًا (موافقة، استبيان، نعم/لا): كانت الرسالة تذهب جوابًا لذلك السؤال فتضيع
             st = _wait_idle(target_id)
+            if st == "limit":
+                BROADCAST_STATE[target_id] = {"state": "skipped", "note": f"{name} بلغ حدّ استعماله ولا يجيب الآن (يتجدد لاحقًا)؛ اختر وكيلًا آخر"}
+                return
             if st == "waiting":
                 BROADCAST_STATE[target_id] = {"state": "skipped", "note": f"{name} يعرض سؤالًا ينتظر ردّك؛ ردّ عليه ثم أعد الإرسال"}
                 return
             if st != "idle":
                 BROADCAST_STATE[target_id] = {"state": "skipped", "note": f"{name} لم يجهز بعد ({st}); أعد الإرسال بعد قليل"}
                 return
-            _type_message(target_id, text)
+            for attempt in range(3):          # فشل أمر tmux عابر (انشغال الجهاز بتشغيل عدة وكلاء معًا) لا يُسقط الإرسال من أول مرة
+                try:
+                    _type_message(target_id, text)
+                    break
+                except ValueError:
+                    if attempt == 2:
+                        raise
+                    time.sleep(1.5)
+                    start(target_id)
             BROADCAST_STATE[target_id] = {"state": "sent", "note": f"وصلت إلى {name}"}
         except Exception as exc:
             BROADCAST_STATE[target_id] = {"state": "error", "note": f"{name}: {str(exc)[:120]}"}
@@ -1162,12 +1177,15 @@ def _wait_idle(i, timeout=45):
         if st == "shell" and time.time() - t0 > 8:
             return "shell"
         tail = _tail(i)
+        if LIMIT_RE.search(tail):
+            return "limit"
         if WAIT_RE.search(tail):
             return "waiting"
         cur = norm(tail)
         same = same + 1 if cur and cur == prev else 0
         prev = cur
-        if st == "idle" or same >= 3:
+        # طرفية الـshell الفارغة قبل أن يبدأ الوكيل تبدو «ثابتة» فتُحسب جاهزة، فتضيع الرسالة قبل أن تظهر واجهة الوكيل
+        if st == "idle" or (same >= 3 and st != "shell"):
             return "idle"
         time.sleep(0.7)
     return "idle" if prev else st

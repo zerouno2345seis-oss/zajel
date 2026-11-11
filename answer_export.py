@@ -332,7 +332,7 @@ def citations(answer):
     """يفصل التوثيق عن المتن: حواشي Markdown ‎[^1]، والأرقام ‎[1] مع قائمة «المصادر» في آخر الجواب، والروابط ‎[نص](رابط).
     يعيد المتن وفيه علامات الحواشي، وقائمة نصوص الحواشي بالترتيب."""
     lines = (answer or "").splitlines()
-    defs, srcs, body, in_src = {}, {}, [], False
+    defs, srcs, body, in_src, last = {}, {}, [], False, None
     for ln in lines:
         m = FN_DEF.match(ln)
         if m:
@@ -344,12 +344,16 @@ def citations(answer):
         if in_src:
             m = SRC_ITEM.match(ln)
             if m:
-                srcs[m.group(1) or m.group(2)] = m.group(3).strip()
+                last = m.group(1) or m.group(2)
+                srcs[last] = m.group(3).strip()
                 continue
             if not ln.strip():
                 continue
             if re.match(r"^\s*#", ln):
                 in_src = False
+            elif last:
+                srcs[last] += " " + ln.strip()       # سطر مصدر انكسر في الطرفية: يُضمّ إلى مصدره لا يصير مصدرًا جديدًا فتتزحزح الأرقام
+                continue
             else:
                 srcs[str(len(srcs) + 1)] = ln.strip().lstrip("-*• ").strip()
                 continue
@@ -419,20 +423,25 @@ def _latin(s):
 
 
 def _inline(par, text, size=14, base_bold=False):
-    """**عريض** و`كود` داخل السطر، وعلامات الحواشي."""
+    """**عريض** و`كود` داخل السطر، وعلامات الحواشي (وقد تقع علامة حاشية داخل عريض أو كود: تُفصل ولا تدخل في نص الجزء)."""
+    def emit(chunk, **kw):
+        for sub in re.split(r"(\u0000\d+\u0000)", chunk):
+            if not sub:
+                continue
+            if sub.startswith(SENT):
+                if _FN is not None and _NOTES is not None:
+                    _add_footnote(par, _NOTES[int(sub.strip(SENT))])
+            else:
+                _font(par.add_run(sub), **kw)
     for part in re.split(r"(\*\*[^*]+\*\*|`[^`]+`|\u0000\d+\u0000)", text):
         if not part:
             continue
-        if part.startswith(SENT):
-            if _FN is not None and _NOTES is not None:
-                _add_footnote(par, _NOTES[int(part.strip(SENT))])
-            continue
-        if part.startswith("**") and part.endswith("**"):
-            _font(par.add_run(part[2:-2]), size=size, bold=True)
-        elif part.startswith("`") and part.endswith("`"):
-            _font(par.add_run(part[1:-1]), name="Menlo", size=size - 3)
+        if part.startswith("**") and part.endswith("**") and len(part) > 4:
+            emit(part[2:-2], size=size, bold=True)
+        elif part.startswith("`") and part.endswith("`") and len(part) > 2:
+            emit(part[1:-1], name="Menlo", size=size - 3)
         else:
-            _font(par.add_run(part), size=size, bold=base_bold or None)
+            emit(part, size=size, bold=base_bold or None)
 
 
 def _para(doc, text, style=None, size=14, bold=False, ltr=False, color=None, center=False):
