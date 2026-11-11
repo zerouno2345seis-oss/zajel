@@ -76,6 +76,14 @@ class Failover(unittest.TestCase):
         self.assertFalse(any("لا ينبغي" in t for t in sent))
 
 
+class MdPlainFootnoteTest(unittest.TestCase):
+    def test_footnotes_collected(self):
+        out = TL._md_plain("نص[^1].\n\n[^1]: ابن فارس ج1")
+        self.assertIn("نص[1].", out)
+        self.assertIn("▪️ الحواشي\n[1] ابن فارس ج1", out)
+        self.assertNotIn("[^", out)
+
+
 if __name__ == "__main__":
     unittest.main()
 

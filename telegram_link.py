@@ -954,9 +954,13 @@ def _round_status_view(status):
 
 def _md_plain(md):
     """Markdown ← نص مرتب لتيليجرام: العناوين بعلامة، وصفوف الجداول أسطرًا بنقاط، بلا ** ولا خطوط |---|."""
-    out = []
+    out, notes = [], []
     for ln in str(md or "").splitlines():
         t = ln.strip()
+        fd = re.match(r"^\[\^([^\]]+)\]:\s*(.+)$", t)
+        if fd:                                                  # تعريف حاشية ‎[^1]: نص ← يُجمع في قسم الحواشي آخر الرسالة
+            notes.append(f"[{fd.group(1)}] {fd.group(2).strip()}")
+            continue
         if re.match(r"^\|?\s*:?-{2,}", t):
             continue                                            # سطر فاصل الجدول
         h = re.match(r"^#{1,6}\s+(.*)", t)
@@ -967,7 +971,10 @@ def _md_plain(md):
             out.append("• " + " — ".join(c.strip() for c in t.strip("|").split("|") if c.strip()))
             continue
         out.append(re.sub(r"^[-*]\s+", "• ", ln))
+    if notes:
+        out += ["", "▪️ الحواشي"] + notes
     txt = re.sub(r"\*\*([^*]+)\*\*", r"\1", "\n".join(out))
+    txt = re.sub(r"\[\^([^\]]+)\]", r"[\1]", txt)           # علامة الحاشية في المتن ‎[^1] ← ‎[1]
     return re.sub(r"\n{3,}", "\n\n", txt).strip()
 
 
