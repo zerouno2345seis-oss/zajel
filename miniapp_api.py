@@ -246,7 +246,8 @@ def _round(name, a):
                 "judge": judge.get_default_judge()}
     if name == "start":
         ans = [x for x in (a.get("answerers") or []) if x != judge.PERPLEXITY]       # نافذة Perplexity على الماك لا يقرؤها الهاتف
-        return _round_view(judge.start_round(str(a.get("question") or ""), ans, str(a.get("judge") or ""), bool(a.get("auto_judge")), bool(a.get("deep"))))
+        return _round_view(judge.start_round(str(a.get("question") or ""), ans, str(a.get("judge") or ""), bool(a.get("auto_judge")), bool(a.get("deep")),
+                                             judge_may_answer=a.get("judge_may_answer") is True, length=a.get("length") or ""))
     if name == "last":
         return {"round": _round_view(judge.last_round())}
     if name == "status":

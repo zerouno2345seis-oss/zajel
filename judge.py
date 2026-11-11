@@ -3,6 +3,7 @@
 - لا منطق طرفية هنا: كل شيء عبر terminal (broadcast / last_answer / state_of) حتى يُستبدل في الاختبارات بـ T وهمي.
 - أجوبة الوكلاء تُعطى للمحكِّم في ملف (answers.md) لا لصقًا في الطرفية."""
 import json
+import html
 import random
 import re
 import threading
@@ -23,10 +24,10 @@ SEND_WAIT = 90         # أقصى انتظار لوصول الرسالة إلى 
 MAX_TERM = 9           # حد terminal.broadcast (MAX_BROADCAST)
 PERPLEXITY = "perplexity"
 FINAL = ("done", "timeout", "error")
-LETTERS = ["أ", "ب", "ج", "د", "هـ", "و"]
+LETTERS = ["أ", "ب", "ج", "د", "هـ", "و", "ز", "ح", "ط"]
 
 CITE_NOTE = ("\n\n(وثّق كل معلومة بمصدرها: ضع بعدها رقمًا بين معقوفين مثل [1]، واختم الجواب بقسم «المصادر» فيه كل رقم ومصدره كاملًا: "
-             "المؤلف، الكتاب، الجزء والصفحة أو الرابط.)")
+             "المؤلف، الكتاب، الجزء والصفحة، والرابط إن وجد، والنص المنقول حرفيًا بين «».)")
 DEEP_NOTE = ("\n\n[بحث متعمق] قسّم السؤال إلى أسئلة فرعية وأجب عن كل واحد. ابحث في الإنترنت وفي المكتبة الشاملة معًا، واعتمد ما لا يقل عن ٨ مصادر مختلفة. "
              "افتح المصادر الأصلية واقرأها بنفسك ولا تكتفِ بالملخصات، وتحقق من كل نص تنقله قبل أن تكتبه. اذكر مواضع الخلاف بين المصادر والأقوال صراحة. "
              "لا تتعجل؛ لك وقت طويل.")
@@ -146,7 +147,7 @@ def set_default_judge(agent_id):
 
 
 # ---------- بدء جولة ----------
-def start_round(question, answerers, judge="", auto_judge=False, deep=False, timeout_min=None, deep_agents=None):
+def start_round(question, answerers, judge="", auto_judge=False, deep=False, timeout_min=None, deep_agents=None, judge_may_answer=False, length=""):
     """deep=True: كل المجيبين يبحثون بحثًا متعمقًا؛ deep_agents: من يبحث منهم فقط (مثل Perplexity وحده)."""
     question = str(question or "").strip()
     if not question:
@@ -170,24 +171,35 @@ def start_round(question, answerers, judge="", auto_judge=False, deep=False, tim
         raise ValueError("محكِّم غير معروف.")
     if not judge:
         judge = "claude" if "claude" in by_id else (terms[0] if terms else "")
+    if length not in ("", "موجز", "متوسط", "مفصّل"):
+        raise ValueError("حجم الجواب غير معروف.")
+    if judge and not judge_may_answer:
+        ans = [a for a in ans if a != judge]
+    if not ans:
+        raise ValueError("اختر مجيبًا آخر أو اسمح للمحكّم بالإجابة.")
+    terms = [a for a in ans if a != PERPLEXITY]
     deep_set = set(ans) if deep else {str(a) for a in (deep_agents or []) if str(a) in ans}
     tmo = int(timeout_min) if timeout_min else (DEEP_TIMEOUT_MIN if deep_set else TIMEOUT_MIN)
     rid = "r_%s_%04x" % (time.strftime("%Y%m%d_%H%M%S"), random.randint(0, 0xFFFF))
-    r = {"round_id": rid, "question": question, "deep": bool(deep_set), "deep_agents": sorted(deep_set), "auto_judge": bool(auto_judge), "judge": judge,
+    r = {"round_id": rid, "question": question, "length": length, "deep": bool(deep_set), "deep_agents": sorted(deep_set), "auto_judge": bool(auto_judge), "judge": judge,
          "judge_also_answers": bool(judge and judge in ans), "created": time.time(), "timeout_min": tmo,
          "agents": {a: {"name": _name(a), "state": "waiting", "selected": True, "answer": "", "note": "", "deep": a in deep_set} for a in ans},
          "judge_state": "idle", "verdict": "", "deep_state": "idle", "deep_answer": "", "deep_agent": "", "judge_note": "", "deep_note": ""}
     if terms:
         plain, deeper = [a for a in terms if a not in deep_set], [a for a in terms if a in deep_set]
         if plain:
-            _t().broadcast(plain, question + CITE_NOTE)
+            _t().broadcast(plain, question + _length_note(length) + CITE_NOTE)
         if deeper:
-            _t().broadcast(deeper, question + CITE_NOTE + DEEP_NOTE)
+            _t().broadcast(deeper, question + _length_note(length) + CITE_NOTE + DEEP_NOTE)
     with _LOCK:
         ROUNDS[rid] = r
         _save(r)
     threading.Thread(target=_watch, args=(rid,), daemon=True).start()
     return round_status(rid)
+
+
+def _length_note(length):
+    return f"\n\n(حجم الجواب المطلوب: {length}.)" if length else ""
 
 
 def reask(round_id, agent_id, deep=False):
@@ -210,7 +222,7 @@ def reask(round_id, agent_id, deep=False):
         watching = rid_watching(round_id)
         _save(r)
     getattr(_t(), "BROADCAST_STATE", {}).pop(agent_id, None)
-    _t().broadcast([agent_id], r["question"] + CITE_NOTE + (DEEP_NOTE if ag.get("deep") else "")
+    _t().broadcast([agent_id], r["question"] + _length_note(r.get("length", "")) + CITE_NOTE + (DEEP_NOTE if ag.get("deep") else "")
                    + ("\n\n(أعد الجواب أعمق وأوثق مما كتبته في المرة السابقة.)" if deep else "") + "\n" + ag["mark"])
     if not watching:
         threading.Thread(target=_watch, args=(round_id,), daemon=True).start()
@@ -223,7 +235,7 @@ def rid_watching(rid):
 
 def web_answer(round_id, question, answer):
     """جواب Perplexity (نافذة ويب) تقدّمه الواجهة."""
-    answer = str(answer or "").strip()
+    answer = _strip_notes(html.unescape(str(answer or "")))      # الويب يعيد الاقتباس &gt; مرمّزًا؛ الطرفية لا تُفكّ لئلا يفسد شرح الأكواد
     if not answer:
         raise ValueError("لا جواب لحفظه.")
     with _LOCK:
@@ -250,11 +262,15 @@ def set_selected(round_id, agent_id, selected):
 def _strip_notes(t):
     """بعض الوكلاء (Hermes من شاشته) يعيدون تعليمات التوثيق أو التعميق الملحقة بالسؤال في أول الجواب: تُحذف."""
     t = str(t or "").strip()
+    t = re.sub(r"(?im)^[ \t]*[○●◦▸▹]?[ \t]*\(?Thought for\s+\d[^\n]*(?:\n|$)", "", t).strip()
     for note in (CITE_NOTE, DEEP_NOTE):
         head = _norm(note)[:25]
         if head and _norm(t[:400]).startswith(head):
             end = t.find(")") if note is CITE_NOTE else t.find("\n\n")
             t = t[end + 1:].strip() if 0 <= end < 1500 else t
+    parts = re.split(r"\n\s*\n", t, maxsplit=1)
+    if len(parts) == 2 and len(parts[0]) <= 180 and re.match(r"^(?:سأ(?:ذكر|تحقق|بحث|جيب|عرض|وضح|قدم|ستعرض)|سوف\s+(?:أذكر|أتحقق|أبحث|أجيب)|Let me\s+(?:check|look|find|answer|verify))\b", parts[0], re.I) and not re.search(r"[«»\[\]\d٠-٩:]|\b(?:أن|هو|هي|حكمه|واجب|حرام)\b", parts[0]):
+        t = parts[1].strip()
     return _unfence(t)
 
 
@@ -391,7 +407,7 @@ def build_answers_file(r, only=None):
     items = [(a, ag) for a, ag in r["agents"].items() if ag["selected"] and ag["answer"].strip() and (only is None or a in only)]
     key = {}
     out = ["# أجوبة الوكلاء عن السؤال", "", "## السؤال", r["question"], ""]
-    if r["judge_also_answers"]:
+    if r.get("judge_also_answers"):
         random.shuffle(items)
         names = [ag["name"] for _, ag in items] + [a for a, _ in items]
         for n, (a, ag) in enumerate(items):
@@ -402,6 +418,20 @@ def build_answers_file(r, only=None):
         for a, ag in items:
             key[ag["name"]] = a
             out += [f"## جواب {ag['name']}", ag["answer"].strip(), ""]
+    import citation_check
+    refs = []
+    for index, (label, aid) in enumerate(key.items()):
+        answer = next(ag["answer"] for a, ag in items if a == aid)
+        if r.get("judge_also_answers"):
+            answer = anonymize(answer, [ag["name"] for _, ag in items] + [a for a, _ in items])
+        refs.extend(dict(ref, answer_label=label) for ref in citation_check.extract_citations(answer, f"ج{index + 1}-"))
+    refs = citation_check.check_citations(refs)
+    r["citation_ids"] = [ref["id"] for ref in refs]
+    out += ["## فهرس الإحالات والتحقق الآلي", ""]
+    for ref in refs:
+        out.append(f"- {ref['id']} | {ref['status']} | {ref['reason']} | {ref['source']} | الجواب: {ref['answer_label']}")
+    if not refs:
+        out.append("لم تُستخرج إحالات قابلة للفهرسة.")
     d = _dir() / r["round_id"]
     d.mkdir(parents=True, exist_ok=True)
     p = d / "answers.md"
@@ -412,14 +442,14 @@ def build_answers_file(r, only=None):
 OUTPUT_ORDER = ("اكتب تقريرك بهذا الترتيب بالضبط، وبعناوين ## بهذه الأسماء حرفيًا:\n"
                 "١. ## الخلاصة الموحدة — فقرة أو فقرتان متماسكتان تعتمدان على المصادر الموسومة ✅ وحدها.\n"
                 "٢. ## جدول الاتفاق والاختلاف — أعمدته: المسألة | ما اتفقت عليه الأجوبة | مواضع الاختلاف.\n"
-                "٣. ## تقييم كل جواب — لكل جواب ثلاثة معايير: الدقة، التوثيق، الشمول؛ لكل معيار درجة من ١٠ وسبب بجملة واحدة، ثم الدرجة الكلية.\n"
+                "٣. ## تقييم كل جواب — لكل جواب اكتب الدقة: ٨ من ١٠، والتوثيق: ٨ من ١٠، والشمول: ٨ من ١٠ مع سبب لكل معيار، ثم الدرجة الكلية من ٣٠.\n"
                 "٤. ## جدول التحقق من الإحالات — أعمدته: الجواب | الإحالة | الحالة | ملاحظة. الحالات: ✅ موثّق (وجدت النص في المصدر) · ⚠️ فيه خلل (المصدر موجود لكن النص أو الصفحة أو العزو مختلف) · ❌ غير موجود · ❓ تعذّر التحقق.\n"
                 "٥. ## تنبيهات — أخطاء وتناقضات وملاحظات منهجية.\n"
                 "٦. ## ما يحتاج تحقق المستخدم — ما لم تستطع حسمه بنفسك.\n")
 
 STYLE_RULES = ("قواعد الكتابة (إلزامية):\n"
                "- المتن نظيف: جمل الحكم والخلاصة وحدها. لا أقواس توضيحية ولا استدراكات ولا أسماء كتب ولا أرقام صفحات داخل المتن، ولا عبارات من نوع «ويُلاحظ أن» أو «علمًا بأن».\n"
-               "- كل ما يحتاج القارئ إلى توضيحه (استدراك، سبب ترجيح، تنبيه إلى خلاف، شرح مصطلح، حالة التحقق من مصدر، المصدر نفسه) يُكتب في حاشية لا في المتن.\n"
+               "- اكتب التنبيهات وما يحتاج تحقق المستخدم بجمل كاملة في المتن، ولا تُخفِ مضمون القسمين في الحواشي. الحواشي للمصادر والتوضيح فقط.\n"
                "- الحواشي بصيغة Markdown: ضع بعد الكلمة مباشرة علامة مثل [^1] (بلا أقواس حولها)، وأرقامها متسلسلة تبدأ من 1 بترتيب ظهورها في التقرير، بلا تكرار ولا قفز، والعلامة نفسها لا تُستعمل لحاشيتين. "
                "وفي آخر التقرير اكتب تعريف كل حاشية في سطر واحد كامل لا ينكسر: [^1]: المؤلف، الكتاب، الجزء والصفحة (أو الرابط) — ثم توضيحك إن لزم. لا تكتب قسمًا اسمه «المصادر».\n"
                "- الجداول جداول Markdown حقيقية: سطر العناوين ثم سطر الفاصل |---|---|، ثم صف لكل سطر. كل خلية عبارة قصيرة (نحو ١٥ كلمة على الأكثر) بلا قوائم ولا أسطر داخلها، ولا علامات حواشٍ داخل الجداول (ضع المصدر في عمود الملاحظة مختصرًا).\n"
@@ -427,6 +457,7 @@ STYLE_RULES = ("قواعد الكتابة (إلزامية):\n"
 
 
 VERIFY_PROTO = ("بروتوكول التحقق (إلزامي):\n"
+                "- استخدم كل معرّف في فهرس الإحالات حرفيًا مرة واحدة في جدول التحقق، ولا تضف معرّفات أو تكررها. ابحث بنفسك فقط عما بقي ❓ ولا تغير ✅ أو ❌ الآلية إلا بدليل واضح.\n"
                 "- افتح بنفسك كل مصدر استشهد به أي جواب. للكتب الشرعية استعمل أدوات المكتبة الشاملة إن وُجدت عندك (مثل shamela_verify_quote وshamela_get_page) وإلا فافتح الرابط على الويب.\n"
                 "- لا تضف أي مصدر من عندك ولا تستشهد بما لم يرد في الأجوبة؛ ما لم تفتحه فلا تدّعِ أنك تحققت منه (علّمه ❓).\n"
                 "- الخلاصة الموحدة لا تعتمد إلا على المصادر ✅، وما عداها يُذكر بعلامته ولا يُبنى عليه حكم.\n")
@@ -439,6 +470,8 @@ def judge_prompt(r, answers_path, vpath=None):
                  "ولا بد من درجة لكل معيار مع سبب مكتوب لكل جواب بلا استثناء. اذكر في التقرير: «المحكِّم شارك بالجواب (رمزه)» إن عرفته.")
     p.append(OUTPUT_ORDER)
     p.append(STYLE_RULES)
+    if r.get("length"):
+        p.append(f"حجم الجواب المطلوب: {r['length']}؛ قيّم الشمول على أساسه.")
     p.append("حدّد حكمك بما تحققت منه فقط: التزام الجواب بصيغة السؤال (كالإيجاز المطلوب) يُحسب له أو عليه، ولا تُدخل في الخلاصة ما لم يثبت ✅.")
     if vpath:
         p.append(f"التسليم: اكتب تقريرك النهائي كاملًا بصيغة Markdown في الملف {vpath} (أنشئه أو استبدل ما فيه)، ثم اكتب في المحادثة سطرًا واحدًا فقط: «تم حفظ التقرير». لا تلصق التقرير في المحادثة.")
@@ -459,6 +492,29 @@ def _after_send(aid, wait=SEND_WAIT):
     return False, "لم تصل الرسالة إلى الوكيل في الوقت المناسب"
 
 
+def _approve_report_write(T_, aid, out_file):
+    """بعض المحكِّمين (Antigravity) يطلبون إذنًا لإنشاء ملف التقرير لأنه خارج مجلدهم المسموح فيتوقف التحكيم: نوافق على هذا الإذن وحده،
+    أي سؤالٌ يذكر مسار ملف تقرير الجولة نفسه وعبارة إنشاء/كتابة، وأي سؤال آخر يبقى للمستخدم."""
+    try:
+        tail = T_._tail(aid, 14)
+    except Exception:
+        return False
+    full = str(out_file)
+    # شاشة Antigravity تقطع المسار الطويل (يظهر منه رأسه فقط): يكفي أن يكون سطر المسار الظاهر بداية مسار ملف التقرير وطوله معقول
+    shown = [ln.strip() for ln in tail.splitlines() if ln.strip().startswith("/") and len(ln.strip()) >= 25]
+    if full not in tail and not any(full.startswith(x) for x in shown):
+        return False
+    if not re.search(r"(allow (creation|this|once)|yes, allow|allow .{0,20}(file|write|edit))", tail, re.I):
+        return False
+    if re.search(r"(delete|remove|rm |sudo|network|install|execute|run command)", tail, re.I):
+        return False
+    try:
+        T_.send(aid, "", keys=["Enter"])
+        return True
+    except Exception:
+        return False
+
+
 def _ask_agent(aid, prompt, marker, set_state, wait=JUDGE_WAIT, out_file=None):
     """يرسل prompt إلى وكيل ويقرأ جوابه (السؤال المحتوي marker). set_state(state, text, note). يعيد (state, text)."""
     T_ = _t()
@@ -473,7 +529,7 @@ def _ask_agent(aid, prompt, marker, set_state, wait=JUDGE_WAIT, out_file=None):
         set_state("error", "", note)
         return "error", ""
     text, prev, stable, t0 = "", None, 0, time.time()
-    fprev, fstable = None, 0
+    fprev, fstable, approvals = None, 0, 0
     while time.time() - t0 < wait:
         time.sleep(POLL)
         if out_file:      # التقرير المكتوب في ملف Markdown حقيقي أنظف من نص الشاشة (جداول سليمة، سطور غير مكسورة، بلا ضجيج الواجهة)
@@ -494,6 +550,9 @@ def _ask_agent(aid, prompt, marker, set_state, wait=JUDGE_WAIT, out_file=None):
             continue
         cur = str(res.get("answer") or "").strip() if marker in str(res.get("question") or "") else ""
         if st == "waiting":
+            if out_file and approvals < 3 and _approve_report_write(T_, aid, out_file):
+                approvals += 1
+                continue
             set_state("needs_input", fprev or cur, "ينتظر ردّك في الطرفية")
             stable = 0
             continue
@@ -549,7 +608,8 @@ def _judge_thread(rid, deep_verify):
             st("error", "", "لا جواب مكتمل بعد يُحكَّم فيه")
             return
         late = [ag["name"] for a, ag in r["agents"].items() if ag["selected"] and a not in ready]
-        path, key = build_answers_file(r, only=ready)
+    path, key = build_answers_file(r, only=ready)       # يجلب مصادر الإحالات من الشبكة: خارج القفل العام كي لا يتجمد استطلاع الواجهة
+    with _LOCK:
         vpath = path.parent / "verdict.md"
         try:
             vpath.unlink()
@@ -581,6 +641,17 @@ def _judge_thread(rid, deep_verify):
 
 def _finish_verdict(r, text, late, key, judge):
     """ملحقات الحكم المشتركة بين المحكِّمين: من لم يدخل التحكيم، ومفتاح الرموز إن شارك المحكِّم بالجواب."""
+    text = _correct_scores(text)
+    ids = r.get("citation_ids", [])
+    if ids:
+        section = re.search(r"(?ms)^#{1,6}\s*جدول التحقق من الإحالات[^\n]*\n(.*?)(?=^#{1,6}\s|\Z)", text)
+        table = section.group(1) if section else ""
+        counts = {i: len(re.findall(r"(?<![\w-])" + re.escape(i) + r"(?![\w-])", table)) for i in ids}
+        bad = [i for i, n in counts.items() if n != 1]
+        extra = sorted(set(re.findall(r"(?<![\w-])ج\d+-[٠-٩]+(?![\w-])", table)) - set(ids))
+        if bad or extra:
+            detail = [f"{i} ({counts[i]})" for i in bad] + [f"{i} (غير موجود في الفهرس)" for i in extra]
+            text = text.rstrip() + "\n\n⚠️ فهرس الإحالات غير مكتمل أو فيه تكرار أو معرّفات زائدة: " + "، ".join(detail) + "."
     if late:
         text = text.rstrip() + "\n\n---\nلم تدخل هذا التحكيم لأنها لم تكتمل عند بدئه: " + "، ".join(late) + "."
     if r["judge_also_answers"]:
@@ -588,8 +659,24 @@ def _finish_verdict(r, text, late, key, judge):
         text = text.rstrip() + "\n\n---\n"
         if mine and f"المحكِّم شارك بالجواب ({mine})" not in text:
             text += f"المحكِّم شارك بالجواب ({mine}).\n"
+        text += "⚠️ تحيّز محتمل: شارك المحكّم بالإجابة؛ فُحصت الإحالات المستخرجة من جوابه آليًا مع بقية الأجوبة.\n"
         text += "مفتاح الرموز: " + "، ".join(f"{L} = {_name(a)}" for L, a in sorted(key.items())) + "\n"
     return text
+
+
+def _correct_scores(text):
+    """تصحيح المجموع عند وجود المعايير الثلاثة بوضوح داخل تقييم جواب واحد."""
+    digits = str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")
+    gap = r"[^#]{0,600}?"          # لا يعبر عنوانًا (###) فلا يمتد من جواب إلى آخر
+    pattern = re.compile(r"(?s)(الدقة\s*[:：]\s*([0-9٠-٩]+)\s*(?:من|/)\s*(?:10|١٠))" + gap + r"(التوثيق\s*[:：]\s*([0-9٠-٩]+)\s*(?:من|/)\s*(?:10|١٠))" + gap +
+                         r"(الشمول\s*[:：]\s*([0-9٠-٩]+)\s*(?:من|/)\s*(?:10|١٠))" + gap + r"(الدرجة الكلية\s*[:：]\s*)([0-9٠-٩]+)")
+    def fix(m):
+        values = [int(m.group(2).translate(digits)), int(m.group(4).translate(digits)), int(m.group(6).translate(digits))]
+        if any(n > 10 for n in values):
+            return m.group()
+        result = str(sum(values)).translate(str.maketrans("0123456789", "٠١٢٣٤٥٦٧٨٩"))
+        return m.group()[:m.start(8)-m.start()] + result
+    return pattern.sub(fix, text)
 
 
 # ---------- Perplexity محكِّمًا ----------
@@ -655,11 +742,13 @@ def _web_split(text, size=WEB_CHUNK):
 
 
 def web_judge_prompt(r, deep_verify=True):
-    p = [f"⟦حكم:{r['round_id']}⟧ أنت محكِّم محايد بين أجوبة عدة وكلاء عن سؤال واحد (المادة: السؤال ثم الأجوبة).", WEB_VERIFY]
+    p = [f"⟦حكم:{r['round_id']}⟧ أنت محكِّم محايد بين أجوبة عدة وكلاء عن سؤال واحد (المادة: السؤال ثم الأجوبة).", WEB_VERIFY, VERIFY_PROTO]
     if r["judge_also_answers"]:
         p.append("تنبيه: الأسماء مخفية والأجوبة مرتبة عشوائيًا بالرموز أ ب ج؛ لا بد من درجة لكل معيار مع سبب مكتوب لكل جواب بلا استثناء.")
     p += [OUTPUT_ORDER, STYLE_RULES,
           "حدّد حكمك بما تحققت منه فقط: التزام الجواب بصيغة السؤال (كالإيجاز المطلوب) يُحسب له أو عليه، ولا تُدخل في الخلاصة ما لم يثبت ✅."]
+    if r.get("length"):
+        p.append(f"حجم الجواب المطلوب: {r['length']}؛ قيّم الشمول على أساسه.")
     if not deep_verify:
         p.append("التحقق السريع مقبول هذه المرة: تحقق من الاستشهادات الجوهرية وعلّم الباقي ❓.")
     p.append(f"التسليم: اكتب في أول سطر من جوابك {WEB_BEGIN} وحده، ثم التقرير كاملًا داخل كتلة كود واحدة تبدأ بسطر ```markdown وتنتهي بسطر ``` "

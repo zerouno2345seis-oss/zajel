@@ -38,6 +38,7 @@ class JudgeTest(unittest.TestCase):
         self.t = FakeT()
         judge.T, judge.DATA, judge.POLL = self.t, self.tmp, 0.01
         judge.ROUNDS.clear()
+        judge.set_default_judge("agy")
 
     def tearDown(self):
         judge.ROUNDS.clear()          # خيوط المراقبة تخرج حين تختفي جولتها، فلا تكتب في مجلد الاختبار التالي
@@ -94,7 +95,7 @@ class JudgeTest(unittest.TestCase):
         self.assertIn("سؤالًا", s["agents"]["codex"]["note"])
 
     def test_anonymize_and_judge_also_answers(self):
-        r = judge.start_round("س", ["claude", "codex"], judge="claude")
+        r = judge.start_round("س", ["claude", "codex"], judge="claude", judge_may_answer=True)
         self.assertTrue(r["judge_also_answers"])
         rid = r["round_id"]
         with judge._LOCK:
@@ -108,6 +109,31 @@ class JudgeTest(unittest.TestCase):
             self.assertNotIn(bad, txt)
         self.assertIn("الجواب (أ)", txt)
         self.assertIn("درجة لكل معيار", judge.judge_prompt(rr, p))
+
+    def test_judge_policy_length_and_cleaning(self):
+        r = judge.start_round("س", ["claude", "codex"], judge="claude", length="موجز")
+        self.assertEqual(list(r["agents"]), ["codex"])
+        self.assertIn("موجز", self.t.sent[-1][1])
+        with self.assertRaises(ValueError):
+            judge.start_round("س", ["claude"], judge="claude")
+        with self.assertRaises(ValueError):
+            judge.start_round("س", ["codex"], length="كبير")
+        self.assertEqual(judge._strip_notes("سأذكر مثالًا وأتحقق من المصدر.\n\nالحديث الموقوف هو قول الصحابي.\n○ Thought for 26.1s\n&gt; نص"), "الحديث الموقوف هو قول الصحابي.\n&gt; نص")
+        self.assertEqual(judge._strip_notes("استعمل &amp;lt; في الكود"), "استعمل &amp;lt; في الكود")
+        self.assertEqual(judge._strip_notes("سأذكر أن الحكم واجب.\n\nالدليل هنا."), "سأذكر أن الحكم واجب.\n\nالدليل هنا.")
+
+    def test_citation_index_and_score_validation(self):
+        from unittest.mock import patch
+        r = judge.start_round("س", ["codex"], judge="agy")
+        rr = judge.ROUNDS[r["round_id"]]
+        rr["agents"]["codex"]["answer"] = 'نص «هذه عبارة طويلة للاختبار في المصدر» [1]\n\nالمصادر\n[1] مؤلف، كتاب، ص ١، https://example.org/page'
+        with patch('citation_check.fetch_source', return_value='هذه عبارة طويلة للاختبار في المصدر'):
+            path, key = judge.build_answers_file(rr)
+        self.assertIn('ج1-١ | ✅', path.read_text())
+        verdict = '## تقييم كل جواب\nالدقة: ٨ من ١٠\nالتوثيق: ٧ من ١٠\nالشمول: ٦ من ١٠\nالدرجة الكلية: ١٠\n## جدول التحقق من الإحالات\n| ج1-١ | ✅ |\n| ج1-١ | ✅ |'
+        result = judge._finish_verdict(rr, verdict, [], key, 'agy')
+        self.assertIn('الدرجة الكلية: ٢١', result)
+        self.assertIn('تكرار', result)
 
     def test_select_and_default_judge(self):
         r = judge.start_round("س", ["claude", "codex"])
@@ -313,6 +339,21 @@ class JudgeTest(unittest.TestCase):
         self.assertEqual(judge.web_verdict(rid, "## الخلاصة الموحدة\nحكم", stable=5)["action"], "wait")
         a = judge.web_verdict(rid, "## الخلاصة الموحدة\nحكم", stable=judge.WEB_STALL)
         self.assertEqual(a["action"], "done")
+
+    def test_approves_only_report_file_prompt(self):
+        import judge
+        t = self.t
+        t.sent_keys = []
+        t.send = lambda i, text="", keys=None, paste=False: t.sent_keys.append(keys)
+        t._tail = lambda i, n=6: "Create file\n/data/rounds/r1/verdict.md\nAllow creation of this file?\n> 1. Yes, allow creation"
+        self.assertTrue(judge._approve_report_write(t, "agy", "/data/rounds/r1/verdict.md"))
+        self.assertEqual(t.sent_keys, [["Enter"]])
+        t._tail = lambda i, n=6: "Create file\n/Users/mohamad/Library/Applicatio\nAllow creation of this file?\n> 1. Yes, allow creation"
+        self.assertTrue(judge._approve_report_write(t, "agy", "/Users/mohamad/Library/Application Support/Phone Backup/rounds/r1/verdict.md"))      # مسار مقطوع في الشاشة
+        t._tail = lambda i, n=6: "Create file\n/etc/passwd\nAllow creation of this file?\n> 1. Yes, allow creation"
+        self.assertFalse(judge._approve_report_write(t, "agy", "/data/rounds/r1/verdict.md"))
+        t._tail = lambda i, n=6: "/data/rounds/r1/verdict.md\nAllow this command: rm -rf ~ ?\n> 1. Yes, allow once"
+        self.assertFalse(judge._approve_report_write(t, "agy", "/data/rounds/r1/verdict.md"))
 
 
 if __name__ == "__main__":

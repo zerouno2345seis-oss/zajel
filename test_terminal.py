@@ -49,6 +49,11 @@ class Term(unittest.TestCase):
 
 
 class BroadcastTests(unittest.TestCase):
+    def test_stopped_session_is_not_considered_ready(self):
+        with mock.patch.object(T, "state_of", return_value=("stopped", "متوقف", 0)), \
+             mock.patch.object(T, "time", types.SimpleNamespace(sleep=lambda s: None, time=mock.Mock(side_effect=[i * 1.5 for i in range(200)]))):
+            self.assertEqual(T._wait_idle("opencode"), "stopped")      # الاستبدال محصور في وحدة الطرفية فلا يمسّ خيوط الخلفية
+
     def test_broadcast_validation_and_trim(self):
         started, readied, typed = [], [], []
         with mock.patch.object(T, "start", lambda i: started.append(i) or {"ok": True, "started": True}), \
@@ -237,6 +242,19 @@ class StickyModelTests(unittest.TestCase):
                 self.assertEqual(T._sticky_cmd("claude", "claude"), "claude")
             with mock.patch.object(Path, "home", lambda: Path(d) / "none"):
                 self.assertEqual(T._sticky_cmd("opencode", "opencode"), "opencode")
+
+
+class KillTreeTests(unittest.TestCase):
+    def test_kills_process_that_ignores_sigterm(self):
+        import subprocess, sys
+        pr = subprocess.Popen([sys.executable, "-c", "import signal,time;signal.signal(signal.SIGTERM,signal.SIG_IGN);time.sleep(60)"])
+        try:
+            with mock.patch.object(T, "_t", return_value=types.SimpleNamespace(returncode=0, stdout=str(pr.pid) + "\n")):
+                T._kill_tree("opencode")
+            self.assertIsNotNone(pr.wait(timeout=5))
+        finally:
+            if pr.poll() is None:
+                pr.kill()
 
 
 if __name__ == "__main__":

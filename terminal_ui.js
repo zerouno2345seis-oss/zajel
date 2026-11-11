@@ -3,6 +3,7 @@
   if (window.ZajelTerminalUI) return;
   let root = null, listTimer = null, screenTimer = null, resizeObserver = null, broadcastPanel = null, broadcastBackdrop = null;
   let round = null, roundTimer = null, roundBusy = false, webLast = '', webSame = 0, webPosted = '';
+  let lastSelectedAgent = '', roundViewVersion = 0;
   let activeSlot = 0, agents = [], slots = [], layout = 1, notify = false, guard = true, hist = 3000, listBusy = false, builtLayout = 0, sendChain = Promise.resolve();
   const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   let termFont = (() => { try { const n = Number(localStorage.getItem('zajel_term_font')); return Number.isFinite(n) && n >= 9 && n <= 18 ? n : 12.5; } catch (_) { return 12.5; } })();
@@ -1136,6 +1137,12 @@
     }
   }
 
+  // تطابق تعليمات التوثيق والحجم التي تُرسل للوكلاء من الخادم.
+  function roundWebQuestion(question, length) {
+    const size = length ? `\n\n(حجم الجواب المطلوب: ${length}.)` : '';
+    return question + size + '\n\n(وثّق كل معلومة بمصدرها: ضع بعدها رقمًا بين معقوفين مثل [1]، واختم الجواب بقسم «المصادر» فيه كل رقم ومصدره كاملًا: المؤلف، الكتاب، الجزء والصفحة، والرابط إن وجد، والنص المنقول حرفيًا بين «».)';
+  }
+
   function openBroadcastPanel(btn) {
     if(broadcastBackdrop){closeBroadcastPanel();return;}
     const backdrop=document.createElement('div');backdrop.className='as-broadcast-backdrop';backdrop.style.cssText='position:fixed;inset:0;background:#000a;z-index:100005;display:flex;align-items:center;justify-content:center;padding:14px';backdrop.onclick=e=>{if(e.target===backdrop)closeBroadcastPanel();};
@@ -1145,12 +1152,12 @@
     const grid=document.createElement('div');grid.style.cssText='display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:5px;font-size:12.5px';
     const valid=agents.filter(a=>a.cmd), selected=new Set();try{JSON.parse(localStorage.getItem('zajel_broadcast_ids')||'[]').forEach(id=>{if(valid.some(a=>a.id===id))selected.add(id);});}catch(_){}if(!selected.size&&valid[0])selected.add(valid[0].id);
     let judge='',judgeChanged=false;const rows=[];const warning=document.createElement('small');warning.style.color='#eab308';
-    function update(){rows.forEach(r=>{r.answer.checked=selected.has(r.id);if(r.judge)r.judge.checked=judge===r.id;});warning.textContent=judge&&selected.has(judge)?'المحكِّم سيجيب أيضًا؛ تُخفى الأسماء عنه':'';sendBtn.disabled=!ta.value.trim()||!selected.size;}
+    function update(){rows.forEach(r=>{r.answer.checked=selected.has(r.id);if(r.judge)r.judge.checked=judge===r.id;});warning.textContent=judge&&selected.has(judge)?'⚠️ المحكِّم يجيب أيضًا؛ تحيّز محتمل.':'المحكِّم لا يجيب افتراضيًا؛ يمكنك تفعيل «يجيب» له.';sendBtn.disabled=!ta.value.trim()||!selected.size;}
     const deepSel=new Set();const deep=document.createElement('input');deep.type='checkbox';
     [...valid,{id:'perplexity',name:'Perplexity'}].forEach(a=>{const row=document.createElement('div');row.style.cssText='border:1px solid var(--line);border-radius:7px;padding:4px 7px;display:flex;flex-wrap:wrap;gap:2px 8px;align-items:center;line-height:1.3';const name=document.createElement('strong');name.textContent=glyphOf(a.id,a.name)+' '+a.name;name.style.cssText='width:100%;font-size:12.5px';const al=document.createElement('label'),answer=document.createElement('input');answer.type='checkbox';al.append(answer,document.createTextNode(' يجيب'));answer.onchange=()=>{answer.checked?selected.add(a.id):selected.delete(a.id);try{localStorage.setItem('zajel_broadcast_ids',JSON.stringify([...selected]));}catch(_){}update();};const dpl=document.createElement('label'),dp=document.createElement('input');dp.type='checkbox';dp.checked=deepSel.has(a.id);dpl.title='بحث متعمق لهذا الوكيل وحده';dpl.append(dp,document.createTextNode(' 🔬'));dp.onchange=()=>{dp.checked?deepSel.add(a.id):deepSel.delete(a.id);if(dp.checked&&!answer.checked){answer.checked=true;answer.onchange();}deep.checked=rows.length>0&&rows.every(x=>!x.answer.checked||deepSel.has(x.id));};row.append(name,al,dpl);let jc=null;{const jl=document.createElement('label');jc=document.createElement('input');jc.type='radio';jc.name='round-judge';jl.append(jc,document.createTextNode(' ⚖️ يحكّم'));jc.onchange=async()=>{judgeChanged=true;judge=a.id;selected.delete(a.id);update();try{await req('judge_default',{judge});}catch(e){showToast(e.message||'تعذّر حفظ المحكِّم');}};row.appendChild(jl);}grid.appendChild(row);rows.push({id:a.id,answer,judge:jc,dp});});
-    const opts=document.createElement('div');const auto=document.createElement('input');auto.type='checkbox';deep.onchange=()=>rows.forEach(x=>{if(!x.answer.checked)return;x.dp.checked=deep.checked;deep.checked?deepSel.add(x.id):deepSel.delete(x.id);});const al=document.createElement('label'),dl=document.createElement('label');al.append(auto,document.createTextNode(' ⚖️ تحكيم تلقائي'));dl.append(deep,document.createTextNode(' 🔬 بحث متعمق للجميع'));opts.append(al,document.createTextNode('　'),dl);
+    const opts=document.createElement('div');const auto=document.createElement('input');auto.type='checkbox';deep.onchange=()=>rows.forEach(x=>{if(!x.answer.checked)return;x.dp.checked=deep.checked;deep.checked?deepSel.add(x.id):deepSel.delete(x.id);});const al=document.createElement('label'),dl=document.createElement('label');al.append(auto,document.createTextNode(' ⚖️ تحكيم تلقائي'));dl.append(deep,document.createTextNode(' 🔬 بحث متعمق للجميع'));const lengthLabel=document.createElement('label'),length=document.createElement('select');[['','بلا قيد'],['موجز','موجز'],['متوسط','متوسط'],['مفصّل','مفصّل']].forEach(([value,text])=>{const o=document.createElement('option');o.value=value;o.textContent=text;length.appendChild(o);});lengthLabel.append(document.createTextNode('حجم الجواب: '),length);opts.append(al,document.createTextNode('　'),dl,document.createTextNode('　'),lengthLabel);
     const err=document.createElement('small');err.style.color='#ef4444';const sendBtn=document.createElement('button');sendBtn.className='btn pri';sendBtn.textContent='أرسل';ta.oninput=update;
-    sendBtn.onclick=async()=>{const question=ta.value.trim(),answerers=[...selected];if(!question||!answerers.length)return;sendBtn.disabled=true;try{const deepAgents=answerers.filter(id=>deepSel.has(id));const r=await req('round/start',{question,answerers,judge,auto_judge:auto.checked,deep_agents:deepAgents});if(r.error)throw new Error(r.error);round=r;webLast=webPosted='';webSame=0;slots=answerers.map(id=>({id,hash:'',view:'answer',manual:false}));layout=slots.length;activeSlot=0;builtLayout=layout;if(answerers.includes('perplexity'))openPerplexity(question,true,deepAgents.includes('perplexity'));closeBroadcastPanel();build();refreshScreens(true);pollRound();}catch(e){err.textContent=e.message||'تعذّر الإرسال';update();}};
+    sendBtn.onclick=async()=>{const question=ta.value.trim(),answerers=[...selected];if(!question||!answerers.length)return;sendBtn.disabled=true;try{const deepAgents=answerers.filter(id=>deepSel.has(id));const r=await req('round/start',{question,answerers,judge,auto_judge:auto.checked,deep_agents:deepAgents,judge_may_answer:answerers.includes(judge),length:length.value});if(r.error)throw new Error(r.error);roundViewVersion++;round=r;webLast=webPosted='';webSame=0;startRoundPolling();slots=answerers.map(id=>({id,hash:'',view:'answer',manual:false}));layout=slots.length;activeSlot=0;builtLayout=layout;if(answerers.includes('perplexity'))openPerplexity(roundWebQuestion(question,length.value),true,deepAgents.includes('perplexity'));closeBroadcastPanel();build();refreshScreens(true);pollRound();}catch(e){err.textContent=e.message||'تعذّر الإرسال';update();}};
     modal.append(head,ta,grid,warning,opts,err,sendBtn);backdrop.appendChild(modal);(root?.closest('#zajel-term-window')||root||document.body).appendChild(backdrop);broadcastBackdrop=backdrop;broadcastPanel=modal;document.addEventListener('keydown',onBroadcastKey,true);update();req('judge_default').then(r=>{if(!broadcastBackdrop||judgeChanged)return;judge=r.judge||valid.find(a=>a.id==='claude')?.id||valid[0]?.id||'';selected.delete(judge);update();}).catch(()=>{});setTimeout(()=>ta.focus(),20);
   }
 
@@ -1179,6 +1186,7 @@
       controls.appendChild(bcBtn);
 
       const allTerm=document.createElement('button');allTerm.className='btn';allTerm.textContent='⌨️ الكل طرفيات';allTerm.onclick=()=>slots.forEach(s=>setSlotView(s,'terminal',true));controls.appendChild(allTerm);
+      if(round){const exitBtn=document.createElement('button');exitBtn.type='button';exitBtn.className='btn';exitBtn.textContent='⌨ الطرفيات';exitBtn.title='العودة إلى الطرفيات مع حفظ الجولة';exitBtn.onclick=()=>leaveRound();controls.appendChild(exitBtn);}else{const lastBtn=document.createElement('button');lastBtn.type='button';lastBtn.className='btn';lastBtn.textContent='↩ آخر جولة';lastBtn.onclick=()=>restoreLastRound();controls.appendChild(lastBtn);}
       if(round){const judgeBtn=document.createElement('button');judgeBtn.className='btn';judgeBtn.dataset.roundJudge='1';judgeBtn.textContent='⚖️ حكّم';judgeBtn.disabled=Object.values(round.agents||{}).filter(a=>a.state==='done').length<2;judgeBtn.onclick=()=>roundAction('judge');controls.appendChild(judgeBtn);const deepBtn=document.createElement('button');deepBtn.className='btn';deepBtn.textContent='🔬 عمّق';deepBtn.onclick=()=>roundAction('deepen');controls.appendChild(deepBtn);}
       const exportAllBtn=document.createElement('button');
       exportAllBtn.type='button';
@@ -1356,7 +1364,7 @@
       };
       head.appendChild(wb);
 
-      const more=document.createElement('details');more.className='as-card-more';const summary=document.createElement('summary');summary.title='المزيد';summary.textContent='⋯';const deepen=document.createElement('button');deepen.className='btn';deepen.textContent='🔬 عمّق';const pplxAgain=deep=>{webLast=webPosted='';webSame=0;openPerplexity(round?.question||'',true,deep);showToast(deep?'فُتح السؤال في Perplexity بوضع البحث المتعمق':'أُعيد السؤال في Perplexity');};deepen.onclick=()=>{more.open=false;slot.id==='perplexity'?pplxAgain(true):roundAction('deepen',{agent_id:slot.id});};more.append(summary,deepen);more.hidden=!round?.agents?.[slot.id];head.appendChild(more);const reask=document.createElement('button');reask.type='button';reask.className='btn as-reask';reask.textContent='↻';reask.title='أعد السؤال نفسه على هذا الوكيل';reask.setAttribute('aria-label',reask.title);reask.onclick=()=>{slot.manual=false;slot.id==='perplexity'?pplxAgain(!!round?.agents?.perplexity?.deep):roundAction('reask',{agent_id:slot.id});};reask.hidden=more.hidden;head.appendChild(reask);
+      const more=document.createElement('details');more.className='as-card-more';const summary=document.createElement('summary');summary.title='المزيد';summary.textContent='⋯';const deepen=document.createElement('button');deepen.className='btn';deepen.textContent='🔬 عمّق';const pplxAgain=deep=>{webLast=webPosted='';webSame=0;openPerplexity(roundWebQuestion(round?.question||'',round?.length||''),true,deep);showToast(deep?'فُتح السؤال في Perplexity بوضع البحث المتعمق':'أُعيد السؤال في Perplexity');};deepen.onclick=()=>{more.open=false;slot.id==='perplexity'?pplxAgain(true):roundAction('deepen',{agent_id:slot.id});};more.append(summary,deepen);more.hidden=!round?.agents?.[slot.id];head.appendChild(more);const reask=document.createElement('button');reask.type='button';reask.className='btn as-reask';reask.textContent='↻';reask.title='أعد السؤال نفسه على هذا الوكيل';reask.setAttribute('aria-label',reask.title);reask.onclick=()=>{slot.manual=false;slot.id==='perplexity'?pplxAgain(!!round?.agents?.perplexity?.deep):roundAction('reask',{agent_id:slot.id});};reask.hidden=more.hidden;head.appendChild(reask);
       const hide=document.createElement('button');hide.className='btn as-head-icon';hide.textContent='—';hide.title='إخفاء البطاقة';hide.onclick=()=>{slot.hidden=true;card.classList.remove('is-full');tileSlots();};head.appendChild(hide);
       const msg=document.createElement('small');slot.msg=msg;msg.hidden=true;card.appendChild(msg);
 
@@ -1522,14 +1530,32 @@
   // عدد الأعمدة يُقاس بخط الشاشة نفسه (كان يُقاس بخط أصغر فيُعطى الوكيل عرضًا أكبر من الظاهر: كلام يخرج عن الشاشة وخطوط مكسورة)،
   // ولا يُرسل المقاس إلا إذا تغيّر فعلًا (كان كل ظهور لشريط التمرير يغيّر العرض فيعيد الوكيل الرسم فترتجف الشاشة)
   function resizeSlot(slot){if(!slot.id||!slot.pre||slot.hidden||slot.view==='answer'||['perplexity','verdict','deep'].includes(slot.id))return;const cs=getComputedStyle(slot.pre);const probe=document.createElement('span');probe.textContent='MMMMMMMMMM';probe.style.cssText='position:absolute;visibility:hidden;white-space:pre;font:'+cs.font;slot.pre.appendChild(probe);const cw=(probe.getBoundingClientRect().width/10)||7.6,ch=parseFloat(cs.lineHeight)||17.5;probe.remove();const padX=(parseFloat(cs.paddingLeft)||0)+(parseFloat(cs.paddingRight)||0),padY=(parseFloat(cs.paddingTop)||0)+(parseFloat(cs.paddingBottom)||0);const cols=Math.max(20,Math.floor((slot.pre.clientWidth-padX-2)/cw)),rows=Math.max(5,Math.floor((slot.pre.clientHeight-padY)/ch));const key=slot.id+':'+cols+'x'+rows;if(slot.lastSize===key)return;clearTimeout(slot.resizeTimer);slot.resizeTimer=setTimeout(()=>{slot.lastSize=key;req('resize',{id:slot.id,cols,rows}).catch(()=>{slot.lastSize='';});},250);}
-  function showAgent(id){req('health',{id,check:true}).catch(()=>{});const found=slots.findIndex(s=>s.id===id);if(found>=0)activeSlot=found;else {selectAgentForActiveSlot(id);const changed=slots[activeSlot];if(changed)changed.answerKey='';}const sl=slots[activeSlot];if(sl){sl.hidden=false;updateSlotIdentity(sl);setSlotView(sl,'terminal',true);tileSlots();}refreshScreens(true);}
+  function startRoundPolling(){clearInterval(roundTimer);roundTimer=setInterval(pollRound,2000);}
+  function leaveRound(id){
+    roundViewVersion++;round=null;clearInterval(roundTimer);roundTimer=null;webLast=webPosted='';webSame=0;
+    const requested=id||lastSelectedAgent;
+    const selected=agents.some(a=>a.id===requested&&!['perplexity','verdict','deep'].includes(a.id))?requested:'';
+    const ready=agents.filter(a=>a.installed!==false&&a.state!=='stopped'&&!['perplexity','verdict','deep'].includes(a.id));
+    const choices=[selected,...ready.map(a=>a.id),...agents.filter(a=>a.installed!==false&&!['perplexity','verdict','deep'].includes(a.id)).map(a=>a.id)].filter(Boolean);
+    const unique=[...new Set(choices)];
+    slots=Array.from({length:layout},(_,i)=>({id:unique[i%unique.length]||'',hash:'',view:'terminal',manual:false}));
+    activeSlot=0;builtLayout=layout;build();refreshScreens(true);
+  }
+  async function restoreLastRound(){
+    const version=++roundViewVersion;
+    try{const r=await req('round/last');if(!root||version!==roundViewVersion)return;if(r.error)throw new Error(r.error);if(!r.round){showToast('لا توجد جولة سابقة');return;}
+      round=r.round;webLast=webPosted='';webSame=0;slots=Object.keys(round.agents||{}).map(id=>({id,hash:'',view:'answer',manual:false}));
+      if(slots.length){layout=slots.length;activeSlot=0;}builtLayout=layout;build();startRoundPolling();pollRound();
+    }catch(e){showToast(e.message||'تعذّر فتح آخر جولة');}
+  }
+  function showAgent(id){req('health',{id,check:true}).catch(()=>{});lastSelectedAgent=id;const found=slots.findIndex(s=>s.id===id&&!s.hidden);if(round&&found<0){leaveRound(id);return;}if(found>=0)activeSlot=found;else {selectAgentForActiveSlot(id);const changed=slots[activeSlot];if(changed)changed.answerKey='';}const sl=slots[activeSlot];if(sl){sl.hidden=false;updateSlotIdentity(sl);if(!round)setSlotView(sl,'terminal',true);tileSlots();}refreshScreens(true);}
   function showAgents(ids){if(!root)return false;ids=(ids||[]).filter(Boolean).slice(0,5);if(!ids.length)return false;layout=ids.length;slots=ids.map(id=>({id,hash:'',pre:null,select:null,card:null}));activeSlot=0;build();builtLayout=layout;refreshList();refreshScreens(true);return true;}
   function syncSelects(){slots.forEach((slot,i)=>{if(!slot.id&&agents.length){slot.id=(agents[i]||agents[0]).id;updateSlotIdentity(slot);refreshScreens(true,slot);}if(!slot.select)return;if(!slot.id&&agents[i])slot.id=agents[i].id||agents[0]?.id||'';if(!slot.id&&agents[0])slot.id=agents[0].id;const sel=slot.select;sel.replaceChildren();agents.forEach(a=>{const o=document.createElement('option');o.value=a.id;o.textContent=a.name+' · '+(a.label||a.state||'');sel.appendChild(o);});if(slot.id)sel.value=slot.id;});}
   async function refreshList(){if(!root||listBusy)return;listBusy=true;try{const [data,customData]=await Promise.all([req('list'),fetch('/api/term/custom').then(r=>r.json()).catch(()=>({shortcuts:[]}))]);agents=Array.isArray(data.agents)?data.agents:[];shortcuts=Array.isArray(customData.shortcuts)?customData.shortcuts:[];notify=!!data.notify;guard=data.guard!==false;const hint=root.querySelector('.as-memory-hint'),app=root.querySelector('.as-terminal');if(data.available===false){if(hint){hint.hidden=false;hint.textContent=data.hint||'الطرفية غير متاحة';}if(app)app.hidden=true;}else{if(hint)hint.hidden=true;if(app)app.hidden=false;if(builtLayout!==layout){build();builtLayout=layout;}else if(!railBusy())renderRail();syncSelects();updateSlotBadges();slots.forEach(updateSlotIdentity);}}catch(e){const hint=root.querySelector('.as-memory-hint');if(hint){hint.hidden=false;hint.textContent='تعذر تحميل قائمة الطرفيات: '+e.message;}}finally{listBusy=false;}}
   async function refreshScreens(force,only){if(!root||root.hidden)return;root.style.setProperty('--tt-size',termFont+'px');for(const slot of (only?[only]:slots)){if(!slot.id||!slot.pre||['perplexity','verdict','deep'].includes(slot.id))continue;try{if(!force&&slot.holdSel&&slot.holdSel())continue;const d=await req('screen?id='+encodeURIComponent(slot.id)+'&since='+encodeURIComponent(force?'':slot.hash)+'&hist='+hist);if(d.hash)slot.hash=d.hash;if(!d.unchanged&&typeof d.text==='string'){slot.cur=d.cursor?{cx:d.cursor[0],cy:d.cursor[1],rows:d.rows,cols:d.cols,alt:!!d.alt}:null;const pre=slot.pre,stick=pre.scrollHeight-pre.scrollTop-pre.clientHeight<40||!pre.dataset.init;pre.innerHTML=ansiHtml(d.text);pre.dataset.init='1';if(stick)pre.scrollTop=pre.scrollHeight;}if(d.alive===false)slot.pre.dataset.dead='true';}catch(_){}}}
 
 
-  function activate(el){if(!el)return;if(root&&root.parentNode===el&&listTimer)return;const host=document.createElement('div');el.replaceChildren(host);root=host;hist=1500;builtLayout=0;build();builtLayout=layout;refreshList();clearInterval(listTimer);listTimer=setInterval(refreshList,2000);clearInterval(screenTimer);screenTimer=setInterval(screenTick,100);refreshScreens(true);clearInterval(roundTimer);roundTimer=setInterval(pollRound,2000);if(round)pollRound();else req('round/last').then(r=>{if(root&&r.round){round=r.round;slots=Object.keys(round.agents||{}).map(id=>({id,hash:'',view:'answer',manual:false}));if(slots.length){layout=slots.length;builtLayout=layout;activeSlot=0;build();}pollRound();}}).catch(()=>{});}
+  function activate(el){if(!el)return;if(root&&root.parentNode===el&&listTimer)return;const host=document.createElement('div');el.replaceChildren(host);root=host;hist=1500;builtLayout=0;build();builtLayout=layout;refreshList();clearInterval(listTimer);listTimer=setInterval(refreshList,2000);clearInterval(screenTimer);screenTimer=setInterval(screenTick,100);refreshScreens(true);if(round){startRoundPolling();pollRound();}}
   // بعد أي إدخال يُحدَّث الشاشة النشطة كل ~100ms لثانيتين ونصف، وفي الراحة كل نصف ثانية؛ ولا تتراكم الطلبات
   async function screenTick(){if(screenBusy||!root)return;const now=Date.now(),fast=now<fastUntil;if(!fast&&now-lastFull<500)return;lastFull=now;screenBusy=true;try{await refreshScreens(false,fast?slots[activeSlot]:null);}finally{screenBusy=false;}}
   function deactivate(){clearInterval(listTimer);clearInterval(screenTimer);clearInterval(roundTimer);listTimer=screenTimer=roundTimer=null;resizeObserver?.disconnect();resizeObserver=null;closeBroadcastPanel();root=null;}
@@ -1593,9 +1619,11 @@
     }
 
     const title = document.createElement('div'); title.className = 'tw-title'; title.textContent = 'طرفية زاجل';
-    head.append(title);
+    if (!isApp) head.append(title);
     const body = document.createElement('div'); body.className = 'tw-body';
-    el.append(style, head, body);
+    el.append(style);
+    if (!isApp) el.append(head);
+    el.append(body);
     document.body.appendChild(el);
     const save = () => {
       if (isApp) return;
@@ -1708,7 +1736,8 @@
   async function driveWebJudge(rid) {
     if (webJudgeBusy) return; webJudgeBusy = true;
     const sleep = ms => new Promise(r => setTimeout(r, ms));
-    const alive = () => root && round && round.round_id === rid && ['web_pending', 'running'].includes(round.judge_state);
+    const version = roundViewVersion;
+    const alive = () => version === roundViewVersion && root && round && round.round_id === rid && ['web_pending', 'running'].includes(round.judge_state);
     const report = body => req('round/web_verdict', { round_id: rid, ...body }).catch(() => ({ action: 'wait' }));
     const h = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.zajel;
     try {
@@ -1723,7 +1752,9 @@
         if (!ready || ready.login) { const a = await report({ error: ready?.login ? 'login' : 'nowindow' }); if (a.action === 'restart') continue restart; return; }
         // تسليم المادة: كل جزء رسالة، وينتظر ردّ الاستلام قبل التالي
         for (let k = 0; k < msgs.length; k++) {
+          if (!alive()) return;
           const s = await webJSON(pplxSendJS(msgs[k]), 30000);
+          if (!alive()) return;
           if (!s || !s.ok) { const a = await report({ error: s?.error || 'nowindow' }); if (a.action === 'restart') continue restart; return; }
           if (k === msgs.length - 1) break;
           let last = '', same = 0;
@@ -1734,10 +1765,12 @@
         while (alive()) {
           await sleep(2500);
           const j = await getWebAnswer(false);
+          if (!alive()) return;
           if (j?.login) { const a = await report({ error: 'login' }); if (a.action === 'restart') continue restart; return; }
           const raw = j?.answer || '';
           if (raw !== last) { last = raw; since = Date.now(); }
           const a = await report({ raw, stable: Math.round((Date.now() - since) / 1000), done: !!j?.done });
+          if (!alive()) return;
           if (a.status) round = { ...round, ...a.status };
           if (a.action === 'send' && a.message) { const s = await webJSON(pplxSendJS(a.message), 30000); if (!s || !s.ok) { const b = await report({ error: s?.error || 'nowindow' }); if (b.action === 'restart') continue restart; return; } last = ''; since = Date.now(); }
           else if (a.action === 'restart') continue restart;
@@ -1751,11 +1784,11 @@
   function setSlotView(slot,view,manual){if(!slot?.card)return;if(manual)slot.manual=true;if(['perplexity','verdict','deep'].includes(slot.id))view='answer';slot.view=view;slot.pre.style.display=view==='answer'?'none':'';if(slot.answerEl)slot.answerEl.hidden=view!=='answer';if(slot.viewBtn){slot.viewBtn.textContent=view==='answer'?'⌨️':'📖';slot.viewBtn.title=view==='answer'?'عرض الطرفية':'عرض الجواب';}if(view==='terminal'){slot.card.querySelector('.as-reader:not(.as-round-answer)')?.remove();slot.lastSize='';resizeSlot(slot);}else renderAnswer(slot);}
   function answerView(slot){slot.answerKey='';const el=document.createElement('div');el.className='as-reader as-round-answer';el.dir='rtl';slot.answerEl=el;slot.card.appendChild(el);renderAnswer(slot);}
   function renderAnswer(slot){if(!slot.answerEl||!round)return;const ag=round.agents?.[slot.id],text=slot.id==='verdict'?round.verdict:slot.id==='deep'?round.deep_answer:ag?.answer||'';const key=round.question+'\n'+text;if(slot.answerKey===key)return;const el=slot.answerEl,atEnd=el.scrollHeight-el.scrollTop-el.clientHeight<40||!slot.answerKey;el.innerHTML='<div style="background:var(--side);border-inline-start:3px solid '+colorOf(slot.id)+';padding:6px 10px;border-radius:8px"><b>السؤال</b><p dir="auto">'+esc(round.question)+'</p></div>'+(text?mdHtml(text):'<p>ينتظر الجواب…</p>');slot.answerKey=key;hydrateMermaid(el);if(atEnd)el.scrollTop=el.scrollHeight;}
-  async function roundAction(action,extra={}){if(!round)return;try{const r=await req('round/'+action,{round_id:round.round_id,...extra});if(r.error)throw new Error(r.error);if(action==='export')showToast('حُفظ المستند: '+(r.title||'كل الأجوبة')+(r.missing?.length?' · لم يكتمل: '+r.missing.join('، '):''));else {round=r;await pollRound();}}catch(e){showToast(e.message||'تعذّر تنفيذ الطلب');}}
-  async function pollRound(){if(!root||!round||roundBusy)return;roundBusy=true;const rid=round.round_id;try{const r=await req('round/status?id='+encodeURIComponent(rid));if(!root||round?.round_id!==rid)return;if(r.error)throw new Error(r.error);const old=round;round=r;let added=false;for(const [id,field,state,name] of [['verdict','verdict','judge_state','⚖️ الحكم'],['deep','deep_answer','deep_state','🔬 بحث متعمق']]){if((r[field]||!['idle','waiting_answers'].includes(r[state]))&&!slots.some(s=>s.id===id)){slots.push({id,view:'answer',manual:false,hash:''});layout=slots.length;added=true;}}if(added){builtLayout=layout;build();}slots.forEach(s=>{const a=r.agents?.[s.id];if(a&&!s.manual&&s.id!=='perplexity'){const prev=old.agents?.[s.id]?.answer||'',live=agents.find(x=>x.id===s.id);if(a.state==='needs_input'||(!a.answer&&Date.now()/1000-r.created>=20))setSlotView(s,'terminal',false);else if(['writing','done'].includes(a.state)&&a.answer&&a.answer!==prev)setSlotView(s,'answer',false);}renderAnswer(s);});updateSlotBadges();const jb=root.querySelector('[data-round-judge]');if(jb)jb.disabled=!Object.values(r.agents||{}).some(a=>a.state==='done');
+  async function roundAction(action,extra={}){if(!round)return;const version=roundViewVersion;try{const r=await req('round/'+action,{round_id:round.round_id,...extra});if(version!==roundViewVersion)return;if(r.error)throw new Error(r.error);if(action==='export')showToast('حُفظ المستند: '+(r.title||'كل الأجوبة')+(r.missing?.length?' · لم يكتمل: '+r.missing.join('، '):''));else {round=r;await pollRound();}}catch(e){showToast(e.message||'تعذّر تنفيذ الطلب');}}
+  async function pollRound(){if(!root||!round||roundBusy)return;roundBusy=true;const rid=round.round_id,version=roundViewVersion;try{const r=await req('round/status?id='+encodeURIComponent(rid));if(!root||version!==roundViewVersion||round?.round_id!==rid)return;if(r.error)throw new Error(r.error);const old=round;round=r;let added=false;for(const [id,field,state,name] of [['verdict','verdict','judge_state','⚖️ الحكم'],['deep','deep_answer','deep_state','🔬 بحث متعمق']]){if((r[field]||!['idle','waiting_answers'].includes(r[state]))&&!slots.some(s=>s.id===id)){slots.push({id,view:'answer',manual:false,hash:''});layout=slots.length;added=true;}}if(added){builtLayout=layout;build();}slots.forEach(s=>{const a=r.agents?.[s.id];if(a&&!s.manual&&s.id!=='perplexity'){const prev=old.agents?.[s.id]?.answer||'',live=agents.find(x=>x.id===s.id);if(a.state==='needs_input'||(!a.answer&&Date.now()/1000-r.created>=20))setSlotView(s,'terminal',false);else if(['writing','done'].includes(a.state)&&a.answer&&a.answer!==prev)setSlotView(s,'answer',false);}renderAnswer(s);});updateSlotBadges();const jb=root.querySelector('[data-round-judge]');if(jb)jb.disabled=!Object.values(r.agents||{}).some(a=>a.state==='done');
       if(r.judge==='perplexity'&&['web_pending','running'].includes(r.judge_state)&&r.web_judge)driveWebJudge(rid);
       // Perplexity مجيبًا (ليس وهو يحكّم: النافذة واحدة). يُرسل الجواب إذا ظهرت أزرار نهايته وثبت قراءتين، أو ثبت ٦ ث (١٦ ث في البحث المعمق: يتوقف بين خطوات البحث)
-      if(r.agents?.perplexity&&!webJudgeBusy){const j=await getWebAnswer();if(!root||round?.round_id!==rid)return;const ans=j?.answer||'';if(ans&&ans===webLast)webSame++;else{webLast=ans;webSame=0;}const norm=x=>String(x||'').replace(/\s+/g,' ').trim();const ready=j?.done?webSame>=1:webSame>=(r.agents.perplexity.deep?8:3);if(ans&&ready&&ans!==webPosted&&(!j.question||norm(j.question).startsWith(norm(r.question)))){await req('round/web_answer',{round_id:rid,question:r.question,answer:ans});webPosted=ans;}}
+      if(r.agents?.perplexity&&!webJudgeBusy){const j=await getWebAnswer();if(!root||version!==roundViewVersion||round?.round_id!==rid)return;const ans=j?.answer||'';if(ans&&ans===webLast)webSame++;else{webLast=ans;webSame=0;}const norm=x=>String(x||'').replace(/\s+/g,' ').trim();const ready=j?.done?webSame>=1:webSame>=(r.agents.perplexity.deep?8:3);if(ans&&ready&&ans!==webPosted&&(!j.question||norm(j.question).startsWith(norm(r.question)))){await req('round/web_answer',{round_id:rid,question:r.question,answer:ans});webPosted=ans;}}
     }catch(e){console.warn('round status',e);}finally{roundBusy=false;}}
 
   // داخل البرنامج: نافذة Perplexity تابعة لزاجل (تتذكر الدخول)؛ في المتصفح العادي: تبويب جديد

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import html
 import re
 import sqlite3
 import time
@@ -111,28 +112,32 @@ def from_hermes(_cwd):
 
 
 def from_opencode(_cwd):
-    """OpenCode يحفظ محادثاته في قاعدة SQLite؛ الشاشة الضيقة لا تُظهر جوابه كاملًا."""
+    """قراءة أجزاء الرسالة الواحدة معًا، حتى لا تحل ملحقات السؤال محل نصه."""
     db = HOME / ".local" / "share" / "opencode" / "opencode.db"
     if not db.exists():
         return None
     try:
-        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=3)
-        row = con.execute("select session_id from message where json_extract(data,'$.role')='user' order by time_created desc limit 1").fetchone()
-        if not row:
-            return None
-        rows = con.execute("select json_extract(m.data,'$.role'), json_extract(p.data,'$.type'), json_extract(p.data,'$.text') from message m join part p on p.message_id=m.id "
-                           "where m.session_id=? order by m.time_created, p.id", (row[0],)).fetchall()
-        con.close()
+        with sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=3) as con:
+            row = con.execute("select session_id from message where json_extract(data,'$.role')='user' order by time_created desc limit 1").fetchone()
+            if not row:
+                return None
+            rows = con.execute("select m.id, json_extract(m.data,'$.role'), json_extract(p.data,'$.type'), json_extract(p.data,'$.text') from message m join part p on p.message_id=m.id "
+                               "where m.session_id=? order by m.time_created, m.id, p.id", (row[0],)).fetchall()
     except sqlite3.Error:
         return None
-    q, ans = "", []
-    for role, kind, text in rows:
+    q, ans, messages = "", [], []
+    for mid, role, kind, text in rows:
         if kind != "text" or not (text or "").strip():
             continue
+        if not messages or messages[-1][0] != mid:
+            messages.append((mid, role, []))
+        messages[-1][2].append(text.strip())
+    for _, role, parts in messages:
+        text = "\n\n".join(parts)
         if role == "user" and _is_user_text(text):
-            q, ans = text.strip(), []
+            q, ans = text, []
         elif role == "assistant" and q:
-            ans.append(text.strip())
+            ans.append(text)
     return (q, "\n\n".join(ans)) if q else None
 
 
@@ -473,13 +478,23 @@ def _table(doc, rows):
     n = max(len(r) for r in cells)
     t = doc.add_table(rows=len(cells), cols=n)
     t.style = "Table Grid"
+    from docx.shared import Cm
+    t.autofit = False
+    for col in t.columns:
+        col.width = Cm(16 / n)
     from docx.oxml import OxmlElement
     from docx.oxml.ns import qn
     t._tbl.tblPr.append(OxmlElement("w:bidiVisual"))
     from docx.enum.text import WD_ALIGN_PARAGRAPH
+    status_col = next((j for j, value in enumerate(cells[0]) if "الحالة" in value), None)
     for i, r in enumerate(cells):
+        trpr = t.rows[i]._tr.get_or_add_trPr()
+        trpr.append(OxmlElement("w:cantSplit"))
+        if i == 0:
+            trpr.append(OxmlElement("w:tblHeader"))
         for j in range(n):
             cell = t.cell(i, j)
+            cell.width = Cm(16 / n)
             cell.text = ""
             p = cell.paragraphs[0]
             txt = r[j] if j < len(r) else ""
@@ -488,11 +503,14 @@ def _table(doc, rows):
                 p.alignment = WD_ALIGN_PARAGRAPH.LEFT
             else:
                 _rtl(p)
-            if i == 0:
+            fill = "E8EEF6" if i == 0 else None
+            if i and j == status_col:
+                fill = next((color for symbol, color in (("✅", "E2F0D9"), ("⚠", "FFF2CC"), ("❌", "FCE4D6"), ("❓", "E7E6E6")) if symbol in txt), None)
+            if fill:
                 tcpr = cell._tc.get_or_add_tcPr()
                 sh = OxmlElement("w:shd")
                 sh.set(qn("w:val"), "clear")
-                sh.set(qn("w:fill"), "E8EEF6")
+                sh.set(qn("w:fill"), fill)
                 tcpr.append(sh)
     doc.add_paragraph()
 
@@ -500,9 +518,35 @@ def _table(doc, rows):
 _NOTES = None
 
 
+def _clean_export_text(text):
+    """نظّف النص قبل كتابة XML، مع إبقاء المحتوى وتنسيق الأسطر."""
+    text = html.unescape(text or "")
+    text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]", "", text)
+    return "\n".join(line for line in text.splitlines()
+                     if not re.match(r"^\s*[○◯▸►•]*\s*Thought for\b", line, re.I))
+
+
+def _score_rows(verdict):
+    """يلتقط صفوفًا كاملة فقط؛ يُترك الملخص إن لم تكن الدرجات واضحة."""
+    rows = []
+    headings = list(re.finditer(r"(?m)^\s*#{2,6}\s*(?:تقييم\s+)?(?:جواب|الجواب)\s+(.+?)\s*$", verdict or ""))
+    for i, match in enumerate(headings):
+        end = headings[i + 1].start() if i + 1 < len(headings) else len(verdict)
+        block = verdict[match.end():end]
+        values = []
+        for label in ("الدقة", "التوثيق", "الشمول", "الدرجة الكلية"):
+            found = re.search(r"(?:\*\*)?" + label + r"(?:\*\*)?\s*[:：]\s*([0-9٠-٩۰-۹]+)", block)
+            if not found:
+                break
+            values.append(found.group(1))
+        if len(values) == 4:
+            rows.append([match.group(1).strip(), *values])
+    return rows
+
+
 def _body(doc, answer):
     global _NOTES
-    answer, _NOTES = citations(answer)
+    answer, _NOTES = citations(_clean_export_text(answer))
     lines = (answer or "").splitlines()
     i, buf = 0, []
 
@@ -716,19 +760,26 @@ def build_round(title, question, verdict, items, deep, out_path, judge="", also=
         setattr(sec, side, Cm(2.2))
     _sect_bidi(sec._sectPr)
     _fn_setup(doc)
+    title, question, judge = (_clean_export_text(value) for value in (title, question, judge))
+    items = [(_clean_export_text(name), answer) for name, answer in items]
     _para(doc, title, size=20, bold=True, color="183478", center=True)
     sub = ("المحكِّم: " + judge + " · " if judge else "") + "الوكلاء: " + "، ".join(n for n, _ in items) + " · " + time.strftime("%Y-%m-%d %H:%M")
     _para(doc, sub, size=10, color="6B7587", center=True)
     _shade(_para(doc, "السؤال", size=12, bold=True, color="183478"), "F2F5F9")
     _shade(_para(doc, question.strip(), size=13), "F2F5F9")
+    _para(doc, "مفتاح الرموز: ✅ موثّق · ⚠️ فيه خلل · ❌ غير موجود · ❓ تعذّر التحقق", size=10, color="6B7587")
     if (verdict or "").strip():
         h = doc.add_heading(level=1)
-        _font(h.add_run("الحكم والخلاصة"), size=16, bold=True, color="183478")
+        _font(h.add_run("١. الحكم والخلاصة"), size=16, bold=True, color="183478")
         _rtl(h)
+        scores = _score_rows(verdict)
+        if scores:
+            _table(doc, ["| الجواب | الدقة | التوثيق | الشمول | المجموع |"] + ["| " + " | ".join(row) + " |" for row in scores])
         _body(doc, verdict)
     if items:
+        doc.add_page_break()
         h = doc.add_heading(level=1)
-        _font(h.add_run("الملحق: الأجوبة المختارة"), size=16, bold=True, color="183478")
+        _font(h.add_run("٢. الملحق: الأجوبة المختارة"), size=16, bold=True, color="183478")
         _rtl(h)
         for name, a in items:
             h2 = doc.add_heading(level=2)
@@ -737,7 +788,7 @@ def build_round(title, question, verdict, items, deep, out_path, judge="", also=
             _body(doc, a)
     if (deep or "").strip():
         h = doc.add_heading(level=1)
-        _font(h.add_run("البحث المتعمق"), size=16, bold=True, color="183478")
+        _font(h.add_run("٣. البحث المتعمق"), size=16, bold=True, color="183478")
         _rtl(h)
         _body(doc, deep)
     fp = sec.footer.paragraphs[0]

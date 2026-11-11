@@ -128,8 +128,10 @@ class RoundFlow(unittest.TestCase):
             self.assertNotIn("codex", TL.ROUND_DRAFT[7]["answerers"])
             TL._round_callback(7, 1, "auto")
             TL._round_callback(7, 1, "deep")
+            TL._round_callback(7, 1, "a:codex")
+            TL._round_callback(7, 1, "length")
             TL._round_callback(7, 1, "send")
-            judge.start_round.assert_called_once_with("ما الجواب؟", ["gemini"], judge="codex", auto_judge=True, deep=True)
+            judge.start_round.assert_called_once_with("ما الجواب؟", ["codex", "gemini"], judge="codex", auto_judge=True, deep=True, judge_may_answer=True, length="موجز")
             thread.return_value.start.assert_called_once()
 
     def test_status_needs_input_and_answer_is_sent_as_text(self):

@@ -3,6 +3,7 @@
 import copy
 import hashlib
 import json
+import signal
 import os
 import random
 import re
@@ -476,11 +477,40 @@ def start(i, cwd=""):
     return {"ok": True, "started": True}
 
 
+def _kill_tree(i):
+    """OpenCode لا يموت عند إغلاق جلسته (يتجاهل SIGHUP) بل يبقى يتيمًا يدور على ~100% من المعالج؛ فنقتل شجرة عمليات الجلسة بأنفسنا قبل إغلاقها."""
+    try:
+        r = _t("list-panes", "-t", _name(i), "-F", "#{pane_pid}")
+        roots = {x for x in r.stdout.split() if x.isdigit()} if r.returncode == 0 else set()
+        if not roots:
+            return
+        ps = [ln.split(None, 1) for ln in subprocess.run(["ps", "-axo", "pid=,ppid="], capture_output=True, text=True, timeout=5).stdout.splitlines()]
+        tree, grew = set(roots), True
+        while grew:
+            grew = False
+            for row in ps:
+                if len(row) == 2 and row[1].strip() in tree and row[0] not in tree:
+                    tree.add(row[0]); grew = True
+        mine = [int(p) for p in tree if p.isdigit() and int(p) != os.getpid()]
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            for pid in mine:
+                try:
+                    os.kill(pid, sig)
+                except OSError:
+                    pass
+            if sig == signal.SIGTERM:
+                time.sleep(0.6)
+    except Exception:
+        pass
+
+
 def stop(i, _keep_guard=False):
     if not _keep_guard:
         _guard_remove(i)         # إيقاف المستخدم المقصود لا يُنعَش
     _PREV.pop(i, None)
     _ARCH.pop(i, None)
+    if BY_ID.get(i, {}).get("cmd"):
+        _kill_tree(i)
     _t("kill-session", "-t", _name(i))
     MON.pop(i, None)
     return {"ok": True}
@@ -1190,6 +1220,8 @@ def _wait_idle(i, timeout=45):
     time.sleep(0.5)
     while time.time() - t0 < timeout:
         st, _, idle = state_of(i)
+        if st == "stopped" and time.time() - t0 > 3:      # قد لا تظهر الجلسة الجديدة في القائمة لحظة إنشائها
+            return "stopped"
         if st == "shell" and time.time() - t0 > 8:
             return "shell"
         tail = _tail(i)
@@ -1204,7 +1236,7 @@ def _wait_idle(i, timeout=45):
         if st == "idle" or (same >= 3 and st != "shell"):
             return "idle"
         time.sleep(0.7)
-    return "idle" if prev else st
+    return "idle" if prev and st != "stopped" else st      # وكلاء شاشتهم متحركة دائمًا: يُكتب فيهم بعد المهلة على كل حال
 
 
 def chat_ask(i, text, timeout=None):

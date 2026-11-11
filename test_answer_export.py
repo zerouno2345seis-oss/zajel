@@ -58,6 +58,27 @@ class Footnotes(unittest.TestCase):
 
 
 class Docx(unittest.TestCase):
+    def test_round_summary_and_citation_table_layout(self):
+        from docx import Document
+        import zipfile
+        with tempfile.TemporaryDirectory() as d:
+            verdict = ('## تقييم كل جواب\n### جواب ألف\nالدقة: ٨ من ١٠\nالتوثيق: ٧ من ١٠\nالشمول: ٩ من ١٠\nالدرجة الكلية: ٢٤ من ٣٠\n'
+                       '## جدول التحقق من الإحالات\n| الجواب | الإحالة | الحالة | ملاحظة |\n|---|---|---|---|\n| ألف | ج١ | ✅ موثّق | وجد النص |\n| ألف | ج٢ | ❓ تعذّر التحقق | لم يُجلب |')
+            path = A.build_round('تقرير', 'سؤال؟', verdict, [('ألف', '○ Thought for 26s\n\nنص &gt; نص [^1].\n\n[^1]: مصدر')], '', Path(d) / 'round.docx', 'باء')
+            doc = Document(path)
+            self.assertEqual(len(doc.tables), 2)
+            self.assertIn('٢٤', doc.tables[0].cell(1, 4).text)
+            table_xml = doc.tables[1]._tbl.xml
+            self.assertIn('tblHeader', table_xml)
+            self.assertIn('cantSplit', table_xml)
+            self.assertIn('E2F0D9', table_xml)
+            self.assertIn('E7E6E6', table_xml)
+            xml = zipfile.ZipFile(path).read('word/document.xml').decode()
+            self.assertIn('w:type="page"', xml)
+            self.assertNotIn('Thought for', xml)
+            self.assertNotIn('&amp;gt;', xml)
+            self.assertIn('footnoteReference w:id="1"', xml)
+
     def test_build_and_no_overwrite(self):
         from docx import Document
         with tempfile.TemporaryDirectory() as d:
@@ -88,6 +109,30 @@ class Docx(unittest.TestCase):
 
 
 class OpenCodeDB(unittest.TestCase):
+    def test_question_parts_remain_one_message(self):
+        import json, sqlite3
+        with tempfile.TemporaryDirectory() as d:
+            old, A.HOME = A.HOME, Path(d)
+            try:
+                db = Path(d) / ".local/share/opencode/opencode.db"
+                db.parent.mkdir(parents=True)
+                with sqlite3.connect(db) as con:
+                    con.execute("create table message(id text, session_id text, time_created int, data text)")
+                    con.execute("create table part(id text, message_id text, session_id text, time_created int, data text)")
+                    for mid, role, parts in [("m1", "user", ["سؤال الجولة الطويل عن مثال الحديث الموقوف؟", "وثّق كل معلومة بمصدرها"]),
+                                             ("m2", "assistant", ["مثال الجواب مع مصدره."])]:
+                        con.execute("insert into message values(?,?,?,?)", (mid, "s", int(mid[1:]), json.dumps({"role": role})))
+                        for index, text in enumerate(parts):
+                            con.execute("insert into part values(?,?,?,?,?)", (f"{mid}-{index}", mid, "s", index, json.dumps({"type": "text", "text": text})))
+                question, answer = A.from_opencode("")
+                self.assertIn("سؤال الجولة الطويل", question)
+                self.assertIn("وثّق", question)
+                self.assertEqual(answer, "مثال الجواب مع مصدره.")
+                import judge
+                self.assertTrue(judge._same_q(question, "سؤال الجولة الطويل عن مثال الحديث الموقوف؟"))
+            finally:
+                A.HOME = old
+
     def test_last_question_and_answer_from_db(self):
         import json, sqlite3
         with tempfile.TemporaryDirectory() as d:

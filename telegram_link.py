@@ -919,7 +919,7 @@ def _round_begin(chat):
         if judge_id and judge_id not in agents:
             agents[judge_id] = judge_id
         ROUND_DRAFT[chat] = {"awaiting": True, "agents": agents, "judge": judge_id,
-                             "answerers": set(agents) - {judge_id}, "auto": False, "deep": False}
+                             "answerers": set(agents) - {judge_id}, "auto": False, "deep": False, "length": ""}
         send("اكتب سؤال الوكلاء الآن.", chat)
     except ImportError:
         send("ميزة سؤال عدة وكلاء غير متاحة على هذا الجهاز بعد.", chat)
@@ -931,8 +931,11 @@ def _round_options(chat, mid=None):
            _b(("⚖️ " if a == d["judge"] else "اختر محكّمًا: ") + name, "rnd:j:" + a)]
           for a, name in d["agents"].items()]
     kb += [[_b(("☑️ " if d["auto"] else "⬜ ") + "تحكيم تلقائي", "rnd:auto"),
-            _b(("☑️ " if d["deep"] else "⬜ ") + "بحث متعمق", "rnd:deep")], [_b("أرسل", "rnd:send")]]
+            _b(("☑️ " if d["deep"] else "⬜ ") + "بحث متعمق", "rnd:deep")],
+           [_b("حجم الجواب: " + (d.get("length") or "بلا قيد"), "rnd:length")], [_b("أرسل", "rnd:send")]]
     text = "سؤالك: " + d["question"][:1800] + "\nاختر المجيبين ومحكّمًا."
+    if d["judge"] in d["answerers"]:
+        text += "\n⚠️ المحكّم يجيب أيضًا؛ تحيّز محتمل."
     if mid:
         edit(chat, mid, text, kb)
     else:
@@ -1028,7 +1031,7 @@ def _round_callback(chat, mid, rest):
             return
         if rest.startswith("a:"):
             agent = rest[2:]
-            if agent in d["agents"] and agent != d["judge"]:
+            if agent in d["agents"]:
                 d["answerers"].symmetric_difference_update({agent})
         elif rest.startswith("j:"):
             agent = rest[2:]
@@ -1038,11 +1041,15 @@ def _round_callback(chat, mid, rest):
                 judge.set_default_judge(agent)
         elif rest in ("auto", "deep"):
             d[rest] = not d[rest]
+        elif rest == "length":
+            choices = ("", "موجز", "متوسط", "مفصّل")
+            d["length"] = choices[(choices.index(d.get("length", "")) + 1) % len(choices)]
         elif rest == "send":
             if not d["answerers"] or not d["judge"]:
                 send("اختر مجيبًا واحدًا ومحكّمًا على الأقل.", chat)
                 return
-            status = judge.start_round(d["question"], sorted(d["answerers"]), judge=d["judge"], auto_judge=d["auto"], deep=d["deep"])
+            status = judge.start_round(d["question"], sorted(d["answerers"]), judge=d["judge"], auto_judge=d["auto"], deep=d["deep"],
+                                       judge_may_answer=d["judge"] in d["answerers"], length=d.get("length", ""))
             ROUND_DRAFT.pop(chat, None)
             edit(chat, mid, *_round_status_view(status))
             threading.Thread(target=_round_watch, args=(chat, mid, status["round_id"]), daemon=True).start()

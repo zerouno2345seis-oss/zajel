@@ -33,6 +33,15 @@ class Rounds(Base):
         for op in ("round.status", "round.last", "round.select", "round.judge", "round.deepen", "round.send_report", "round.agents"):
             self.assertEqual(MA.LEVELS[op], "g")
 
+    def test_start_forwards_length_and_judge_participation(self):
+        fake = types.SimpleNamespace(PERPLEXITY="perplexity", start_round=mock.Mock(
+            return_value={"agents": {}, "verdict": "", "deep_answer": ""}))
+        with mock.patch.dict("sys.modules", {"judge": fake}):
+            MA._round("start", {"question": "س", "answerers": ["codex"],
+                                "judge": "codex", "judge_may_answer": True, "length": "موجز"})
+        fake.start_round.assert_called_once_with("س", ["codex"], "codex", False, False,
+                                                 judge_may_answer=True, length="موجز")
+
     def test_trim(self):
         big = {"agents": {"a": {"answer": "x" * 20000}}, "verdict": "v" * 40000, "deep_answer": ""}
         v = MA._round_view(big)
