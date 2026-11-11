@@ -681,6 +681,43 @@ def handle(h, method):
             b = _body(h); S.chat_rename(str(b.get("id", "")), b.get("title")); h.send_json({"chats": S.chats_list()})
         elif path == "/api/assistant/chat/delete" and method == "POST":
             S.chat_delete(str(_body(h).get("id", ""))); h.send_json({"chats": S.chats_list()})
+        elif path in ("/api/term/round/status", "/api/term/round/last", "/api/term/judge_default"):
+            import judge
+            try:
+                if path.endswith("/status"):
+                    h.send_json(judge.round_status(query.get("id", [""])[0]))
+                elif path.endswith("/last"):
+                    h.send_json({"round": judge.last_round()})
+                elif method == "POST":
+                    h.send_json({"judge": judge.set_default_judge(_body(h).get("judge", ""))})
+                else:
+                    h.send_json({"judge": judge.get_default_judge()})
+            except ValueError as e:
+                h.send_json({"error": str(e)}, 400)
+        elif path.startswith("/api/term/round/") and method == "POST":
+            import judge
+            b = _body(h)
+            rid, act = str(b.get("round_id", "")), path.rsplit("/", 1)[1]
+            try:
+                if act == "start":
+                    h.send_json(judge.start_round(b.get("question", ""), b.get("answerers") or [], str(b.get("judge", "")), bool(b.get("auto_judge")),
+                                                  bool(b.get("deep")), b.get("timeout_min")))
+                elif act == "select":
+                    h.send_json(judge.set_selected(rid, str(b.get("agent_id", "")), bool(b.get("selected"))))
+                elif act == "judge":
+                    h.send_json(judge.run_judge(rid, str(b.get("judge", ""))))
+                elif act == "deepen":
+                    h.send_json(judge.deepen(rid, str(b.get("agent_id", ""))))
+                elif act == "export":
+                    r = judge.export_round(rid)
+                    subprocess.Popen(["open", r["path"]], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    h.send_json(r)
+                elif act == "web_answer":
+                    h.send_json(judge.web_answer(rid, b.get("question", ""), b.get("answer", "")))
+                else:
+                    h.send_json({"error": "غير موجود."}, 404)
+            except ValueError as e:
+                h.send_json({"error": str(e)}, 400)
         elif path == "/api/term/list":
             import terminal
             h.send_json(terminal.listing())

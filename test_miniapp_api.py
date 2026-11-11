@@ -22,6 +22,24 @@ class Base(unittest.TestCase):
         return MA.handle({"user": user, "op": op, "args": args or {}, **k})
 
 
+class Rounds(Base):
+    def test_levels(self):
+        self.assertEqual(MA.LEVELS["round.start"], "y")                 # يكتب في طرفيات الماك: تأكيد أولًا
+        r = self.req("round.start", {"question": "س", "answerers": ["claude"]})
+        self.assertEqual(r["needs"], "confirm")
+        self.assertEqual(self.ran, [])
+        r2 = self.req("round.start", {"question": "س", "answerers": ["claude"]}, confirm=r["token"])
+        self.assertTrue(r2["ok"])
+        for op in ("round.status", "round.last", "round.select", "round.judge", "round.deepen", "round.send_report", "round.agents"):
+            self.assertEqual(MA.LEVELS[op], "g")
+
+    def test_trim(self):
+        big = {"agents": {"a": {"answer": "x" * 20000}}, "verdict": "v" * 40000, "deep_answer": ""}
+        v = MA._round_view(big)
+        self.assertEqual(len(v["agents"]["a"]["answer"]), MA.ANSWER_CAP)
+        self.assertTrue(v["agents"]["a"]["truncated"])
+
+
 class Auth(Base):
     def test_only_paired_user(self):
         self.assertTrue(self.req("home")["ok"])

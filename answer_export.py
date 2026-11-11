@@ -649,6 +649,63 @@ def export_many(entries, out_dir=None, extra=()):
     return {"ok": True, "path": str(path), "title": title, "missing": missing}
 
 
+def build_round(title, question, verdict, items, deep, out_path, judge="", also=False):
+    """جولة متعددة الوكلاء: الحكم أولًا، ثم ملحق بالأجوبة المختارة وحدها، ثم البحث المتعمق إن وُجد."""
+    from docx import Document
+    from docx.shared import Cm
+    doc = Document()
+    sec = doc.sections[0]
+    sec.page_height, sec.page_width = Cm(29.7), Cm(21)
+    for side in ("left_margin", "right_margin", "top_margin", "bottom_margin"):
+        setattr(sec, side, Cm(2.2))
+    _sect_bidi(sec._sectPr)
+    _fn_setup(doc)
+    _para(doc, title, size=20, bold=True, color="183478", center=True)
+    sub = ("المحكِّم: " + judge + " · " if judge else "") + "الوكلاء: " + "، ".join(n for n, _ in items) + " · " + time.strftime("%Y-%m-%d %H:%M")
+    _para(doc, sub, size=10, color="6B7587", center=True)
+    _shade(_para(doc, "السؤال", size=12, bold=True, color="183478"), "F2F5F9")
+    _shade(_para(doc, question.strip(), size=13), "F2F5F9")
+    if (verdict or "").strip():
+        h = doc.add_heading(level=1)
+        _font(h.add_run("الحكم والخلاصة"), size=16, bold=True, color="183478")
+        _rtl(h)
+        _body(doc, verdict)
+    if items:
+        h = doc.add_heading(level=1)
+        _font(h.add_run("الملحق: الأجوبة المختارة"), size=16, bold=True, color="183478")
+        _rtl(h)
+        for name, a in items:
+            h2 = doc.add_heading(level=2)
+            _font(h2.add_run("جواب " + name), size=14, bold=True, color="183478")
+            _rtl(h2)
+            _body(doc, a)
+    if (deep or "").strip():
+        h = doc.add_heading(level=1)
+        _font(h.add_run("البحث المتعمق"), size=16, bold=True, color="183478")
+        _rtl(h)
+        _body(doc, deep)
+    fp = sec.footer.paragraphs[0]
+    _font(fp.add_run("زاجل · " + "، ".join(n for n, _ in items)), size=9, color="8B95A7")
+    _rtl(fp)
+    _fn_finish()
+    doc.save(str(out_path))
+    return out_path
+
+
+def export_round(question, verdict, items, deep="", out_dir=None, judge="", also=False):
+    """items: [(اسم الوكيل، جوابه)] للمختارة وحدها."""
+    title = "تقرير: " + short_title(question, "").strip()
+    out_dir = Path(out_dir or HOME / "Downloads")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    base, n = _safe(title), 1
+    path = out_dir / f"{base}.docx"
+    while path.exists():
+        n += 1
+        path = out_dir / f"{base} ({n}).docx"
+    build_round(title, question, verdict, items, deep, path, judge, also)
+    return {"ok": True, "path": str(path), "title": title}
+
+
 def _safe(name):
     return re.sub(r"[\\/:*?\"<>|\n\r\t]+", " ", name).strip()[:90] or "جواب"
 

@@ -1,0 +1,135 @@
+"""اختبار الجولات والمحكِّم بطرفية وهمية (بلا tmux ولا وكلاء حقيقيين)."""
+import json
+import tempfile
+import time
+import unittest
+from pathlib import Path
+
+import answer_export
+import judge
+
+
+class FakeT:
+    def __init__(self):
+        self.BY_ID = {"claude": {"id": "claude", "name": "Claude", "cmd": "claude"}, "codex": {"id": "codex", "name": "Codex", "cmd": "codex"},
+                      "agy": {"id": "agy", "name": "Gemini", "cmd": "agy"}}
+        self.BROADCAST_STATE = {}
+        self.sent = []
+        self.ans = {}        # id ← (سؤال، جواب)
+        self.st = {}
+
+    def broadcast(self, ids, text):
+        self.sent.append((list(ids), text))
+        for i in ids:
+            self.BROADCAST_STATE[i] = {"state": "sent", "note": ""}
+        return {"ok": True}
+
+    def last_answer(self, i):
+        q, a = self.ans.get(i, ("", ""))
+        return {"question": q, "answer": a}
+
+    def state_of(self, i):
+        return (self.st.get(i, "idle"), "", 0)
+
+
+class JudgeTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.t = FakeT()
+        judge.T, judge.DATA, judge.POLL = self.t, self.tmp, 0.01
+        judge.ROUNDS.clear()
+
+    def wait(self, fn, secs=4):
+        t0 = time.time()
+        while time.time() - t0 < secs:
+            v = fn()
+            if v:
+                return v
+            time.sleep(0.02)
+        self.fail("انتهت المهلة")
+
+    def test_states_and_auto_judge(self):
+        r = judge.start_round("ما حكم كذا؟", ["claude", "codex"], judge="agy", auto_judge=True)
+        rid = r["round_id"]
+        self.assertEqual(r["agents"]["claude"]["state"], "waiting")
+        self.assertFalse(r["judge_also_answers"])
+        self.assertIn("المصادر", self.t.sent[0][1])                       # ملاحظة التوثيق من الخادم
+        # جواب قديم لسؤال آخر لا يُلتقط
+        self.t.ans["claude"] = ("سؤال قديم", "جواب قديم")
+        time.sleep(0.15)
+        self.assertEqual(judge.round_status(rid)["agents"]["claude"]["state"], "waiting")
+        self.t.ans["claude"] = ("ما حكم كذا؟ (وثّق)", "جواب [1]\n\nالمصادر\n[1] كتاب ص ١")
+        self.t.st["codex"] = "waiting"
+        self.t.ans["codex"] = ("ما حكم كذا؟ (وثّق)", "جزء")
+        self.wait(lambda: judge.round_status(rid)["agents"]["claude"]["state"] == "done")
+        self.assertEqual(judge.round_status(rid)["agents"]["codex"]["state"], "needs_input")
+        self.t.st["codex"] = "idle"
+        self.wait(lambda: judge.round_status(rid)["judge_state"] in ("running", "waiting_answers"))
+        # المحكِّم يستلم ملف الأجوبة لا النص
+        sent = self.wait(lambda: [s for s in self.t.sent if s[0] == ["agy"]])
+        self.assertIn("answers.md", sent[0][1])
+        self.assertLess(len(sent[0][1]), 4000)
+        self.assertTrue((Path(self.tmp) / "rounds" / rid / "answers.md").is_file())
+        self.t.ans["agy"] = ("⟦حكم:%s⟧ ..." % rid, "## الخلاصة الموحدة\nتم")
+        s = self.wait(lambda: (lambda x: x if x["judge_state"] == "done" else None)(judge.round_status(rid)))
+        self.assertIn("الخلاصة الموحدة", s["verdict"])
+        self.assertEqual(judge.last_round()["round_id"], rid)
+
+    def test_timeout(self):
+        r = judge.start_round("سؤال", ["claude"], timeout_min=1)
+        with judge._LOCK:
+            judge.ROUNDS[r["round_id"]]["created"] -= 120
+        s = self.wait(lambda: (lambda x: x if x["agents"]["claude"]["state"] == "timeout" else None)(judge.round_status(r["round_id"])))
+        self.assertEqual(s["judge_state"], "idle")
+
+    def test_broadcast_skipped_is_error(self):
+        orig = self.t.broadcast
+        self.t.broadcast = lambda ids, text: (orig(ids, text), self.t.BROADCAST_STATE.update({"codex": {"state": "skipped", "note": "يعرض سؤالًا"}}))
+        r = judge.start_round("سؤال", ["codex"])
+        s = self.wait(lambda: (lambda x: x if x["agents"]["codex"]["state"] == "error" else None)(judge.round_status(r["round_id"])))
+        self.assertIn("سؤالًا", s["agents"]["codex"]["note"])
+
+    def test_anonymize_and_judge_also_answers(self):
+        r = judge.start_round("س", ["claude", "codex"], judge="claude")
+        self.assertTrue(r["judge_also_answers"])
+        rid = r["round_id"]
+        with judge._LOCK:
+            rr = judge.ROUNDS[rid]
+            rr["agents"]["claude"]["answer"] = "As Claude, I think هذا صحيح. بحسب Anthropic."
+            rr["agents"]["codex"]["answer"] = "أنا Codex وأرى أنه خطأ."
+        p, key = judge.build_answers_file(rr)
+        txt = p.read_text(encoding="utf-8")
+        self.assertEqual(sorted(key), ["أ", "ب"])
+        for bad in ("Claude", "Codex", "Anthropic"):
+            self.assertNotIn(bad, txt)
+        self.assertIn("الجواب (أ)", txt)
+        self.assertIn("درجة لكل معيار", judge.judge_prompt(rr, p))
+
+    def test_select_and_default_judge(self):
+        r = judge.start_round("س", ["claude", "codex"])
+        s = judge.set_selected(r["round_id"], "codex", False)
+        self.assertFalse(s["agents"]["codex"]["selected"])
+        self.assertEqual(judge.set_default_judge("agy"), "agy")
+        self.assertEqual(judge.get_default_judge(), "agy")
+        with self.assertRaises(ValueError):
+            judge.set_default_judge("nope")
+        with self.assertRaises(ValueError):
+            judge.start_round("", ["claude"])
+
+    def test_deep_note_and_timeout(self):
+        r = judge.start_round("س", ["claude"], deep=True)
+        self.assertEqual(r["timeout_min"], 30)
+        self.assertIn("٨ مصادر", self.t.sent[0][1])
+
+    def test_export_order(self):
+        out = Path(self.tmp) / "out"
+        r = answer_export.export_round("ما الحكم؟", "## الخلاصة الموحدة\nخلاصة", [("Claude", "جواب كلود [1]\n\nالمصادر\n[1] كتاب")], "عمق", out_dir=out, judge="Gemini")
+        from docx import Document
+        txt = "\n".join(p.text for p in Document(r["path"]).paragraphs)
+        self.assertLess(txt.index("الحكم والخلاصة"), txt.index("الملحق: الأجوبة المختارة"))
+        self.assertLess(txt.index("الملحق: الأجوبة المختارة"), txt.index("البحث المتعمق"))
+        self.assertIn("جواب Claude", txt)
+
+
+if __name__ == "__main__":
+    unittest.main()

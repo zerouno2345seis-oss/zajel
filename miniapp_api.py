@@ -24,11 +24,15 @@ LEVELS = {
     "approvals.list": G, "approvals.reject": G, "approvals.approve": R,
     "act.phone_connect": Y, "act.sync_run": Y, "act.wa_digest": G, "act.agent_ping": G, "act.stop_server": R, "act.apply_update": R,
     "act.term_send": R, "act.term_stop": R, "act.setting": G,
+    "round.agents": G, "round.start": Y, "round.last": G, "round.status": G, "round.select": G, "round.judge": G, "round.deepen": G,
+    "round.judge_default": G, "round.send_report": G,
 }
 LABELS = {"files.copy": "نسخ ملفات", "tg.backup_now": "نسخ المحادثات المختارة الآن", "act.phone_connect": "وصل الجوال لاسلكيًا", "act.sync_run": "المزامنة الآن",
-          "act.stop_server": "إيقاف خادم", "act.apply_update": "تنزيل التحديث وإعادة تشغيل زاجل", "act.term_send": "الكتابة في طرفية وكيل", "approvals.approve": "موافقة على عملية معلّقة", "act.term_stop": "إغلاق جلسة طرفية"}
+          "act.stop_server": "إيقاف خادم", "act.apply_update": "تنزيل التحديث وإعادة تشغيل زاجل", "act.term_send": "الكتابة في طرفية وكيل", "approvals.approve": "موافقة على عملية معلّقة", "act.term_stop": "إغلاق جلسة طرفية",
+          "round.start": "سؤال لعدة وكلاء"}
 SUMMARY = {"files.copy": "ينسخ العناصر المختارة إلى الوجهة. لا يحذف شيئًا من الأصل.", "tg.backup_now": "يجلب الجديد من المحادثات المختارة إلى الماك. يستغرق دقائق.",
-           "act.phone_connect": "يجرّب العنوان المحفوظ ثم اكتشاف الشبكة. لا يغيّر شيئًا في الجوال.", "act.sync_run": "يزامن هذا الجهاز مع المستودع الخاص (نحو دقيقة)."}
+           "act.phone_connect": "يجرّب العنوان المحفوظ ثم اكتشاف الشبكة. لا يغيّر شيئًا في الجوال.", "act.sync_run": "يزامن هذا الجهاز مع المستودع الخاص (نحو دقيقة).",
+           "round.start": "يرسل سؤالك إلى الوكلاء المختارين في طرفيات الماك فيبحثون بأدواتهم (قد يستغرق عشر دقائق، وثلاثين في البحث المتعمق)."}
 
 PENDING = {}       # id ← {"op","args","level","code","until","tries","label"}
 LOCK = threading.Lock()
@@ -204,6 +208,8 @@ def run(op, a):
         text, kb = TL._screen(M.ALIAS.get(key, key))
         acts = [{**x, "level": LEVELS[x["op"]], "label": LABELS.get(x["op"], x["op"])} for x in SECTION_ACTIONS.get(key, [])]
         return {"title": M.TITLES[key], "text": text, "actions": acts}
+    if op.startswith("round."):
+        return _round(op[6:], a)
     if op.startswith("tg."):
         return _tg(op, a)
     if op.startswith("act."):
@@ -216,6 +222,50 @@ SECTION_ACTIONS = {
     "phone": [{"op": "act.phone_connect"}], "cloud": [{"op": "act.sync_run"}], "wa": [{"op": "act.wa_digest"}],
     "update": [{"op": "act.apply_update"}],
 }
+
+
+ANSWER_CAP = 12000      # حد حجم الجواب في الرد إلى الهاتف
+
+
+def _round_view(r):
+    if not r:
+        return None
+    r = dict(r)
+    r["agents"] = {k: {**v, "answer": v["answer"][:ANSWER_CAP], "truncated": len(v["answer"]) > ANSWER_CAP} for k, v in r["agents"].items()}
+    r["verdict"] = r["verdict"][:ANSWER_CAP * 2]
+    r["deep_answer"] = r["deep_answer"][:ANSWER_CAP * 2]
+    return r
+
+
+def _round(name, a):
+    import judge
+    import terminal
+    rid = str(a.get("id") or a.get("round_id") or "")
+    if name == "agents":
+        return {"agents": [{"id": x["id"], "name": x["name"]} for x in terminal.AGENTS if x.get("cmd") and x["id"] not in ("shell", "shell2")],
+                "judge": judge.get_default_judge()}
+    if name == "start":
+        ans = [x for x in (a.get("answerers") or []) if x != judge.PERPLEXITY]       # نافذة Perplexity على الماك لا يقرؤها الهاتف
+        return _round_view(judge.start_round(str(a.get("question") or ""), ans, str(a.get("judge") or ""), bool(a.get("auto_judge")), bool(a.get("deep"))))
+    if name == "last":
+        return {"round": _round_view(judge.last_round())}
+    if name == "status":
+        return _round_view(judge.round_status(rid))
+    if name == "select":
+        return _round_view(judge.set_selected(rid, str(a.get("agent_id") or ""), bool(a.get("selected"))))
+    if name == "judge":
+        if a.get("judge"):
+            judge.set_default_judge(str(a["judge"]))
+        return _round_view(judge.run_judge(rid, str(a.get("judge") or "")))
+    if name == "deepen":
+        return _round_view(judge.deepen(rid, str(a.get("agent_id") or "")))
+    if name == "judge_default":
+        return {"judge": judge.set_default_judge(str(a["judge"])) if "judge" in a else judge.get_default_judge()}
+    if name == "send_report":
+        r = judge.export_round(rid)
+        TL.send_file(r["path"], r["title"])
+        return {"sent": True, "title": r["title"], "missing": r.get("missing") or []}
+    raise Refused("عملية غير مدعومة.")
 
 
 def _tg(op, a):

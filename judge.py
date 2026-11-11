@@ -1,0 +1,516 @@
+"""أسئلة عدة وكلاء + محكِّم يتحقق من الإحالات ويلخّص + بحث متعمق + تقرير Word موحّد.
+«الجولة» = سؤال واحد يُرسل لعدة وكلاء في الطرفية؛ حالتها في PB_DATA/rounds/<id>.json، وخيط مراقبة لكل جولة.
+- لا منطق طرفية هنا: كل شيء عبر terminal (broadcast / last_answer / state_of) حتى يُستبدل في الاختبارات بـ T وهمي.
+- أجوبة الوكلاء تُعطى للمحكِّم في ملف (answers.md) لا لصقًا في الطرفية."""
+import json
+import random
+import re
+import threading
+import time
+from pathlib import Path
+
+DATA = None            # PB_DATA؛ إن لم يُضبط أُخذ من terminal.DATA
+T = None               # وحدة الطرفية (تُستبدل في الاختبارات)
+POLL = 2.0             # ثوانٍ بين قراءتين لأجوبة الوكلاء
+STABLE_POLLS = 3       # قراءات متتالية بلا تغيّر (والوكيل هادئ) = انتهى الجواب
+TIMEOUT_MIN = 10
+DEEP_TIMEOUT_MIN = 30
+JUDGE_WAIT = 25 * 60   # أقصى انتظار لجواب المحكِّم (والتعميق)
+SEND_WAIT = 90         # أقصى انتظار لوصول الرسالة إلى الطرفية
+MAX_TERM = 5           # حد terminal.broadcast
+PERPLEXITY = "perplexity"
+FINAL = ("done", "timeout", "error")
+LETTERS = ["أ", "ب", "ج", "د", "هـ", "و"]
+
+CITE_NOTE = ("\n\n(وثّق كل معلومة بمصدرها: ضع بعدها رقمًا بين معقوفين مثل [1]، واختم الجواب بقسم «المصادر» فيه كل رقم ومصدره كاملًا: "
+             "المؤلف، الكتاب، الجزء والصفحة أو الرابط.)")
+DEEP_NOTE = ("\n\n[بحث متعمق] قسّم السؤال إلى أسئلة فرعية وأجب عن كل واحد. ابحث في الإنترنت وفي المكتبة الشاملة معًا، واعتمد ما لا يقل عن ٨ مصادر مختلفة. "
+             "افتح المصادر الأصلية واقرأها بنفسك ولا تكتفِ بالملخصات، وتحقق من كل نص تنقله قبل أن تكتبه. اذكر مواضع الخلاف بين المصادر والأقوال صراحة. "
+             "لا تتعجل؛ لك وقت طويل.")
+
+_LOCK = threading.RLock()
+ROUNDS = {}            # معرّف ← حالة الجولة (الحقيقة في الذاكرة، تُحفظ على القرص عند كل تغيير)
+
+
+# ---------- مساعدات ----------
+def _t():
+    global T
+    if T is None:
+        import terminal
+        T = terminal
+    return T
+
+
+def _data():
+    return Path(DATA) if DATA else Path(getattr(_t(), "DATA", Path.home()))
+
+
+def _dir():
+    d = _data() / "rounds"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _save(r):
+    try:
+        p = _dir() / (r["round_id"] + ".json")
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps(r, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(p)
+    except OSError:
+        pass
+
+
+def _norm(s):
+    return re.sub(r"\s+", " ", str(s or "")).strip()
+
+
+def _same_q(seen, question):
+    """هل آخر سؤال في سجلّ الوكيل هو سؤال هذه الجولة؟ (يمنع التقاط جواب قديم)"""
+    a, b = _norm(seen), _norm(question)[:60]
+    return bool(a) and bool(b) and b in a
+
+
+def _name(aid):
+    if aid == PERPLEXITY:
+        return "Perplexity"
+    if aid == "deep":
+        return "بحث متعمق"
+    try:
+        return _t().BY_ID[aid]["name"]
+    except Exception:
+        return aid
+
+
+def _get(rid):
+    with _LOCK:
+        r = ROUNDS.get(rid)
+        if r:
+            return r
+    p = _dir() / (str(rid) + ".json") if re.fullmatch(r"r_[0-9_a-f]+", str(rid)) else None
+    if not p or not p.is_file():
+        raise ValueError("جولة غير معروفة.")
+    try:
+        r = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        raise ValueError("جولة غير معروفة.")
+    # جولة من جلسة سابقة: لا خيط يراقبها الآن، فلا تبقى «تعمل» إلى الأبد
+    for ag in r.get("agents", {}).values():
+        if ag.get("state") not in FINAL:
+            ag["state"] = "timeout" if ag.get("answer") else "error"
+            ag["note"] = ag.get("note") or "انقطعت المراقبة بإعادة تشغيل زاجل"
+    if r.get("judge_state") in ("waiting_answers", "running", "needs_input"):
+        r["judge_state"] = "error"
+    if r.get("deep_state") in ("running", "needs_input"):
+        r["deep_state"] = "error"
+    with _LOCK:
+        ROUNDS[rid] = r
+    return r
+
+
+def round_status(round_id):
+    with _LOCK:
+        return json.loads(json.dumps(_get(round_id)))
+
+
+def last_round():
+    files = sorted(_dir().glob("r_*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    for p in files:
+        try:
+            return round_status(p.stem)
+        except ValueError:
+            continue
+    return None
+
+
+# ---------- المحكِّم الافتراضي ----------
+def get_default_judge():
+    try:
+        return str(json.loads((_data() / "judge.json").read_text(encoding="utf-8")).get("judge") or "")
+    except (OSError, ValueError):
+        return ""
+
+
+def set_default_judge(agent_id):
+    agent_id = str(agent_id or "").strip()
+    if agent_id and agent_id not in getattr(_t(), "BY_ID", {}):
+        raise ValueError("وكيل غير معروف.")
+    d = _data()
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "judge.json").write_text(json.dumps({"judge": agent_id}, ensure_ascii=False), encoding="utf-8")
+    return agent_id
+
+
+# ---------- بدء جولة ----------
+def start_round(question, answerers, judge="", auto_judge=False, deep=False, timeout_min=None):
+    question = str(question or "").strip()
+    if not question:
+        raise ValueError("اكتب السؤال أولًا.")
+    by_id = getattr(_t(), "BY_ID", {})
+    ans = []
+    for a in answerers or []:
+        a = str(a)
+        if a in ans:
+            continue
+        if a != PERPLEXITY and not (a in by_id and by_id[a].get("cmd")):
+            raise ValueError(f"وكيل غير معروف: {a}")
+        ans.append(a)
+    if not ans:
+        raise ValueError("اختر وكيلًا واحدًا على الأقل ليجيب.")
+    terms = [a for a in ans if a != PERPLEXITY]
+    if len(terms) > MAX_TERM:
+        raise ValueError(f"أكثر من {MAX_TERM} وكلاء في الطرفية دفعة واحدة غير مدعوم.")
+    judge = str(judge or "").strip() or get_default_judge()
+    if judge and judge not in by_id:
+        raise ValueError("محكِّم غير معروف.")
+    if not judge:
+        judge = "claude" if "claude" in by_id else (terms[0] if terms else "")
+    tmo = int(timeout_min) if timeout_min else (DEEP_TIMEOUT_MIN if deep else TIMEOUT_MIN)
+    rid = "r_%s_%04x" % (time.strftime("%Y%m%d_%H%M%S"), random.randint(0, 0xFFFF))
+    r = {"round_id": rid, "question": question, "deep": bool(deep), "auto_judge": bool(auto_judge), "judge": judge,
+         "judge_also_answers": bool(judge and judge in ans), "created": time.time(), "timeout_min": tmo,
+         "agents": {a: {"name": _name(a), "state": "waiting", "selected": True, "answer": "", "note": ""} for a in ans},
+         "judge_state": "idle", "verdict": "", "deep_state": "idle", "deep_answer": "", "deep_agent": "", "judge_note": "", "deep_note": ""}
+    if terms:
+        _t().broadcast(terms, question + CITE_NOTE + (DEEP_NOTE if deep else ""))
+    with _LOCK:
+        ROUNDS[rid] = r
+        _save(r)
+    threading.Thread(target=_watch, args=(rid,), daemon=True).start()
+    return round_status(rid)
+
+
+def web_answer(round_id, question, answer):
+    """جواب Perplexity (نافذة ويب) تقدّمه الواجهة."""
+    answer = str(answer or "").strip()
+    if not answer:
+        raise ValueError("لا جواب لحفظه.")
+    with _LOCK:
+        r = _get(round_id)
+        ag = r["agents"].get(PERPLEXITY)
+        if not ag:
+            ag = r["agents"][PERPLEXITY] = {"name": "Perplexity", "state": "waiting", "selected": True, "answer": "", "note": ""}
+        ag.update(answer=answer, state="done", note="")
+        _save(r)
+    return round_status(round_id)
+
+
+def set_selected(round_id, agent_id, selected):
+    with _LOCK:
+        r = _get(round_id)
+        if agent_id not in r["agents"]:
+            raise ValueError("وكيل ليس في هذه الجولة.")
+        r["agents"][agent_id]["selected"] = bool(selected)
+        _save(r)
+    return round_status(round_id)
+
+
+# ---------- مراقبة أجوبة الوكلاء ----------
+def _poll_agent(r, aid, ag, probe):
+    """يحدّث ag بحسب ما في الطرفية. probe: حالة ثابتة بين القراءات (عدّاد الثبات)."""
+    T_ = _t()
+    bs = getattr(T_, "BROADCAST_STATE", {}).get(aid) or {}
+    bst = bs.get("state")
+    if bst in ("skipped", "error") and not ag["answer"]:
+        ag.update(state="error", note=bs.get("note") or "تعذّر الإرسال إلى الوكيل")
+        return
+    if bst in ("queued", "starting") and not ag["answer"]:
+        ag.update(state="waiting", note=bs.get("note") or "")
+        return
+    try:
+        res = T_.last_answer(aid)
+    except Exception:
+        return
+    text = str(res.get("answer") or "").strip() if _same_q(res.get("question"), r["question"]) else ""
+    try:
+        st = T_.state_of(aid)[0]
+    except Exception:
+        st = "idle"
+    if st == "waiting":
+        if text:
+            ag["answer"] = text
+        ag.update(state="needs_input", note="ينتظر ردّك في الطرفية")
+        probe["stable"] = 0
+        return
+    if not text:
+        ag.update(state="waiting", note="")
+        return
+    if text != ag["answer"]:
+        ag.update(answer=text, state="writing", note="")
+        probe["stable"] = 0
+        return
+    probe["stable"] = probe.get("stable", 0) + 1
+    if probe["stable"] >= STABLE_POLLS and st != "working":
+        ag.update(state="done", note="")
+    else:
+        ag.update(state="writing", note="")
+
+
+def _watch(rid):
+    probes = {}
+    while True:
+        time.sleep(POLL)
+        with _LOCK:
+            r = ROUNDS.get(rid)
+            if not r:
+                return
+            deadline = r["created"] + r["timeout_min"] * 60
+            todo = [(a, ag) for a, ag in r["agents"].items() if ag["state"] not in FINAL and a != PERPLEXITY]
+        changed = False
+        for aid, ag in todo:
+            before = (ag["state"], ag["answer"])
+            _poll_agent(r, aid, ag, probes.setdefault(aid, {}))        # قراءة الطرفية خارج القفل
+            changed |= before != (ag["state"], ag["answer"])
+        with _LOCK:
+            expired = time.time() > deadline
+            if expired:
+                for ag in r["agents"].values():
+                    if ag["state"] not in FINAL:
+                        ag["state"] = "timeout"
+                        ag["note"] = "انتهت المهلة" + (" (هذا ما كتبه حتى الآن)" if ag["answer"] else "")
+                        changed = True
+            alldone = all(ag["state"] in FINAL for ag in r["agents"].values())
+            if changed or alldone:
+                _save(r)
+        if alldone:
+            break
+    with _LOCK:
+        go = r["auto_judge"] and r["judge_state"] == "idle" and any(ag["selected"] and ag["answer"].strip() for ag in r["agents"].values())
+    if go:
+        run_judge(rid)
+
+
+# ---------- المحكِّم ----------
+_SELF = [
+    r"(?:as|I am|I'm|this is)\s+(?:an?\s+)?(?:Claude|ChatGPT|GPT[-\w.]*|Codex|Gemini|Hermes|Nemotron|OpenCode|Antigravity|Perplexity|an AI(?: assistant| language model)?)[^.\n]*[.،,]?",
+    r"(?:أنا|بصفتي|بوصفي|هنا)\s+(?:نموذج\s+)?(?:Claude|كلود|ChatGPT|Codex|Gemini|جيميني|Hermes|Perplexity|مساعد ذكاء اصطناعي)[^.\n]*[.،]?",
+]
+_MODEL_NAMES = r"\b(Claude|Anthropic|ChatGPT|OpenAI|GPT-?\d[\w.]*|Codex|Gemini|Google|Hermes|Nemotron|OpenCode|Antigravity|Perplexity)\b|كلود|جيميني"
+
+
+def anonymize(text, names=()):
+    """يزيل ما يدل على صاحب الجواب: عبارات التعريف بالنفس وأسماء النماذج والوكلاء."""
+    t = str(text or "")
+    for p in _SELF:
+        t = re.sub(p, "", t, flags=re.I)
+    t = re.sub(_MODEL_NAMES, "[وكيل]", t, flags=re.I)
+    for n in names:
+        if n and len(str(n)) > 2:
+            t = re.sub(re.escape(str(n)), "[وكيل]", t, flags=re.I)
+    return re.sub(r"\n{3,}", "\n\n", t).strip()
+
+
+def build_answers_file(r):
+    """يكتب answers.md ويعيد (المسار، مفتاح الرموز {حرف: معرّف}). الأجوبة المختارة وحدها."""
+    items = [(a, ag) for a, ag in r["agents"].items() if ag["selected"] and ag["answer"].strip()]
+    key = {}
+    out = ["# أجوبة الوكلاء عن السؤال", "", "## السؤال", r["question"], ""]
+    if r["judge_also_answers"]:
+        random.shuffle(items)
+        names = [ag["name"] for _, ag in items] + [a for a, _ in items]
+        for n, (a, ag) in enumerate(items):
+            L = LETTERS[n]
+            key[L] = a
+            out += [f"## الجواب ({L})", anonymize(ag["answer"], names), ""]
+    else:
+        for a, ag in items:
+            key[ag["name"]] = a
+            out += [f"## جواب {ag['name']}", ag["answer"].strip(), ""]
+    d = _dir() / r["round_id"]
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / "answers.md"
+    p.write_text("\n".join(out), encoding="utf-8")
+    return p, key
+
+
+OUTPUT_ORDER = ("اكتب تقريرك بهذا الترتيب بالضبط وبعناوين ## بهذه الأسماء:\n"
+                "١. ## الخلاصة الموحدة — خلاصة واحدة متماسكة تعتمد على المصادر الموسومة ✅ وحدها.\n"
+                "٢. ## جدول الاتفاق والاختلاف — جدول: المسألة | ما اتفقت عليه الأجوبة | مواضع الاختلاف.\n"
+                "٣. ## تقييم كل جواب — لكل جواب ثلاثة معايير: الدقة، التوثيق، الشمول؛ لكل معيار درجة من ١٠ مع سبب مكتوب بجملة. ثم الدرجة الكلية.\n"
+                "٤. ## جدول التحقق من الإحالات — جدول: الجواب | الإحالة | الحالة | ملاحظة. الحالات: ✅ موثّق (وجدت النص في المصدر) · ⚠️ فيه خلل (المصدر موجود لكن النص أو الصفحة أو العزو مختلف) · ❌ غير موجود · ❓ تعذّر التحقق.\n"
+                "٥. ## تنبيهات — أخطاء وتناقضات وملاحظات منهجية.\n"
+                "٦. ## ما يحتاج تحقق المستخدم — ما لم تستطع حسمه بنفسك.\n")
+
+VERIFY_PROTO = ("بروتوكول التحقق (إلزامي):\n"
+                "- افتح بنفسك كل مصدر استشهد به أي جواب. للكتب الشرعية استعمل أدوات المكتبة الشاملة إن وُجدت عندك (مثل shamela_verify_quote وshamela_get_page) وإلا فافتح الرابط على الويب.\n"
+                "- لا تضف أي مصدر من عندك ولا تستشهد بما لم يرد في الأجوبة؛ ما لم تفتحه فلا تدّعِ أنك تحققت منه (علّمه ❓).\n"
+                "- الخلاصة الموحدة لا تعتمد إلا على المصادر ✅، وما عداها يُذكر بعلامته ولا يُبنى عليه حكم.\n")
+
+
+def judge_prompt(r, answers_path):
+    p = [f"⟦حكم:{r['round_id']}⟧ أنت محكِّم محايد. اقرأ الملف {answers_path} (فيه السؤال وأجوبة عدة وكلاء) ثم حكّم بينها.", VERIFY_PROTO]
+    if r["judge_also_answers"]:
+        p.append("تنبيه: أحد الأجوبة كتبه المحكِّم نفسه (أنت)، وقد أُخفيت الأسماء ورُتّبت الأجوبة عشوائيًا بالرموز أ ب ج. لا تجامل جوابًا لظنك أنه جوابك؛ "
+                 "ولا بد من درجة لكل معيار مع سبب مكتوب لكل جواب بلا استثناء. اذكر في التقرير: «المحكِّم شارك بالجواب (رمزه)» إن عرفته.")
+    p.append(OUTPUT_ORDER)
+    p.append("وثّق في تقريرك كما يلي: ضع بعد المعلومة رقمًا بين معقوفين مثل [1]، واختم بقسم «المصادر» لما ثبت ✅ فقط.")
+    return "\n".join(p)
+
+
+def _after_send(aid, wait=SEND_WAIT):
+    """ينتظر حتى تُحسم حالة broadcast. يعيد (ok، ملاحظة)."""
+    bs_ = getattr(_t(), "BROADCAST_STATE", {})
+    t0 = time.time()
+    while time.time() - t0 < wait:
+        s = bs_.get(aid) or {}
+        if s.get("state") == "sent":
+            return True, ""
+        if s.get("state") in ("skipped", "error"):
+            return False, s.get("note") or "تعذّر الإرسال"
+        time.sleep(min(POLL, 0.5))
+    return False, "لم تصل الرسالة إلى الوكيل في الوقت المناسب"
+
+
+def _ask_agent(aid, prompt, marker, set_state, wait=JUDGE_WAIT):
+    """يرسل prompt إلى وكيل ويقرأ جوابه (السؤال المحتوي marker). set_state(state, text, note). يعيد (state, text)."""
+    T_ = _t()
+    getattr(T_, "BROADCAST_STATE", {}).pop(aid, None)      # لا نقرأ حالة إرسال قديمة
+    try:
+        T_.broadcast([aid], prompt)
+    except ValueError as e:
+        set_state("error", "", str(e))
+        return "error", ""
+    ok, note = _after_send(aid)
+    if not ok:
+        set_state("error", "", note)
+        return "error", ""
+    text, prev, stable, t0 = "", None, 0, time.time()
+    while time.time() - t0 < wait:
+        time.sleep(POLL)
+        try:
+            res = T_.last_answer(aid)
+            st = T_.state_of(aid)[0]
+        except Exception:
+            continue
+        cur = str(res.get("answer") or "").strip() if marker in str(res.get("question") or "") else ""
+        if st == "waiting":
+            set_state("needs_input", cur, "ينتظر ردّك في الطرفية")
+            stable = 0
+            continue
+        if not cur:
+            set_state("running", "", "")
+            continue
+        if cur != prev:
+            prev, stable = cur, 0
+            set_state("running", cur, "")
+            continue
+        stable += 1
+        if stable >= STABLE_POLLS and st != "working":
+            return "done", cur
+    set_state("error", prev or "", "انتهت مهلة انتظار الجواب")
+    return "error", prev or ""
+
+
+def run_judge(round_id, judge="", deep_verify=True):
+    with _LOCK:
+        r = _get(round_id)
+        if r["judge_state"] in ("running", "waiting_answers", "needs_input"):
+            return round_status(round_id)
+        if judge:
+            if judge not in _t().BY_ID:
+                raise ValueError("محكِّم غير معروف.")
+            r["judge"] = judge
+            r["judge_also_answers"] = judge in r["agents"]
+        if not r["judge"]:
+            raise ValueError("اختر محكِّمًا.")
+        r["judge_state"], r["verdict"], r["judge_note"] = "waiting_answers", "", ""
+        _save(r)
+    threading.Thread(target=_judge_thread, args=(round_id, bool(deep_verify)), daemon=True).start()
+    return round_status(round_id)
+
+
+def _judge_thread(rid, deep_verify):
+    r = _get(rid)
+
+    def st(state, text="", note=""):
+        with _LOCK:
+            r["judge_state"], r["judge_note"] = state, note
+            if text:
+                r["verdict"] = text
+            _save(r)
+    # ينتظر بقية الأجوبة المختارة (حتى مهلة الجولة)
+    while True:
+        with _LOCK:
+            pending = [a for a, ag in r["agents"].items() if ag["selected"] and ag["state"] not in FINAL]
+            late = time.time() > r["created"] + r["timeout_min"] * 60 + POLL * 2
+        if not pending or late:
+            break
+        time.sleep(POLL)
+    with _LOCK:
+        if not any(ag["selected"] and ag["answer"].strip() for ag in r["agents"].values()):
+            st("error", "", "لا جواب مختار يُحكَّم فيه")
+            return
+        path, key = build_answers_file(r)
+        prompt = judge_prompt(r, path) + ("" if deep_verify else "\nالتحقق السريع مقبول هذه المرة: تحقق من الاستشهادات الجوهرية وعلّم الباقي ❓.")
+        judge = r["judge"]
+    st("running")
+    state, text = _ask_agent(judge, prompt, f"⟦حكم:{rid}⟧", st)
+    if state == "done":
+        if r["judge_also_answers"]:
+            mine = next((L for L, a in key.items() if a == judge), "")
+            text = text.rstrip() + "\n\n---\n"
+            if mine and f"المحكِّم شارك بالجواب ({mine})" not in text:
+                text += f"المحكِّم شارك بالجواب ({mine}).\n"
+            text += "مفتاح الرموز: " + "، ".join(f"{L} = {_name(a)}" for L, a in sorted(key.items())) + "\n"
+        st("done", text)
+
+
+# ---------- التعميق ----------
+def deepen(round_id, agent_id=""):
+    with _LOCK:
+        r = _get(round_id)
+        if r["deep_state"] in ("running", "needs_input"):
+            return round_status(round_id)
+        if agent_id:
+            if agent_id not in r["agents"] or agent_id == PERPLEXITY:
+                raise ValueError("وكيل ليس في هذه الجولة.")
+            target = agent_id
+        else:
+            if not any(ag["selected"] and ag["answer"].strip() for ag in r["agents"].values()):
+                raise ValueError("اختر جوابًا واحدًا على الأقل ليُعمَّق منه.")
+            target = r["judge"] or get_default_judge() or next(iter(r["agents"]))
+        r.update(deep_state="running", deep_answer="", deep_agent=target, deep_note="")
+        _save(r)
+    threading.Thread(target=_deep_thread, args=(round_id, target, bool(agent_id)), daemon=True).start()
+    return round_status(round_id)
+
+
+def _deep_thread(rid, target, own):
+    r = _get(rid)
+
+    def st(state, text="", note=""):
+        with _LOCK:
+            r["deep_state"], r["deep_note"] = state, note
+            if text:
+                r["deep_answer"] = text
+            _save(r)
+    marker = f"⟦تعميق:{rid}⟧"
+    if own:
+        prompt = (f"{marker} أعد العمل على سؤالك السابق بعمق أكبر، وابدأ مما كتبته: «{r['question']}»." + DEEP_NOTE + CITE_NOTE)
+    else:
+        with _LOCK:
+            sel = {k: v for k, v in r["agents"].items() if v["selected"] and v["answer"].strip()}
+            body = "\n\n".join(f"## جواب {v['name']}\n{v['answer']}" for v in sel.values())
+        d = _dir() / rid
+        d.mkdir(parents=True, exist_ok=True)
+        p = d / "deep_input.md"
+        p.write_text(f"# السؤال\n{r['question']}\n\n{body}\n", encoding="utf-8")
+        prompt = (f"{marker} ابدأ بحثًا متعمقًا عن السؤال: «{r['question']}». اقرأ الملف {p} فيه أجوبة سابقة اتخذها نقطة انطلاق: "
+                  "تحقق منها، وسدّ ثغراتها، وزد عليها." + DEEP_NOTE + CITE_NOTE)
+    state, text = _ask_agent(target, prompt, marker, st)
+    if state == "done":
+        st("done", text)
+
+
+# ---------- التقرير ----------
+def export_round(round_id, out_dir=None):
+    import answer_export
+    r = round_status(round_id)
+    sel = [(ag["name"], ag["answer"]) for ag in r["agents"].values() if ag["selected"] and ag["answer"].strip()]
+    missing = [ag["name"] for ag in r["agents"].values() if ag["selected"] and not ag["answer"].strip()]
+    if not (sel or r["verdict"].strip() or r["deep_answer"].strip()):
+        raise ValueError("لا شيء يُصدَّر بعد: لا أجوبة ولا حكم.")
+    out = answer_export.export_round(r["question"], r["verdict"], sel, r["deep_answer"], out_dir=out_dir,
+                                     judge=_name(r["judge"]) if r["verdict"] else "", also=r["judge_also_answers"])
+    out["missing"] = missing
+    return out

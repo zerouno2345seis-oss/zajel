@@ -215,6 +215,21 @@ body{padding:0;background:var(--surface2)}
 .phone{width:100%;max-width:none;height:100dvh;border:0;border-radius:0;box-shadow:none;margin:0}
 .tg-bar{padding-top:max(10px,env(safe-area-inset-top,0px))}
 a.btn{text-decoration:none;color:var(--tg-ink)}
+.rq{width:100%;min-height:84px;border:1px solid var(--line);background:var(--surface);border-radius:12px;padding:10px 12px;resize:vertical;outline:none}
+.ag{display:flex;align-items:center;gap:8px;padding:9px 12px;border-bottom:1px solid var(--line)}
+.ag:last-child{border-bottom:0}
+.tg2{border:1px solid var(--line);background:var(--surface2);border-radius:99px;padding:4px 10px;font-size:12.5px}
+.tg2[aria-pressed="true"]{background:var(--zajel);border-color:var(--zajel);color:#fff}
+.tg2.j[aria-pressed="true"]{background:var(--warn);border-color:var(--warn)}
+.rc{background:var(--surface);border-radius:16px;padding:12px;display:flex;flex-direction:column;gap:8px}
+.rc.verdict{border:2px solid var(--zajel)}
+.rc .pv{color:var(--muted);font-size:13px;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;white-space:pre-wrap}
+.md{font-size:14px;line-height:1.75;word-break:break-word}
+.md h3,.md h4{margin:10px 0 4px;font-family:var(--f-display);font-size:15px}
+.md p{margin:4px 0}.md ul,.md ol{margin:4px 0;padding-inline-start:20px}
+.md table{border-collapse:collapse;display:block;overflow-x:auto;font-size:12.5px}
+.md td,.md th{border:1px solid var(--line);padding:3px 7px;white-space:normal;min-width:70px}
+.md th{background:var(--surface2)}
 </style>
 </head>
 <body>
@@ -260,6 +275,7 @@ const P = {
   send:'<path d="M4 12 20 4l-6 16-3-7z"/>',
   text:'<path d="M5 6h14M5 11h14M5 16h9"/>',
   photo:'<rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="9" cy="10" r="2"/><path d="m21 16-5-5-8 8"/>',
+  check:'<path d="m5 12 5 5 9-10"/>',
   file:'<path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4"/>'
 };
 const ic = (n, cls='i') => `<svg class="${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${P[n]}</svg>`;
@@ -281,11 +297,12 @@ const SUBS = [['search','بحث'],['libs','مكتباتي'],['inbox','الوار
 const S = { tab:'home', sub:'search', device:null, devices:[], sheet:null, toast:'', busy:false,
   home:null, places:null, place:null, path:'', entries:null, agents:[], chat:[], agent:'', job:null,
   q:'', scope:'all', type:'all', res:null, sel:new Set(), libs:null, inbox:null, watch:null, backup:null, dls:[],
-  groups:null, sect:null, sectData:null };
+  groups:null, sect:null, sectData:null,
+  amode:'chat', ragents:null, rjudge:'', rans:new Set(), rq:'', rauto:true, rdeep:false, round:null, rexp:new Set(), rwatch:0 };
 
 /* ---- الاتصال ---- */
 // عمليات قراءة فقط: إن انقطعت الشبكة لحظة (تبدّل بين 5G وواي فاي) نعيدها بدل إظهار خطأ
-const SAFE = /(^|\.)(list|poll|home|libs|inbox|watch|backup|dls|agents|search|section|places|suggest|candidates)$/;
+const SAFE = /(^|\.)(list|poll|home|libs|inbox|watch|backup|dls|agents|search|section|places|suggest|candidates|status|last)$/;
 async function api(op, args = {}, confirm = null) {
   const tries = SAFE.test(op) ? 3 : 1;
   for (let i = 1; ; i++) {
@@ -355,8 +372,86 @@ function vFiles() {
   <div class="list">${S.entries.length ? S.entries.map(e => e.is_dir ? item(`${tile('folder','#4a6b8a')}<div class="grow"><div class="t">${esc(e.name)}</div></div><span class="chev">‹</span>`, `data-dir="${esc(e.path)}"`)
     : item(`${tile('file','#5a6877')}<div class="grow"><div class="t">${esc(e.name)}</div><div class="m">${GB(e.size)}</div></div>`, `data-file="${esc(e.path)}" data-name="${esc(e.name)}"`)).join('') : empty('المجلد فارغ.')}</div>`;
 }
+const RST = { waiting:['info','ينتظر'], writing:['info','يكتب…'], needs_input:['warn','ينتظر ردّك على الماك'], done:['ok','اكتمل'], timeout:['bad','انتهت المهلة'], error:['bad','تعذّر'] };
+const JST = { idle:['off','لم يبدأ'], waiting_answers:['info','ينتظر الأجوبة'], running:['info','يعمل…'], needs_input:['warn','ينتظر ردّك على الماك'], done:['ok','تم'], error:['bad','تعذّر'] };
+const plain = t => String(t || '').replace(/[#*|]/g, '');
+function md(t) {
+  const o = []; let list = null, tb = null;
+  const inl = x => esc(x).replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>');
+  const close = () => { if (list) { o.push(`</${list}>`); list = null; } if (tb) { o.push('</table>'); tb = null; } };
+  for (const raw of String(t || '').split('\n')) {
+    const l = raw.trimEnd(), h = l.match(/^\s*(#{1,6})\s+(.*)/), li = l.match(/^\s*(?:[-•*]|\d+[.)])\s+(.*)/);
+    if (/^\s*\|.*\|\s*$/.test(l)) {
+      if (/^[\s|:-]+$/.test(l)) continue;
+      if (list) close(); const cells = l.trim().replace(/^\||\|$/g, '').split('|').map(c => c.trim());
+      if (!tb) { o.push('<table>'); tb = 1; o.push('<tr>' + cells.map(c => `<th>${inl(c)}</th>`).join('') + '</tr>'); } else o.push('<tr>' + cells.map(c => `<td>${inl(c)}</td>`).join('') + '</tr>');
+      continue;
+    }
+    if (tb) close();
+    if (h) { close(); const n = h[1].length < 3 ? 3 : 4; o.push(`<h${n}>${inl(h[2])}</h${n}>`); }
+    else if (li) { const tag = /^\s*\d/.test(l) ? 'ol' : 'ul'; if (list !== tag) { close(); o.push(`<${tag}>`); list = tag; } o.push(`<li>${inl(li[1])}</li>`); }
+    else { close(); if (l.trim()) o.push(`<p>${inl(l)}</p>`); }
+  }
+  close(); return o.join('');
+}
+function vMulti() {
+  const ag = S.ragents; if (!ag) return empty('جارٍ التحميل…');
+  const r = S.round, busy = r && (Object.values(r.agents).some(a => !['done','timeout','error'].includes(a.state)) || ['running','waiting_answers','needs_input'].includes(r.judge_state));
+  const form = `<div class="sec">سؤال لعدة وكلاء</div>
+  <textarea class="rq" id="rq" placeholder="اكتب السؤال الذي تريد أن يجيب عنه عدة وكلاء ثم يحكّم بينهم أحدهم" aria-label="السؤال">${esc(S.rq)}</textarea>
+  <div class="list">${ag.agents.map(a => `<div class="ag"><span class="grow">${esc(a.name)}</span>
+    <button class="tg2" data-ransw="${esc(a.id)}" aria-pressed="${S.rans.has(a.id)}">☑️ يجيب</button>
+    <button class="tg2 j" data-rjudge="${esc(a.id)}" aria-pressed="${S.rjudge === a.id}">⚖️ يحكّم</button></div>`).join('')}</div>
+  <div class="card"><div class="row"><span class="grow">تحكيم تلقائي <span class="muted">(يبدأ حين ينتهي الجميع)</span></span><button class="sw" role="switch" aria-checked="${S.rauto}" data-rauto aria-label="تحكيم تلقائي"></button></div>
+  <div class="row"><span class="grow">بحث متعمق <span class="muted">(أبطأ؛ حتى ٣٠ دقيقة)</span></span><button class="sw" role="switch" aria-checked="${S.rdeep}" data-rdeep aria-label="بحث متعمق"></button></div></div>
+  <button class="btn pri" data-rstart style="padding:12px;justify-content:center" ${busy ? 'disabled' : ''}>أرسل السؤال إلى الوكلاء</button>`;
+  if (!r) return form;
+  const js = JST[r.judge_state] || ['off', r.judge_state], vopen = S.rexp.has('verdict');
+  const vbody = r.verdict ? (vopen ? `<div class="md">${md(r.verdict)}</div>` : `<div class="pv">${esc(plain(r.verdict))}</div>`) : `<span class="muted">${esc(r.judge_note || 'لا حكم بعد.')}</span>`;
+  const verdict = `<div class="rc verdict"><div class="row"><b class="grow">⚖️ الحكم والخلاصة</b>${pill(js[0], js[1])}</div>${vbody}
+    <div class="btns">${r.verdict ? `<button class="btn" data-rx="verdict">${vopen ? 'اطوِ' : 'اقرأ كاملًا'}</button>` : ''}
+    <button class="btn y" data-rjudgenow ${['running','waiting_answers'].includes(r.judge_state) ? 'disabled' : ''}>⚖️ ${r.verdict ? 'أعد التحكيم' : 'حكّم الآن'}</button></div></div>`;
+  const cards = Object.entries(r.agents).map(([id, a]) => {
+    const st = RST[a.state] || ['off', a.state], open = S.rexp.has(id);
+    return `<div class="rc"><div class="row"><button class="chk" data-rsel="${esc(id)}" aria-pressed="${a.selected}" aria-label="ضمّ الجواب إلى التقرير">${a.selected ? ic('check') : ''}</button>
+      <b class="grow" data-rx="${esc(id)}" style="cursor:pointer">${esc(a.name)}</b>${pill(st[0], st[1])}</div>
+      ${a.note ? `<span class="muted">${esc(a.note)}</span>` : ''}
+      ${a.answer ? `<div data-rx="${esc(id)}" style="cursor:pointer">${open ? `<div class="md">${md(a.answer)}${a.truncated ? '<p class="muted">…(مقتطع؛ التقرير يحمله كاملًا)</p>' : ''}</div>` : `<div class="pv">${esc(plain(a.answer))}</div>`}</div>` : ''}
+      <div class="btns"><button class="btn" data-rdeepen="${esc(id)}" ${a.answer ? '' : 'disabled'}>🔬 عمّق جوابه</button></div></div>`;
+  }).join('');
+  const ds = JST[r.deep_state] || ['off', r.deep_state];
+  const dp = r.deep_state !== 'idle' ? `<div class="rc"><div class="row"><b class="grow">🔬 البحث المتعمق</b>${pill(ds[0], ds[1])}</div>
+    ${r.deep_answer ? `<div class="md">${md(r.deep_answer)}</div>` : `<span class="muted">${esc(r.deep_note || 'يعمل على الماك…')}</span>`}</div>` : '';
+  return form + `<div class="sec">الجولة الحالية <span class="muted">${esc(r.question.slice(0, 40))}</span></div>` + verdict + cards + dp +
+    `<div class="btns"><button class="btn" data-rdeepen="">🔬 بحث متعمق من الأجوبة المختارة</button><button class="btn g" data-rreport>📄 أرسل التقرير</button></div>
+     <span class="muted">يضم التقرير الحكم أولًا ثم الأجوبة المختارة (☑️) وحدها، ويصلك ملف Word في هذه المحادثة.</span>`;
+}
+/* جولة الأسئلة: نتبنّى الحالة ونراقبها كل ٣ ثوانٍ ما دام هناك عمل جارٍ */
+function adopt(r) {
+  S.round = r; if (r) { S.rq = S.rq || r.question; }
+  const live = r && (Object.values(r.agents).some(a => !['done','timeout','error'].includes(a.state)) || ['running','waiting_answers','needs_input'].includes(r.judge_state) || ['running','needs_input'].includes(r.deep_state));
+  if (live && !S.rwatch) watchRound(r.round_id);
+}
+async function watchRound(id) {
+  const tok = S.rwatch = Date.now(); let fails = 0;
+  while (S.rwatch === tok && S.round && S.round.round_id === id) {
+    await new Promise(ok => setTimeout(ok, 3000));
+    if (document.hidden || S.sheet) continue;
+    let r = null; try { r = await call('round.status', { id }); fails = 0; } catch (e) { if (++fails < 8) continue; break; }
+    if (!r || S.rwatch !== tok) break; S.round = r; if (S.tab === 'assist' && S.amode === 'multi') render(true);
+    const live = Object.values(r.agents).some(a => !['done','timeout','error'].includes(a.state)) || ['running','waiting_answers','needs_input'].includes(r.judge_state) || ['running','needs_input'].includes(r.deep_state);
+    if (!live) break;
+  }
+  if (S.rwatch === tok) S.rwatch = 0;
+}
+async function roundCall(op, args, ok) {
+  const r = await call(op, args, async () => { const l = await call('round.last'); if (l && l.round) adopt(l.round); render(true); });
+  if (r) { adopt(r.round_id ? r : r.round || S.round); if (ok) say(ok); render(true); }
+}
 function vAssist() {
-  return `<div class="chips">${S.agents.filter(a => a.installed).map(a => `<button class="chip" data-agent="${esc(a.id)}" aria-pressed="${S.agent === a.id}">${esc(a.name)}</button>`).join('')}</div>
+  const sw = `<div class="seg"><button data-amode="chat" aria-pressed="${S.amode !== 'multi'}">محادثة</button><button data-amode="multi" aria-pressed="${S.amode === 'multi'}">سؤال لعدة وكلاء</button></div>`;
+  if (S.amode === 'multi') return sw + vMulti();
+  return sw + `<div class="chips">${S.agents.filter(a => a.installed).map(a => `<button class="chip" data-agent="${esc(a.id)}" aria-pressed="${S.agent === a.id}">${esc(a.name)}</button>`).join('')}</div>
   <div class="msgs">${S.chat.map(m => `<div class="bub ${m.me ? 'me' : 'ai'}">${m.me ? '' : `<span class="who">${esc(m.who)}</span>`}${esc(m.text)}</div>`).join('')}</div>
   ${S.chat.length < 2 ? `<div class="sec">جرّب أن تسأل</div><div class="chips" style="flex-wrap:wrap">${['ما الذي يأخذ مساحة الماك؟','لخّص بريدي غير المقروء','ما حال الوكلاء؟'].map(x => `<button class="chip" data-ask="${esc(x)}">${x}</button>`).join('')}</div>` : ''}`;
 }
@@ -436,7 +531,7 @@ function mainBtn() {
 }
 function renderTg() {
   const views = {home:vHome, files:vFiles, assist:vAssist, tg:vTg, more:vMore};
-  const mb = mainBtn(), composer = S.tab === 'assist';
+  const mb = mainBtn(), composer = S.tab === 'assist' && S.amode !== 'multi';
   return `<div class="tg-bar"><span style="min-width:32px"></span>
     <div class="ttl"><b>زاجل</b><button class="devsw" data-dev>${ic('pc')} ${esc(S.device || '…')} ▾</button></div><span style="min-width:32px"></span></div>
     <div class="screen" id="screen">${views[S.tab]()}</div>
@@ -464,7 +559,7 @@ function render(keep) {
   const fid = document.activeElement && document.activeElement.id; const caret = document.activeElement && 'selectionStart' in document.activeElement ? document.activeElement.selectionStart : null;
   ph.innerHTML = renderTg() + sheetHtml() + (S.toast ? `<div class="toast" role="status">${esc(S.toast)}</div>` : '');
   const n = $('#screen'); if (n) { if (S.tab === 'assist') n.scrollTop = n.scrollHeight; else if (keep) n.scrollTop = top; }
-  if (fid && ['q','ask','fq','mq','newVal'].includes(fid)) { const el = document.getElementById(fid); if (el) { el.focus(); try { el.setSelectionRange(caret, caret); } catch (e) {} } }
+  if (fid && ['q','ask','fq','mq','newVal','rq'].includes(fid)) { const el = document.getElementById(fid); if (el) { el.focus(); try { el.setSelectionRange(caret, caret); } catch (e) {} } }
   syncMain();
 }
 function syncMain() {
@@ -478,7 +573,8 @@ const mbClick = () => { const mb = mainBtn(); mb && doMain(mb.act); };
 const load = {
   home: async () => { S.home = await call('home'); },
   files: async () => { if (S.place) { const r = await call('files.list', { place:S.place, path:S.path }); S.entries = r ? (r.entries || []) : []; } else { const r = await call('files.places'); S.places = r ? (r.places || r) : []; } },
-  assist: async () => { if (!S.agents.length) { S.agents = await call('assist.agents') || []; S.agent = (S.agents.find(a => a.installed) || {}).id || ''; } },
+  assist: async () => { if (S.amode === 'multi') { if (!S.ragents) { const r = await call('round.agents'); if (r) { S.ragents = r; S.rjudge = S.rjudge || r.judge || ''; if (!S.rans.size) S.rans = new Set(r.agents.slice(0, 2).map(a => a.id).filter(x => x !== S.rjudge)); } const l = await call('round.last'); if (l && l.round) adopt(l.round); } return; }
+    if (!S.agents.length) { S.agents = await call('assist.agents') || []; S.agent = (S.agents.find(a => a.installed) || {}).id || ''; } },
   more: async () => { if (!S.groups) S.groups = await call('more.list'); if (S.sect) S.sectData = await call('more.section', { key:S.sect }); },
   tg: async () => { const m = { libs:'tg.libs', inbox:'tg.inbox', watch:'tg.watch', backup:'tg.backup', dls:'tg.dls' }[S.sub]; if (!m) return; const r = await call(m); if (r === null) return;
     if (S.sub === 'libs') S.libs = r; else if (S.sub === 'inbox') S.inbox = r; else if (S.sub === 'watch') S.watch = r; else if (S.sub === 'backup') S.backup = r; else S.dls = r; }
@@ -498,7 +594,7 @@ async function doMain(act) {
   if (act === 'backupnow') { const r = await call('tg.backup_now', {}, () => say('بدأ نسخ المحادثات على الماك')); if (r) say('بدأ نسخ المحادثات على الماك'); }
 }
 document.addEventListener('click', guard(async e => {
-  const t = e.target.closest('button,[data-open],[data-close],[data-place],[data-dir],[data-file],[data-sect],[data-go],[data-setdev],a'); if (!t) return; const d = t.dataset;
+  const t = e.target.closest('button,[data-open],[data-close],[data-place],[data-dir],[data-file],[data-sect],[data-go],[data-setdev],[data-rx],a'); if (!t) return; const d = t.dataset;
   if ('close' in d) { if (e.target !== t) return; S.sheet = null; return render(true); }
   if ('closebtn' in d) { S.sheet = null; return render(true); }
   if (d.go) { S.tab = d.go; S.sect = null; S.sectData = null; if (d.sub) S.sub = d.sub; if (d.go === 'files') { S.place = null; S.path = ''; S.entries = null; } render(); return refresh(); }
@@ -531,6 +627,18 @@ document.addEventListener('click', guard(async e => {
   if (d.file) { S.sheet = { kind:'file', path:d.file, name:d.name }; return render(true); }
   if ('sendfile' in d) { const r = await call('files.send', { place:S.place, path:S.sheet.path }); S.sheet = null; if (r) say('أُرسل الملف إلى محادثتك في تيليجرام'); return render(true); }
   if ('delfile' in d) { const p = S.sheet.path; S.sheet = null; await call('files.delete', { place:S.place, items:[p] }); return render(true); }
+  if (d.amode) { S.amode = d.amode; render(); return refresh(); }
+  if (d.ransw) { S.rans.has(d.ransw) ? S.rans.delete(d.ransw) : S.rans.add(d.ransw); return render(true); }
+  if (d.rjudge) { S.rjudge = S.rjudge === d.rjudge ? '' : d.rjudge; if (S.rjudge) S.rans.delete(S.rjudge); return render(true); }
+  if ('rauto' in d) { S.rauto = !S.rauto; return render(true); }
+  if ('rdeep' in d) { S.rdeep = !S.rdeep; return render(true); }
+  if (d.rx) { S.rexp.has(d.rx) ? S.rexp.delete(d.rx) : S.rexp.add(d.rx); return render(true); }
+  if ('rstart' in d) { const q = ($('#rq').value || '').trim(); S.rq = q; if (!q) return say('اكتب السؤال أولًا'); if (!S.rans.size) return say('اختر وكيلًا واحدًا على الأقل ليجيب');
+    S.round = null; S.rwatch = 0; return roundCall('round.start', { question:q, answerers:[...S.rans], judge:S.rjudge, auto_judge:S.rauto, deep:S.rdeep }, 'بدأ الوكلاء على الماك'); }
+  if (d.rsel) { const a = S.round.agents[d.rsel]; return roundCall('round.select', { id:S.round.round_id, agent_id:d.rsel, selected:!a.selected }); }
+  if ('rjudgenow' in d) return roundCall('round.judge', { id:S.round.round_id, judge:S.rjudge }, 'بدأ التحكيم');
+  if ('rdeepen' in d) return roundCall('round.deepen', { id:S.round.round_id, agent_id:d.rdeepen }, 'بدأ التعميق');
+  if ('rreport' in d) { say('أجهّز التقرير…'); const r = await call('round.send_report', { id:S.round.round_id }); if (r) say('أُرسل التقرير إلى محادثتك في تيليجرام' + (r.missing && r.missing.length ? ' (بدون: ' + r.missing.join('، ') + ')' : '')); return; }
   if (d.agent) { S.agent = d.agent; return render(true); }
   if (d.ask) return ask(d.ask);
   if ('send' in d) { const v = ($('#ask').value || '').trim(); if (v) ask(v); return; }
@@ -548,6 +656,7 @@ document.addEventListener('click', guard(async e => {
 document.addEventListener('input', e => {
   const id = e.target.id;
   if (id === 'q') S.q = e.target.value;
+  else if (id === 'rq') S.rq = e.target.value;
   else if (/^c\d$/.test(id) && e.target.value) { const nx = $('#c' + (+id[1] + 1)); if (nx) nx.focus(); }
   else if (id === 'mq') { const v = norm(e.target.value); document.querySelectorAll('.grid-more button').forEach(b => b.hidden = v && !norm(b.textContent).includes(v)); }
 });
