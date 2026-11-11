@@ -417,6 +417,15 @@ function thumb(p, e, size) {
 }
 
 /* ---------- الأقسام ووجهة الحفظ ---------- */
+// قسم «نقل وإنقاذ المساحات»: يُنشأ هنا (التبويب + الحاوية) ويرسم محتواه sections.js
+(() => {
+  if ($('#v-rescue')) return;
+  const tabs = document.querySelector('.tab[data-v="servers"]'); if (!tabs) return;
+  const t = el('span', '🛟 نقل وإنقاذ المساحات', 'tab'); t.dataset.v = 'rescue'; tabs.after(t);
+  const v = el('div', undefined, 'view'); v.id = 'v-rescue';
+  const pg = el('div', undefined, 'page wide'); pg.id = 'rs-page'; v.append(pg);
+  $('#v-servers').after(v);
+})();
 document.querySelectorAll('.tab').forEach(t => t.onclick = () => {
   document.querySelectorAll('.tab').forEach(x => x.classList.remove('on')); t.classList.add('on');
   document.body.dataset.sec = t.dataset.v; $('#secBtn').textContent = t.textContent + ' ▾'; $('#secMenu .menupop').hidden = true;
@@ -424,6 +433,7 @@ document.querySelectorAll('.tab').forEach(t => t.onclick = () => {
   if (t.dataset.v === 'apps' && !apps) loadApps();
   if (t.dataset.v === 'servers') window.loadServersView?.();
   if (t.dataset.v === 'phone') window.loadPhoneView?.();
+  if (t.dataset.v === 'rescue') window.loadRescueView?.();
 });
 async function initDest() {
   const { items } = await api('/api/destinations');
