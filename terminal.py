@@ -436,6 +436,22 @@ def _persist_model_choice(i):
     threading.Thread(target=run, daemon=True).start()
 
 
+def _sticky_cmd(i, cmd):
+    """OpenCode يثبّت في إعداده نموذجًا افتراضيًا يطغى على آخر ما اختاره المستخدم بـ/models عند كل تشغيل؛ نُشغّله بآخر نموذج اختاره (يحفظه OpenCode في model.json).
+    وغيره (Claude وCodex وpi وHermes) يحفظ اختيار المستخدم في إعداده بنفسه."""
+    if i != "opencode" or " -m " in " " + cmd + " ":
+        return cmd
+    try:
+        mj = Path.home() / ".local/state/opencode/model.json"
+        rec = json.loads(mj.read_text(encoding="utf-8")).get("recent") or []
+        pid, mid = rec[0].get("providerID", ""), rec[0].get("modelID", "")
+        if re.fullmatch(r"[\w.\-]+", pid or "") and re.fullmatch(r"[\w.\-:/]+", mid or ""):
+            return f"{cmd} -m {pid}/{mid}"
+    except Exception:
+        pass
+    return cmd
+
+
 def start(i, cwd=""):
     n = _name(i)
     _persist_model_choice(i)
@@ -449,7 +465,7 @@ def start(i, cwd=""):
         _t("set-option", "-t", n, "status", "off")
         _t("set-option", "-t", n, "history-limit", "5000")
         _t("set-option", "-t", n, "window-size", "manual")
-        cmd = BY_ID[i]["cmd"]
+        cmd = _sticky_cmd(i, BY_ID[i]["cmd"])
         if cmd:
             time.sleep(0.6)       # ريثما يجهز الـshell
             _t("send-keys", "-t", n, "-l", "--", cmd)
@@ -729,7 +745,7 @@ def _guard_tick(live):
             if st == "stopped":
                 start(i)
             else:                              # الجلسة حيّة والوكيل خرج: أعد كتابة أمره في الطرفية نفسها
-                _t("send-keys", "-t", _name(i), "-l", "--", a["cmd"])
+                _t("send-keys", "-t", _name(i), "-l", "--", _sticky_cmd(i, a["cmd"]))
                 _t("send-keys", "-t", _name(i), "Enter")
             g["last"] = "revived"
             if CFG["notify"]:

@@ -225,5 +225,19 @@ class CustomAgentsAndShortcuts(unittest.TestCase):
             T._t = orig_t
 
 
+class StickyModelTests(unittest.TestCase):
+    def test_opencode_uses_last_chosen_model(self):
+        import tempfile, json
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / ".local/state/opencode").mkdir(parents=True)
+            (Path(d) / ".local/state/opencode/model.json").write_text(json.dumps({"recent": [{"providerID": "antigravity", "modelID": "gemini-3.8-flash-medium"}]}))
+            with mock.patch.object(Path, "home", lambda: Path(d)):
+                self.assertEqual(T._sticky_cmd("opencode", "opencode"), "opencode -m antigravity/gemini-3.8-flash-medium")
+                self.assertEqual(T._sticky_cmd("claude", "claude"), "claude")
+            with mock.patch.object(Path, "home", lambda: Path(d) / "none"):
+                self.assertEqual(T._sticky_cmd("opencode", "opencode"), "opencode")
+
+
 if __name__ == "__main__":
     unittest.main()
