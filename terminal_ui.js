@@ -194,6 +194,32 @@
     rail.addEventListener('click', hide);
   }
 
+  // تلميح سريع لأزرار نافذة الطرفيات: تلميح النظام (title) يتأخر نحو ثانية، فنُظهر الاسم بعد لحظة قصيرة
+  (() => {
+    if (window.__zajelFastTips) return;
+    window.__zajelFastTips = true;
+    let tip = null, timer = 0, cur = null;
+    const hide = () => { clearTimeout(timer); cur = null; if (tip) { tip.remove(); tip = null; } };
+    document.addEventListener('mouseover', e => {
+      const el = e.target.closest && e.target.closest('#zajel-term-window [title], #zajel-term-window [data-tip], .as-terminal-ui [title], .as-terminal-ui [data-tip]');
+      if (!el || el.closest('.rail .agent')) { if (!el) hide(); return; }
+      if (el.title) { el.dataset.tip = el.title; el.removeAttribute('title'); }      // يمنع تلميح النظام البطيء
+      if (tip && tip._el === el) return;
+      hide(); cur = el;
+      timer = setTimeout(() => {
+        if (!el.isConnected || !el.dataset.tip) return;
+        tip = document.createElement('div'); tip._el = el; tip.className = 'rail-flytip'; tip.setAttribute('role', 'tooltip');
+        tip.textContent = el.dataset.tip;
+        (document.getElementById('zajel-term-window') || document.body).appendChild(tip);
+        const r = el.getBoundingClientRect();
+        tip.style.left = Math.max(4, Math.min(innerWidth - tip.offsetWidth - 4, r.left + r.width / 2 - tip.offsetWidth / 2)) + 'px';
+        tip.style.top = (r.bottom + 6 + tip.offsetHeight > innerHeight ? r.top - tip.offsetHeight - 6 : r.bottom + 6) + 'px';
+      }, 120);
+    });
+    document.addEventListener('mouseout', e => { const el = tip ? tip._el : cur; if (el && e.relatedTarget && el.contains(e.relatedTarget)) return; if (el && !el.contains(e.target)) return; hide(); });
+    document.addEventListener('mousedown', hide, true);
+  })();
+
   function renderRail() {
     if (!root) return;
     const rail = root.querySelector('.rail');
