@@ -70,6 +70,7 @@ import fileops  # noqa: E402
 import archives
 import rclone_src  # noqa: E402
 import migrate  # noqa: E402
+import transfer_jobs  # noqa: E402
 import ios_src  # noqa: E402
 import syncer  # noqa: E402
 import kindle_src  # noqa: E402
@@ -2240,6 +2241,8 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_header("Cache-Control", "max-age=86400")
                 self.end_headers()
                 self.wfile.write(body)
+            elif url.path.startswith("/api/rescue/"):
+                self.send_json(transfer_jobs.http_get(url.path, query))
             elif url.path == "/api/ops/get":
                 self.send_json(fileops.details(query.get("id", [""])[0]))
             elif url.path == "/api/ops/list":
@@ -2496,6 +2499,9 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("اكتب رابطًا مثل smb://اسم-الجهاز/المشاركة")
                 subprocess.Popen(["/usr/bin/open", url_])
                 self.send_json({"ok": True, "message": "تُفتح نافذة الاتصال من macOS؛ أدخل كلمة المرور هناك."})
+            elif self.path.startswith("/api/rescue/"):
+                body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))) or b"{}")
+                self.send_json(transfer_jobs.http_post(self.path, body))
             elif self.path == "/api/ops/pause":
                 body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))) or b"{}")
                 fileops.pause(str(body.get("id", "")), body.get("paused", True))
@@ -2675,6 +2681,7 @@ def main():
     threading.Thread(target=watch_keeper, daemon=True).start()
     threading.Thread(target=phone_wifi_keeper, daemon=True).start()
     migrate.init(sys.modules[__name__], DATA)
+    transfer_jobs.init(sys.modules[__name__], DATA)
     syncer.init(sys.modules[__name__], DATA)
     server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     server.daemon_threads = True
