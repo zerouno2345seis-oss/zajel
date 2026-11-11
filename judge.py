@@ -32,6 +32,7 @@ DEEP_NOTE = ("\n\n[بحث متعمق] قسّم السؤال إلى أسئلة ف
              "لا تتعجل؛ لك وقت طويل.")
 
 _LOCK = threading.RLock()
+_WATCHING = set()      # الجولات التي يراقبها خيط الآن
 ROUNDS = {}            # معرّف ← حالة الجولة (الحقيقة في الذاكرة، تُحفظ على القرص عند كل تغيير)
 
 
@@ -189,6 +190,30 @@ def start_round(question, answerers, judge="", auto_judge=False, deep=False, tim
     return round_status(rid)
 
 
+def reask(round_id, agent_id):
+    """يعيد سؤال الجولة نفسه على وكيل واحد: يُمسح جوابه السابق ويُنتظر الجديد (وتمتد مهلة الجولة)."""
+    with _LOCK:
+        r = _get(round_id)
+        ag = r["agents"].get(agent_id)
+        if not ag or agent_id == PERPLEXITY:
+            raise ValueError("لا يمكن إعادة السؤال على هذا الوكيل.")
+        ag.update(state="waiting", answer="", note="أُعيد السؤال", prev=ag.get("answer") or ag.get("prev", ""))   # الجواب القديم لا يُلتقط مرة أخرى
+        r["created"] = time.time()                 # مهلة جديدة للجولة كلها
+        if r["judge_state"] in ("done", "error"):
+            r["judge_state"] = "idle"
+        watching = rid_watching(round_id)
+        _save(r)
+    getattr(_t(), "BROADCAST_STATE", {}).pop(agent_id, None)
+    _t().broadcast([agent_id], r["question"] + CITE_NOTE + (DEEP_NOTE if ag.get("deep") else ""))
+    if not watching:
+        threading.Thread(target=_watch, args=(round_id,), daemon=True).start()
+    return round_status(round_id)
+
+
+def rid_watching(rid):
+    return rid in _WATCHING
+
+
 def web_answer(round_id, question, answer):
     """جواب Perplexity (نافذة ويب) تقدّمه الواجهة."""
     answer = str(answer or "").strip()
@@ -242,6 +267,8 @@ def _poll_agent(r, aid, ag, probe):
     except Exception:
         return
     text = _strip_notes(str(res.get("answer") or "")) if _same_q(res.get("question"), r["question"]) else ""
+    if text and ag.get("prev") and text == ag["prev"]:
+        text = ""                                 # بعد «أعد السؤال»: ما زال هذا هو الجواب السابق
     try:
         st = T_.state_of(aid)[0]
     except Exception:
@@ -267,6 +294,14 @@ def _poll_agent(r, aid, ag, probe):
 
 
 def _watch(rid):
+    _WATCHING.add(rid)
+    try:
+        _watch_loop(rid)
+    finally:
+        _WATCHING.discard(rid)
+
+
+def _watch_loop(rid):
     probes = {}
     while True:
         time.sleep(POLL)

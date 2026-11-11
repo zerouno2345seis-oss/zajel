@@ -702,6 +702,8 @@ def handle(h, method):
                 if act == "start":
                     h.send_json(judge.start_round(b.get("question", ""), b.get("answerers") or [], str(b.get("judge", "")), bool(b.get("auto_judge")),
                                                   bool(b.get("deep")), b.get("timeout_min"), b.get("deep_agents") or []))
+                elif act == "reask":
+                    h.send_json(judge.reask(rid, str(b.get("agent_id", ""))))
                 elif act == "select":
                     h.send_json(judge.set_selected(rid, str(b.get("agent_id", "")), bool(b.get("selected"))))
                 elif act == "judge":

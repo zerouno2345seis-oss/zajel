@@ -131,5 +131,27 @@ class JudgeTest(unittest.TestCase):
         self.assertIn("جواب Claude", txt)
 
 
+    def test_deep_for_one_agent_and_reask(self):
+        r = judge.start_round("س", ["claude", "codex"], deep_agents=["codex"])
+        rid = r["round_id"]
+        self.assertTrue(r["agents"]["codex"]["deep"]) ; self.assertFalse(r["agents"]["claude"]["deep"])
+        texts = {tuple(ids): txt for ids, txt in self.t.sent}
+        self.assertNotIn("[بحث متعمق]", texts[("claude",)])
+        self.assertIn("[بحث متعمق]", texts[("codex",)])
+        self.assertEqual(r["timeout_min"], judge.DEEP_TIMEOUT_MIN)
+        self.t.ans["claude"] = ("س", "جواب أول")
+        self.wait(lambda: judge.round_status(rid)["agents"]["claude"]["state"] == "done")
+        n = len(self.t.sent)
+        r = judge.reask(rid, "claude")
+        self.assertEqual(r["agents"]["claude"]["state"], "waiting")
+        self.assertEqual(r["agents"]["claude"]["answer"], "")
+        self.assertEqual(self.t.sent[n][0], ["claude"])
+        time.sleep(0.2)
+        self.assertEqual(judge.round_status(rid)["agents"]["claude"]["state"], "waiting")   # الجواب القديم لا يُلتقط
+        self.t.ans["claude"] = ("س", "جواب ثانٍ")
+        self.wait(lambda: judge.round_status(rid)["agents"]["claude"]["answer"] == "جواب ثانٍ")
+        with self.assertRaises(ValueError):
+            judge.reask(rid, "agy")              # ليس من المجيبين
+
 if __name__ == "__main__":
     unittest.main()
