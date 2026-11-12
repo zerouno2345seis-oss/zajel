@@ -15,10 +15,18 @@ class FakeT:
                       "agy": {"id": "agy", "name": "Gemini", "cmd": "agy"}}
         self.BROADCAST_STATE = {}
         self.sent = []
+        self.events = []     # ترتيب الاستدعاءات: ("restart", id) و("broadcast", ids)
+        self.restart_err = None
         self.ans = {}        # id ← (سؤال، جواب)
         self.st = {}
 
+    def restart(self, i, cwd=""):
+        self.events.append(("restart", i))
+        if self.restart_err:
+            raise self.restart_err
+
     def broadcast(self, ids, text):
+        self.events.append(("broadcast", list(ids)))
         self.sent.append((list(ids), text))
         for i in ids:
             self.BROADCAST_STATE[i] = {"state": "sent", "note": ""}
@@ -32,15 +40,63 @@ class FakeT:
         return (self.st.get(i, "idle"), "", 0)
 
 
+class FakeS:
+    """بديل وهمي لوحدة sources: لا notebooklm ولا MCP ولا خادم الشاملة."""
+    def __init__(self):
+        self.nb = {}               # معرّف الدفتر ← نتيجة ask_notebook
+        self.asked = []
+        self.ensure = {}           # وكيل ← نتيجة ensure_agent (الافتراضي ok)
+        self.ensured = []
+        self.notes = []
+        self.written = []
+        self.verify = {}           # نص ← نتيجة shamela_verify؛ غياب المفتاح = None (تعذّر)
+        self.verified = []
+        self.added = {}            # وكيل ← قائمة الوصلات المسجّلة حديثًا
+
+    def ask_notebook(self, nb_id, question, timeout=150):
+        self.asked.append((nb_id, question))
+        r = self.nb.get(nb_id, {"ok": True, "answer": "جواب " + nb_id, "refs": [{"n": 1, "text": "مقطع حرفي من " + nb_id}], "note": ""})
+        if isinstance(r, Exception):
+            raise r
+        return r
+
+    def ensure_agent(self, agent_id, libraries):
+        self.ensured.append((agent_id, list(libraries)))
+        r = self.ensure.get(agent_id, {"ok": True, "note": ""})
+        if isinstance(r, Exception):
+            raise r
+        return dict(r, added=self.added.get(agent_id, []))
+
+    def source_note(self, libraries, evidence_path=""):
+        self.notes.append((list(libraries), evidence_path))
+        out = ""
+        if libraries:
+            out += "\n\n[مصادر: " + "،".join(libraries) + "]"
+        if evidence_path:
+            out += "\n[أدلة: " + str(evidence_path) + "]"
+        return out
+
+    def write_evidence(self, path, items):
+        self.written.append(items)
+        Path(path).write_text("\n".join(i["title"] + ":" + i["answer"] for i in items), encoding="utf-8")
+        return str(path)
+
+    def shamela_verify(self, quote):
+        self.verified.append(quote)
+        return self.verify.get(quote)
+
+
 class JudgeTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         self.t = FakeT()
-        judge.T, judge.DATA, judge.POLL = self.t, self.tmp, 0.01
+        self.s = FakeS()
+        judge.T, judge.DATA, judge.POLL, judge.S = self.t, self.tmp, 0.01, self.s
         judge.ROUNDS.clear()
         judge.set_default_judge("agy")
 
     def tearDown(self):
+        judge.S = None
         judge.ROUNDS.clear()          # خيوط المراقبة تخرج حين تختفي جولتها، فلا تكتب في مجلد الاختبار التالي
         time.sleep(judge.POLL * 5)
 
@@ -240,6 +296,266 @@ class JudgeTest(unittest.TestCase):
         p = judge.judge_prompt(rr, "/a/answers.md", "/a/verdict.md")
         for w in ("المتن نظيف", "[^1]", "جداول Markdown", "/a/verdict.md"):
             self.assertIn(w, p)
+
+    # ---------- سلسلة المصادر ----------
+    def _src(self, mode="answer", nbs=("abcdef123456",), libs=("shamela",)):
+        return {"libraries": list(libs), "notebooks": [{"id": n, "title": "دفتر " + n[:3]} for n in nbs], "nb_mode": mode}
+
+    def _nbid(self, nid):
+        return "nb_" + nid[:8]
+
+    def test_no_sources_is_unchanged(self):
+        r = judge.start_round("س", ["codex"], sources={"libraries": [], "notebooks": []})
+        self.assertNotIn("sources", r)
+        self.assertNotIn("sources", judge.start_round("س", ["codex"], sources=None))
+        self.assertEqual(self.s.ensured, [])
+        self.assertEqual(self.t.sent[0][1], "س" + judge.CITE_NOTE)
+
+    def test_notebook_pseudo_answerer_answer_mode(self):
+        r = judge.start_round("س", ["codex"], sources=self._src("answer"))
+        rid, nb = r["round_id"], self._nbid("abcdef123456")
+        self.assertEqual(r["agents"][nb]["kind"], "notebook")
+        self.assertEqual(r["agents"][nb]["name"], "دفتر: دفتر abc")
+        self.assertEqual(r["agents"][nb]["nb_id"], "abcdef123456")
+        self.assertEqual(r["sources"]["nb_mode"], "answer")
+        self.assertEqual(self.t.sent[0][0], ["codex"])                 # يُرسل فورًا والدفتر يجيب بالتوازي
+        s = self.wait(lambda: (lambda x: x if x["agents"][nb]["state"] == "done" else None)(judge.round_status(rid)))
+        self.assertEqual(s["agents"][nb]["answer"], "جواب abcdef123456")
+        self.assertEqual(s["agents"][nb]["refs"], [{"n": 1, "text": "مقطع حرفي من abcdef123456"}])
+        self.assertEqual(self.s.asked, [("abcdef123456", "س")])
+        self.assertNotIn(nb, [i for ids, _ in self.t.sent for i in ids])     # لا طرفية للدفتر
+        self.assertEqual(self.s.ensured, [("codex", ["shamela"])])
+
+    def test_notebook_reference_mode_waits_and_writes_evidence(self):
+        r = judge.start_round("س", ["codex"], sources=self._src("reference"))
+        rid = r["round_id"]
+        sent = self.wait(lambda: self.t.sent)                               # أُرسل بعد انتهاء الدفتر
+        self.assertEqual(r["agents"]["codex"]["state"], "waiting")
+        ev = Path(self.tmp) / "rounds" / rid / "evidence.md"
+        self.assertTrue(ev.is_file())
+        self.assertIn("evidence.md", sent[0][1])
+        self.assertEqual(self.s.written[0][0]["refs"][0]["text"], "مقطع حرفي من abcdef123456")
+        self.assertEqual(judge.round_status(rid)["evidence_path"], str(ev))
+
+    def test_sources_only_round_without_terminal_agents(self):
+        r = judge.start_round("س", [], sources=self._src("answer"), judge="agy")
+        rid, nb = r["round_id"], self._nbid("abcdef123456")
+        self.assertEqual(list(r["agents"]), [nb])
+        self.wait(lambda: judge.round_status(rid)["agents"][nb]["state"] == "done")
+        self.assertEqual(self.t.sent, [])
+        with self.assertRaises(ValueError):
+            judge.start_round("س", [], sources=None)
+
+    def test_ensure_agent_failure_does_not_stop_round(self):
+        self.s.ensure["codex"] = {"ok": False, "note": "هذا الوكيل لا يدعم المصادر بعد"}
+        r = judge.start_round("س", ["codex", "claude"], judge="agy", sources=self._src("answer", nbs=()))
+        self.assertIn("لا يدعم", r["agents"]["codex"]["note"])
+        self.assertTrue(any("لا يدعم" in v for v in r["source_issues"].values()))
+        self.assertEqual(sorted(i for ids, _ in self.t.sent for i in ids), ["claude", "codex"])      # الجولة مضت
+        self.s.ensure["codex"] = RuntimeError("boom")
+        r = judge.start_round("س", ["codex"], judge="agy", sources=self._src("answer", nbs=()))
+        self.assertIn("codex", r["source_issues"])
+
+    def test_added_connectors_restart_live_agent_before_broadcast(self):
+        self.s.added = {"codex": ["zajel_shamela"]}
+        self.t.st["codex"] = "idle"                      # جلسة حيّة هادئة
+        r = judge.start_round("س", ["codex", "claude"], judge="agy", sources=self._src("answer", nbs=()))
+        self.assertEqual(self.t.events[0], ("restart", "codex"))      # قبل أي إرسال
+        self.assertNotIn(("restart", "claude"), self.t.events)
+        self.assertLess(self.t.events.index(("restart", "codex")), min(i for i, e in enumerate(self.t.events) if e[0] == "broadcast"))
+        self.assertIn("أُعيد تشغيل الوكيل لتفعيل وصلات المصادر", r["agents"]["codex"]["note"])
+
+    def test_added_but_session_stopped_or_busy(self):
+        self.s.added = {"codex": ["zajel_shamela"]}
+        self.t.st["codex"] = "stopped"                   # لا جلسة: broadcast يبدأ جلسة جديدة
+        judge.start_round("س", ["codex"], judge="agy", sources=self._src("answer", nbs=()))
+        self.assertNotIn(("restart", "codex"), self.t.events)
+        self.t.events.clear()
+        self.t.st["codex"] = "working"                   # مشغول: لا نقطع عمله
+        r = judge.start_round("س", ["codex"], judge="agy", sources=self._src("answer", nbs=()))
+        self.assertNotIn(("restart", "codex"), self.t.events)
+        self.assertIn("أعد تشغيل", r["agents"]["codex"]["note"])
+        self.assertTrue(self.t.sent)
+
+    def test_no_added_means_no_restart(self):
+        self.t.st["codex"] = "idle"
+        judge.start_round("س", ["codex"], judge="agy", sources=self._src("answer", nbs=()))
+        self.assertNotIn(("restart", "codex"), self.t.events)
+        self.assertTrue(self.t.sent)
+
+    def test_restart_failure_does_not_stop_round(self):
+        self.s.added = {"codex": ["zajel_shamela"]}
+        self.t.st["codex"] = "idle"
+        self.t.restart_err = OSError("tmux")
+        r = judge.start_round("س", ["codex"], judge="agy", sources=self._src("answer", nbs=()))
+        self.assertIn("أعد تشغيل هذا الوكيل بنفسك", r["agents"]["codex"]["note"])
+        self.assertEqual(self.t.sent[0][0], ["codex"])                # أُرسل السؤال رغم الفشل
+        self.assertTrue(any("أعد تشغيل" in v for v in r["source_issues"].values()))
+
+    def test_round_with_real_sources_module_and_fake_runner(self):
+        """الوحدة الحقيقية sources بمنفّذ أوامر وهمي: تطابق الأشكال بين judge وsources في الوضعين."""
+        import sources
+        calls = []
+
+        def run(argv, timeout, inp=None):
+            calls.append(argv)
+            if argv[:2] == ["notebooklm", "ask"]:
+                return 0, json.dumps({"answer": "جواب الدفتر [1]", "references": [{"citation_number": 1, "cited_text": "نص حرفي من الدفتر"}]}), ""
+            if argv[1:3] == ["mcp", "list"]:
+                return 0, "zajel_shamela zajel_aljam3", ""
+            return 0, "", ""
+        old_data, old_run = sources.DATA, sources.RUN
+        sources.DATA, sources.RUN, judge.S = Path(self.tmp), run, sources
+        try:
+            for mode in ("answer", "reference"):
+                with self.subTest(mode=mode):
+                    self.t.sent.clear()
+                    r = judge.start_round("س", ["codex"], judge="agy", sources=self._src(mode, libs=("shamela", "aljam3:3")))
+                    rid, nb = r["round_id"], self._nbid("abcdef123456")
+                    s = self.wait(lambda: (lambda x: x if x["agents"][nb]["state"] == "done" else None)(judge.round_status(rid)))
+                    self.assertEqual(s["agents"][nb]["answer"], "جواب الدفتر [1]")
+                    self.assertEqual(s["agents"][nb]["refs"], [{"n": 1, "text": "نص حرفي من الدفتر"}])
+                    self.wait(lambda: self.t.sent)
+                    sent = self.t.sent[-1][1]
+                    self.assertIn("المكتبة الشاملة", sent)                 # source_note الحقيقي
+                    self.assertIn("library_id: 3", sent)
+                    self.assertEqual(("evidence.md" in sent), mode == "reference")
+                    if mode == "reference":
+                        ev = (Path(self.tmp) / "rounds" / rid / "evidence.md").read_text(encoding="utf-8")
+                        self.assertIn("نص حرفي من الدفتر", ev)
+                        self.assertIn("جواب الدفتر [1]", ev)
+                    self.assertEqual(s["source_issues"], {})
+            self.assertTrue(any(c[:2] == ["notebooklm", "ask"] and "--new" not in c for c in calls))
+        finally:
+            sources.DATA, sources.RUN = old_data, old_run
+
+    def test_source_note_appended_to_broadcast(self):
+        judge.start_round("س", ["codex"], sources=self._src("answer", libs=("shamela", "aljam3:3")))
+        self.assertTrue(self.t.sent[0][1].startswith("س"))
+        self.assertTrue(self.t.sent[0][1].endswith("[مصادر: shamela،aljam3:3]"))
+        self.assertEqual(self.s.notes[0], (["shamela", "aljam3:3"], ""))
+
+    def test_notebook_failure_listed_in_verdict_appendix(self):
+        self.s.nb["abcdef123456"] = {"ok": False, "answer": "", "refs": [], "note": "انتهت مهلة الدفتر"}
+        r = judge.start_round("س", ["codex"], judge="agy", sources=self._src("answer"))
+        rid, nb = r["round_id"], self._nbid("abcdef123456")
+        s = self.wait(lambda: (lambda x: x if x["agents"][nb]["state"] == "error" else None)(judge.round_status(rid)))
+        self.assertEqual(s["agents"][nb]["note"], "انتهت مهلة الدفتر")
+        out = judge._finish_verdict(judge.ROUNDS[rid], "## الخلاصة الموحدة\nحكم", [], {}, "agy")
+        self.assertIn("مصادر تعذّر الوصول إليها", out)
+        self.assertIn("انتهت مهلة الدفتر", out)
+        self.s.nb["abcdef123456"] = RuntimeError("x")                       # استثناء لا يُسقط الجولة
+        r = judge.start_round("س", ["codex"], judge="agy", sources=self._src("answer"))
+        self.wait(lambda: judge.round_status(r["round_id"])["agents"][nb]["state"] == "error")
+
+    def test_reask_and_deepen_for_notebook(self):
+        r = judge.start_round("س", ["codex"], sources=self._src("answer"))
+        rid, nb = r["round_id"], self._nbid("abcdef123456")
+        self.wait(lambda: judge.round_status(rid)["agents"][nb]["state"] == "done")
+        n = len(self.t.sent)
+        self.s.nb["abcdef123456"] = {"ok": True, "answer": "جواب جديد", "refs": [], "note": ""}
+        r = judge.reask(rid, nb)
+        self.assertEqual(r["agents"][nb]["state"], "waiting")
+        self.assertEqual(r["agents"][nb]["answer"], "")
+        self.wait(lambda: judge.round_status(rid)["agents"][nb]["answer"] == "جواب جديد")
+        self.assertEqual(len(self.s.asked), 2)
+        self.assertEqual(len(self.t.sent), n)                               # لا إرسال للطرفية
+        with self.assertRaises(ValueError) as cm:
+            judge.deepen(rid, nb)
+        self.assertIn("عمّق", str(cm.exception))
+        with self.assertRaises(ValueError):
+            judge.reask(rid, nb, deep=True)
+        self.assertFalse(judge.set_selected(rid, nb, False)["agents"][nb]["selected"])
+
+    def test_answers_file_has_notebooks_unanonymized_with_passages(self):
+        r = judge.start_round("س", ["claude", "codex"], judge="claude", judge_may_answer=True, sources=self._src("answer"))
+        rid, nb = r["round_id"], self._nbid("abcdef123456")
+        self.wait(lambda: judge.round_status(rid)["agents"][nb]["state"] == "done")
+        with judge._LOCK:
+            rr = judge.ROUNDS[rid]
+            rr["agents"]["claude"]["answer"] = "أنا Claude أرى كذا"
+            rr["agents"]["codex"]["answer"] = "أنا Codex أرى غيره"
+            rr["agents"][nb]["answer"] = "من دفتر Claude الخاص"
+        p, key = judge.build_answers_file(rr)
+        txt = p.read_text(encoding="utf-8")
+        self.assertIn("من مصادر المستخدم (دفتر: دفتر abc)", txt)
+        self.assertIn("«مقطع حرفي من abcdef123456»", txt)
+        self.assertIn("المقاطع الحرفية", txt)
+        self.assertIn("من دفتر Claude الخاص", txt)                          # لم يُجهَّل
+        self.assertEqual(sorted(key), ["أ", "ب"])                          # الرموز للوكلاء وحدهم
+        head = txt.split("## جواب من مصادر المستخدم")[0]
+        self.assertNotIn("Claude", head.split("## الجواب (أ)")[-1])
+
+    def test_judge_prompts_mention_notebooks_and_unverified(self):
+        r = judge.start_round("س", ["codex"], judge="agy", sources=self._src("answer"))
+        rr = judge.ROUNDS[r["round_id"]]
+        for p in (judge.judge_prompt(rr, "/a/answers.md"), judge.web_judge_prompt(rr)):
+            self.assertIn("مصادر المستخدم", p)
+            self.assertIn("وافقتها أجوبة الوكلاء", p)
+            self.assertIn("غير متحقق", p)
+        plain = judge.judge_prompt({"round_id": "x", "judge_also_answers": False}, "/a")
+        self.assertNotIn("مصادر المستخدم", plain)
+        nonb = judge.start_round("س", ["codex"], judge="agy", sources=self._src("answer", nbs=()))
+        p = judge.judge_prompt(judge.ROUNDS[nonb["round_id"]], "/a")
+        self.assertNotIn("وافقتها", p)
+        self.assertIn("غير متحقق", p)
+
+    def test_strip_codex_memory_block_and_agy_action_lines(self):
+        codex = "الجواب\n\n**المصادر**\n[1] مؤلف، كتاب\n\n<oai-mem-citation>\n<citation_entries>\nMEMORY.md:1-2|note=[x]\n</citation_entries>\n</oai-mem-citation>"
+        self.assertEqual(judge._strip_notes(codex), "الجواب\n\n**المصادر**\n[1] مؤلف، كتاب")
+        self.assertEqual(judge._strip_notes("الجواب\n<oai-mem-citation>\nناقص بلا إغلاق"), "الجواب")      # كتلة غير مغلقة
+        agy = "… 9 more actions (5 reads, 4 tools) …\n  نعم هذا هو الجواب.\n⋯ 2 more action (1 read) ⋯\n  تتمة"
+        self.assertNotIn("more actions", judge._strip_notes(agy))
+        self.assertNotIn("more action", judge._strip_notes(agy))
+        self.assertIn("نعم هذا هو الجواب.", judge._strip_notes(agy))
+        self.assertIn("تتمة", judge._strip_notes(agy))
+
+    def test_answers_file_notebook_without_passages_and_with_sources(self):
+        self.s.nb["abcdef123456"] = {"ok": True, "answer": "جواب الدفتر", "refs": [], "sources": ["كتاب أ.pdf"], "note": ""}
+        r = judge.start_round("س", ["codex"], judge="agy", sources=self._src("answer", nbs=("abcdef123456",)))
+        rid, nb = r["round_id"], self._nbid("abcdef123456")
+        self.wait(lambda: judge.round_status(rid)["agents"][nb]["state"] == "done")
+        rr = judge.ROUNDS[rid]
+        self.assertEqual(rr["agents"][nb]["sources"], ["كتاب أ.pdf"])
+        p, _ = judge.build_answers_file(rr)
+        txt = p.read_text(encoding="utf-8")
+        self.assertIn("لم يُرجع الدفتر مقاطع حرفية", txt)
+        self.assertNotIn("«»", txt)
+        self.assertIn("المصادر التي استند إليها الدفتر: كتاب أ.pdf", txt)
+        # مقطع بمصدره
+        rr["agents"][nb]["refs"] = [{"n": 1, "text": "نص حرفي", "source": "كتاب أ.pdf"}]
+        txt = judge.build_answers_file(rr)[0].read_text(encoding="utf-8")
+        self.assertIn("1. «نص حرفي» — من: كتاب أ.pdf", txt)
+        self.assertNotIn("لم يُرجع الدفتر مقاطع", txt)
+
+    def test_shamela_verification_in_answers_file(self):
+        q1, q2, q3 = ("وأجمع عوام أهل العلم على إسقاط نفقة الناشز", "قول آخر طويل بما يكفي للفحص الآلي هنا", "نص ثالث طويل بما يكفي للفحص الآلي هنا")
+        self.s.verify = {q1: {"found": True, "where": "المغني، ج٨/ص١٩٥", "in_footnote": False},
+                         q2: {"found": True, "where": "كتاب، ج١/ص٢", "in_footnote": True}}
+        r = judge.start_round("س", ["codex"], judge="agy", sources=self._src("answer", nbs=()))
+        rr = judge.ROUNDS[r["round_id"]]
+        rr["agents"]["codex"]["answer"] = ("ن [1] [2] [3]\n\nالمصادر\n[1] ابن قدامة، المغني، ج ٨ ص ١٩٥ «%s»\n[2] مؤلف، كتاب «%s»\n[3] مؤلف، كتاب ثالث «%s»" % (q1, q2, q3))
+        p, _ = judge.build_answers_file(rr)
+        txt = p.read_text(encoding="utf-8")
+        self.assertIn("✅ موثّق | النص موجود في المتن: المغني، ج٨/ص١٩٥", txt)
+        self.assertIn("⚠️ فيه خلل | النص موجود في الحاشية", txt)
+        self.assertIn("❓ تعذّر التحقق | تعذّر التحقق", txt)                 # الخادم أعاد None
+        self.assertIn("shamela", rr["source_issues"])
+        out = judge._finish_verdict(rr, "## الخلاصة الموحدة\nx", [], {}, "agy")
+        self.assertIn("المكتبة الشاملة: تعذّر خادمها", out)
+
+    def test_no_shamela_verify_without_sources(self):
+        r = judge.start_round("س", ["codex"], judge="agy")
+        rr = judge.ROUNDS[r["round_id"]]
+        rr["agents"]["codex"]["answer"] = "ن [1]\n\nالمصادر\n[1] مؤلف، كتاب «قول طويل بما يكفي للفحص الآلي هنا تمامًا»"
+        judge.build_answers_file(rr)
+        self.assertEqual(self.s.verified, [])
+
+    def test_sources_validation(self):
+        with self.assertRaises(ValueError):
+            judge.start_round("س", ["codex"], sources=self._src("bogus"))
+        with self.assertRaises(ValueError):
+            judge.start_round("س", ["codex"], sources=self._src("answer", nbs=tuple("n%07d" % i + "xx" for i in range(6))))
 
     # ---------- Perplexity محكِّمًا ----------
     def _web_round(self, size=None):

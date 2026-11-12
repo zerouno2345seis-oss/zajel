@@ -70,6 +70,8 @@ def init(module, data_dir, port):
     servers.init(DATA, PORT)
     import media
     media.init(DATA)
+    import sources
+    sources.init(DATA)
     agent_scripts.M = M
     def _phone_serial():
         import phone_link
@@ -681,6 +683,15 @@ def handle(h, method):
             b = _body(h); S.chat_rename(str(b.get("id", "")), b.get("title")); h.send_json({"chats": S.chats_list()})
         elif path == "/api/assistant/chat/delete" and method == "POST":
             S.chat_delete(str(_body(h).get("id", ""))); h.send_json({"chats": S.chats_list()})
+        elif path == "/api/term/sources":
+            import sources
+            try:
+                if method == "POST":
+                    h.send_json({"selection": sources.set_selection(_body(h))})
+                else:
+                    h.send_json({"catalog": sources.catalog(refresh=query.get("refresh", [""])[0] in ("1", "true")), "selection": sources.get_selection()})
+            except ValueError as e:
+                h.send_json({"error": str(e)}, 400)
         elif path in ("/api/term/round/status", "/api/term/round/last", "/api/term/judge_default"):
             import judge
             try:
@@ -702,7 +713,8 @@ def handle(h, method):
                 if act == "start":
                     h.send_json(judge.start_round(b.get("question", ""), b.get("answerers") or [], str(b.get("judge", "")), bool(b.get("auto_judge")),
                                                   bool(b.get("deep")), b.get("timeout_min"), b.get("deep_agents") or [],
-                                                  judge_may_answer=b.get("judge_may_answer") is True, length=b.get("length") or ""))
+                                                  judge_may_answer=b.get("judge_may_answer") is True, length=b.get("length") or "",
+                                                  sources=b.get("sources") or None))
                 elif act == "reask":
                     h.send_json(judge.reask(rid, str(b.get("agent_id", ""))))
                 elif act == "select":

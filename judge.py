@@ -12,6 +12,10 @@ from pathlib import Path
 
 DATA = None            # PB_DATA؛ إن لم يُضبط أُخذ من terminal.DATA
 T = None               # وحدة الطرفية (تُستبدل في الاختبارات)
+S = None               # وحدة المصادر sources (تُستبدل في الاختبارات)
+NB_WAIT = 160          # أقصى انتظار لانتهاء الدفاتر في وضع «مرجع للوكلاء»
+MAX_NOTEBOOKS = 5
+NB_MODES = ("answer", "reference")
 POLL = 2.0             # ثوانٍ بين قراءتين لأجوبة الوكلاء
 STABLE_POLLS = 3       # قراءات متتالية بلا تغيّر (والوكيل هادئ) = انتهى الجواب
 ANSWER_STABLE = 8      # أجوبة الوكلاء: ١٦ ثانية بلا تغيّر والوكيل هادئ
@@ -44,6 +48,18 @@ def _t():
         import terminal
         T = terminal
     return T
+
+
+def _s():
+    global S
+    if S is None:
+        import sources
+        S = sources
+    return S
+
+
+def _is_nb(ag):
+    return (ag or {}).get("kind") == "notebook"
 
 
 def _data():
@@ -147,11 +163,50 @@ def set_default_judge(agent_id):
 
 
 # ---------- بدء جولة ----------
-def start_round(question, answerers, judge="", auto_judge=False, deep=False, timeout_min=None, deep_agents=None, judge_may_answer=False, length=""):
-    """deep=True: كل المجيبين يبحثون بحثًا متعمقًا؛ deep_agents: من يبحث منهم فقط (مثل Perplexity وحده)."""
+def _norm_sources(sources):
+    """يوحّد حقل المصادر القادم من الواجهة. يعيد None إن كان فارغًا (فيبقى السلوك القديم حرفيًا)."""
+    if not sources:
+        return None
+    if not isinstance(sources, dict):
+        raise ValueError("صيغة المصادر غير صحيحة.")
+    libs = []
+    for x in sources.get("libraries") or []:
+        x = str(x).strip()
+        if x and x not in libs:
+            libs.append(x)
+    nbs, seen = [], set()
+    for n in sources.get("notebooks") or []:
+        nid = str((n or {}).get("id", "") if isinstance(n, dict) else n).strip()
+        if not nid or nid in seen:
+            continue
+        seen.add(nid)
+        title = str(n.get("title", "") if isinstance(n, dict) else "").strip() or ("(بلا عنوان) " + nid[:8])
+        nbs.append({"id": nid, "title": title})
+    if len(nbs) > MAX_NOTEBOOKS:
+        raise ValueError(f"أكثر من {MAX_NOTEBOOKS} دفاتر في جولة واحدة غير مدعوم.")
+    mode = str(sources.get("nb_mode") or "answer")
+    if mode not in NB_MODES:
+        raise ValueError("وضع الدفاتر غير معروف.")
+    if not libs and not nbs:
+        return None
+    return {"libraries": libs, "notebooks": nbs, "nb_mode": mode}
+
+
+def _nb_agent_id(nid, taken):
+    base = "nb_" + re.sub(r"[^\w]", "", nid)[:8]
+    aid, k = base, 2
+    while aid in taken:
+        aid, k = f"{base}_{k}", k + 1
+    return aid
+
+
+def start_round(question, answerers, judge="", auto_judge=False, deep=False, timeout_min=None, deep_agents=None, judge_may_answer=False, length="", sources=None):
+    """deep=True: كل المجيبين يبحثون بحثًا متعمقًا؛ deep_agents: من يبحث منهم فقط (مثل Perplexity وحده).
+    sources: {"libraries": [...], "notebooks": [{"id","title"}], "nb_mode": "answer"|"reference"} — الدفاتر مجيبون وهميون (nb_…)."""
     question = str(question or "").strip()
     if not question:
         raise ValueError("اكتب السؤال أولًا.")
+    src = _norm_sources(sources)
     by_id = getattr(_t(), "BY_ID", {})
     ans = []
     for a in answerers or []:
@@ -161,7 +216,10 @@ def start_round(question, answerers, judge="", auto_judge=False, deep=False, tim
         if a != PERPLEXITY and not (a in by_id and by_id[a].get("cmd")):
             raise ValueError(f"وكيل غير معروف: {a}")
         ans.append(a)
-    if not ans:
+    nb_ids = {}                # معرّف المجيب الوهمي ← بيانات الدفتر
+    for n in (src or {}).get("notebooks", []):
+        nb_ids[_nb_agent_id(n["id"], set(ans) | set(nb_ids))] = n
+    if not ans and not nb_ids:
         raise ValueError("اختر وكيلًا واحدًا على الأقل ليجيب.")
     terms = [a for a in ans if a != PERPLEXITY]
     if len(terms) > MAX_TERM:
@@ -175,27 +233,188 @@ def start_round(question, answerers, judge="", auto_judge=False, deep=False, tim
         raise ValueError("حجم الجواب غير معروف.")
     if judge and not judge_may_answer:
         ans = [a for a in ans if a != judge]
-    if not ans:
+    if not ans and not nb_ids:
         raise ValueError("اختر مجيبًا آخر أو اسمح للمحكّم بالإجابة.")
     terms = [a for a in ans if a != PERPLEXITY]
     deep_set = set(ans) if deep else {str(a) for a in (deep_agents or []) if str(a) in ans}
     tmo = int(timeout_min) if timeout_min else (DEEP_TIMEOUT_MIN if deep_set else TIMEOUT_MIN)
     rid = "r_%s_%04x" % (time.strftime("%Y%m%d_%H%M%S"), random.randint(0, 0xFFFF))
+    agents = {a: {"name": _name(a), "state": "waiting", "selected": True, "answer": "", "note": "", "deep": a in deep_set} for a in ans}
+    for aid, n in nb_ids.items():
+        agents[aid] = {"name": "دفتر: " + n["title"], "state": "waiting", "selected": True, "answer": "", "note": "يسأل الدفتر", "deep": False,
+                       "kind": "notebook", "nb_id": n["id"], "refs": [], "asks": 1}
     r = {"round_id": rid, "question": question, "length": length, "deep": bool(deep_set), "deep_agents": sorted(deep_set), "auto_judge": bool(auto_judge), "judge": judge,
          "judge_also_answers": bool(judge and judge in ans), "created": time.time(), "timeout_min": tmo,
-         "agents": {a: {"name": _name(a), "state": "waiting", "selected": True, "answer": "", "note": "", "deep": a in deep_set} for a in ans},
+         "agents": agents,
          "judge_state": "idle", "verdict": "", "deep_state": "idle", "deep_answer": "", "deep_agent": "", "judge_note": "", "deep_note": ""}
-    if terms:
-        plain, deeper = [a for a in terms if a not in deep_set], [a for a in terms if a in deep_set]
-        if plain:
-            _t().broadcast(plain, question + _length_note(length) + CITE_NOTE)
-        if deeper:
-            _t().broadcast(deeper, question + _length_note(length) + CITE_NOTE + DEEP_NOTE)
+    if not src:
+        _send_question(r, terms, "")
+        with _LOCK:
+            ROUNDS[rid] = r
+            _save(r)
+        threading.Thread(target=_watch, args=(rid,), daemon=True).start()
+        return round_status(rid)
+    r["sources"], r["source_issues"], r["evidence_path"] = src, {}, ""
     with _LOCK:
         ROUNDS[rid] = r
         _save(r)
+    for aid in nb_ids:
+        threading.Thread(target=_nb_thread, args=(rid, aid, 1), daemon=True).start()
+    if nb_ids and terms and src["nb_mode"] == "reference":       # الإرسال ينتظر الدفاتر: في خيط كي لا يتجمد الطلب
+        with _LOCK:
+            for a in terms:
+                r["agents"][a]["note"] = "ينتظر انتهاء الدفاتر قبل إرسال السؤال"
+        threading.Thread(target=_launch_after_notebooks, args=(rid,), daemon=True).start()
+    else:
+        _launch_terms(rid)
     threading.Thread(target=_watch, args=(rid,), daemon=True).start()
     return round_status(rid)
+
+
+def _source_extra(r):
+    """نص المصادر الملحق بالسؤال (فارغ إن لم تكن هناك مصادر)."""
+    src = r.get("sources")
+    if not src:
+        return ""
+    try:
+        path = r.get("evidence_path") or ""
+        return str(_s().source_note(src["libraries"], path if path and Path(path).is_file() else "") or "")
+    except Exception:
+        return ""
+
+
+def _send_question(r, terms, extra):
+    """يرسل سؤال الجولة إلى وكلاء الطرفية (العاديين ثم المعمِّقين)."""
+    deep_set = set(r.get("deep_agents") or [])
+    question, length = r["question"], r.get("length", "")
+    if terms:
+        plain, deeper = [a for a in terms if a not in deep_set], [a for a in terms if a in deep_set]
+        if plain:
+            _t().broadcast(plain, question + _length_note(length) + CITE_NOTE + extra)
+        if deeper:
+            _t().broadcast(deeper, question + _length_note(length) + CITE_NOTE + DEEP_NOTE + extra)
+
+
+def _launch_terms(rid):
+    """جولة بمصادر: يضمن وصلات المكتبات عند كل وكيل طرفية (من فشل تُدوَّن ملاحظته ولا تتوقف الجولة) ثم يرسل السؤال."""
+    with _LOCK:
+        r = ROUNDS.get(rid)
+        if not r:
+            return
+        terms = [a for a, ag in r["agents"].items() if a != PERPLEXITY and not _is_nb(ag)]
+        libs = r["sources"]["libraries"]
+    bstate = getattr(_t(), "BROADCAST_STATE", {})
+    for a in terms:
+        bstate.pop(a, None)               # لا نقرأ حالة إرسال قديمة
+    if libs:
+        for a in terms:
+            try:
+                res = _s().ensure_agent(a, libs) or {}
+            except Exception:
+                res = {"ok": False, "note": "تعذّر تجهيز وصلات المصادر"}
+            if not res.get("ok"):
+                note = str(res.get("note") or "تعذّر تجهيز وصلات المصادر")
+                with _LOCK:
+                    r["agents"][a]["note"] = note
+                    r["source_issues"][a] = f"{r['agents'][a]['name']}: {note}"
+            if res.get("added"):
+                _restart_for_connectors(r, a)
+    with _LOCK:
+        _save(r)
+    try:
+        _send_question(r, terms, _source_extra(r))
+    except ValueError as e:
+        with _LOCK:
+            for a in terms:
+                r["agents"][a].update(state="error", note=str(e))
+            _save(r)
+    with _LOCK:
+        r["created"] = time.time()                 # مهلة الجولة تبدأ من الإرسال الفعلي
+        _save(r)
+
+
+def _restart_for_connectors(r, aid):
+    """الوكيل في الطرفية جلسة طويلة تحمّل وصلاتها عند بدئها فقط: وصلة سُجّلت الآن لا يراها إلا بعد إعادة التشغيل.
+    الآلية: terminal.restart (يغلق الجلسة)، ثم broadcast يفتح جلسة جديدة تلقائيًا (start يعيد الإنشاء إن لم توجد جلسة).
+    لا نغلق إلا جلسة هادئة: من يعمل أو ينتظر ردًّا لا نقطع عمله، ونطلب من المستخدم إعادة تشغيله بنفسه. الفشل لا يوقف الجولة."""
+    T_ = _t()
+    ag = r["agents"][aid]
+    manual = "سُجّلت وصلات المصادر؛ أعد تشغيل هذا الوكيل بنفسك ليراها"
+    try:
+        st = T_.state_of(aid)[0]
+        if st == "stopped":
+            note = ""                                        # لا جلسة حيّة: broadcast سيبدأ جلسة جديدة تحمّل الوصلات
+        elif st in ("working", "waiting"):
+            note = manual + " (هو مشغول الآن)"
+        else:
+            T_.restart(aid)
+            note = "أُعيد تشغيل الوكيل لتفعيل وصلات المصادر"
+    except Exception:
+        note = manual + " (تعذّرت إعادة التشغيل تلقائيًا)"
+    if note:
+        with _LOCK:
+            ag["note"] = note
+            if note.startswith("سُجّلت"):
+                r["source_issues"][aid + ":restart"] = f"{ag['name']}: {note}"
+
+
+def _launch_after_notebooks(rid):
+    """وضع «مرجع للوكلاء»: ينتظر الدفاتر ثم يكتب ملف الأدلة ثم يرسل السؤال ومعه مساره."""
+    t0 = time.time()
+    while time.time() - t0 < NB_WAIT:
+        with _LOCK:
+            r = ROUNDS.get(rid)
+            if not r:
+                return
+            if all(ag["state"] in FINAL for ag in r["agents"].values() if _is_nb(ag)):
+                break
+        time.sleep(min(POLL, 0.5))
+    with _LOCK:
+        r = ROUNDS.get(rid)
+        if not r:
+            return
+        items = [{"title": ag["name"], "answer": ag["answer"], "refs": list(ag.get("refs") or []), "sources": list(ag.get("sources") or [])}
+                 for ag in r["agents"].values() if _is_nb(ag) and ag["answer"].strip()]
+    if items:
+        try:
+            d = _dir() / rid
+            d.mkdir(parents=True, exist_ok=True)
+            path = _s().write_evidence(d / "evidence.md", items)
+            with _LOCK:
+                r["evidence_path"] = str(path or "")
+        except Exception:
+            with _LOCK:
+                r["source_issues"]["evidence"] = "تعذّر كتابة ملف الأدلة من الدفاتر"
+    _launch_terms(rid)
+
+
+def _nb_thread(rid, aid, token):
+    """يسأل دفترًا واحدًا (بلا طرفية) ويكتب نتيجته في حالة الجولة."""
+    with _LOCK:
+        r = ROUNDS.get(rid)
+        ag = r["agents"].get(aid) if r else None
+        if not ag:
+            return
+        nb_id, question = ag["nb_id"], r["question"]
+    try:
+        res = _s().ask_notebook(nb_id, question) or {}
+    except Exception:
+        res = {"ok": False, "note": "تعذّر سؤال الدفتر"}
+    with _LOCK:
+        if ROUNDS.get(rid) is not r or ag.get("asks", 1) != token:
+            return                                   # الجولة اختفت أو أُعيد السؤال بعدها
+        text = str(res.get("answer") or "").strip()
+        if res.get("ok") and text:
+            refs = [dict(x, text=str(x.get("text") or "")) for x in (res.get("refs") or []) if isinstance(x, dict) and str(x.get("text") or "").strip()]
+            ag.update(answer=text, refs=refs, state="done", note="")
+            if res.get("sources"):
+                ag["sources"] = [str(x) for x in res["sources"]]
+            r["source_issues"].pop(aid, None)
+        else:
+            note = str(res.get("note") or "") or ("الدفتر لم يعطِ جوابًا" if res.get("ok") else "تعذّر سؤال الدفتر")
+            ag.update(state="error", note=note)
+            r["source_issues"][aid] = f"{ag['name']}: {note}"
+        _save(r)
 
 
 def _length_note(length):
@@ -210,6 +429,21 @@ def reask(round_id, agent_id, deep=False):
         ag = r["agents"].get(agent_id)
         if not ag or agent_id == PERPLEXITY:
             raise ValueError("لا يمكن إعادة السؤال على هذا الوكيل.")
+        if _is_nb(ag):
+            if deep:
+                raise ValueError("«عمّق» غير متاح لدفتر؛ الدفتر يجيب من مصادره فقط. استعمل «أعد السؤال».")
+            ag["asks"] = ag.get("asks", 1) + 1
+            ag.update(state="waiting", answer="", refs=[], note="أُعيد سؤال الدفتر")
+            r.get("source_issues", {}).pop(agent_id, None)
+            r["created"] = time.time()
+            if r["judge_state"] in ("done", "error"):
+                r["judge_state"] = "idle"
+            token, watching = ag["asks"], rid_watching(round_id)
+            _save(r)
+            threading.Thread(target=_nb_thread, args=(round_id, agent_id, token), daemon=True).start()
+            if not watching:
+                threading.Thread(target=_watch, args=(round_id,), daemon=True).start()
+            return round_status(round_id)
         if deep:
             ag["deep"] = True
             r["timeout_min"] = max(r["timeout_min"], DEEP_TIMEOUT_MIN)
@@ -223,7 +457,7 @@ def reask(round_id, agent_id, deep=False):
         _save(r)
     getattr(_t(), "BROADCAST_STATE", {}).pop(agent_id, None)
     _t().broadcast([agent_id], r["question"] + _length_note(r.get("length", "")) + CITE_NOTE + (DEEP_NOTE if ag.get("deep") else "")
-                   + ("\n\n(أعد الجواب أعمق وأوثق مما كتبته في المرة السابقة.)" if deep else "") + "\n" + ag["mark"])
+                   + ("\n\n(أعد الجواب أعمق وأوثق مما كتبته في المرة السابقة.)" if deep else "") + _source_extra(r) + "\n" + ag["mark"])
     if not watching:
         threading.Thread(target=_watch, args=(round_id,), daemon=True).start()
     return round_status(round_id)
@@ -262,6 +496,8 @@ def set_selected(round_id, agent_id, selected):
 def _strip_notes(t):
     """بعض الوكلاء (Hermes من شاشته) يعيدون تعليمات التوثيق أو التعميق الملحقة بالسؤال في أول الجواب: تُحذف."""
     t = str(t or "").strip()
+    t = re.sub(r"(?s)\s*<oai-mem-citation>.*?(?:</oai-mem-citation>|\Z)", "", t).strip()       # Codex يلحق كتلة ذاكرة داخلية بآخر جوابه
+    t = re.sub(r"(?m)^[ \t]*[…⋯]+[ \t]*\d+ more actions?\b[^\n]*$\n?", "", t).strip()          # Antigravity: «… 9 more actions (5 reads, 4 tools) …»
     t = re.sub(r"(?im)^[ \t]*[○●◦▸▹]?[ \t]*\(?Thought for\s+\d[^\n]*(?:\n|$)", "", t).strip()
     for note in (CITE_NOTE, DEEP_NOTE):
         head = _norm(note)[:25]
@@ -357,7 +593,7 @@ def _watch_loop(rid):
             if not r:
                 return
             deadline = r["created"] + r["timeout_min"] * 60
-            todo = [(a, ag) for a, ag in r["agents"].items() if ag["state"] not in FINAL and a != PERPLEXITY]
+            todo = [(a, ag) for a, ag in r["agents"].items() if ag["state"] not in FINAL and a != PERPLEXITY and not _is_nb(ag)]
         changed = False
         for aid, ag in todo:
             before = (ag["state"], ag["answer"])
@@ -404,7 +640,9 @@ def anonymize(text, names=()):
 
 def build_answers_file(r, only=None):
     """يكتب answers.md ويعيد (المسار، مفتاح الرموز {حرف: معرّف}). الأجوبة المختارة وحدها (وفي only إن أُعطي)."""
-    items = [(a, ag) for a, ag in r["agents"].items() if ag["selected"] and ag["answer"].strip() and (only is None or a in only)]
+    all_items = [(a, ag) for a, ag in r["agents"].items() if ag["selected"] and ag["answer"].strip() and (only is None or a in only)]
+    items = [(a, ag) for a, ag in all_items if not _is_nb(ag)]
+    nb_items = [(a, ag) for a, ag in all_items if _is_nb(ag)]      # الدفاتر: مصادر المستخدم، لا تُجهَّل هويتها
     key = {}
     out = ["# أجوبة الوكلاء عن السؤال", "", "## السؤال", r["question"], ""]
     if r.get("judge_also_answers"):
@@ -418,6 +656,19 @@ def build_answers_file(r, only=None):
         for a, ag in items:
             key[ag["name"]] = a
             out += [f"## جواب {ag['name']}", ag["answer"].strip(), ""]
+    for a, ag in nb_items:
+        out += [f"## جواب من مصادر المستخدم ({ag['name']})",
+                "(هذا الجواب مبني على مصادر المستخدم نفسه في دفتره، وليس من وكيل بحث؛ قارن به أجوبة الوكلاء.)", ag["answer"].strip(), ""]
+        if ag.get("sources"):
+            out.append("المصادر التي استند إليها الدفتر: " + "، ".join(str(x) for x in ag["sources"]))
+        passages = [ref for ref in ag.get("refs") or [] if str(ref.get("text") or "").strip()]
+        out.append("### المقاطع الحرفية من الدفتر")
+        if passages:
+            for ref in passages:
+                out.append(f"{ref.get('n')}. «{str(ref.get('text')).strip()}»" + (f" — من: {ref['source']}" if ref.get("source") else ""))
+        else:
+            out.append("لم يُرجع الدفتر مقاطع حرفية")
+        out.append("")
     import citation_check
     refs = []
     for index, (label, aid) in enumerate(key.items()):
@@ -425,11 +676,13 @@ def build_answers_file(r, only=None):
         if r.get("judge_also_answers"):
             answer = anonymize(answer, [ag["name"] for _, ag in items] + [a for a, _ in items])
         refs.extend(dict(ref, answer_label=label) for ref in citation_check.extract_citations(answer, f"ج{index + 1}-"))
-    refs = citation_check.check_citations(refs)
+    refs = citation_check.check_citations(refs, verifier=_shamela_verifier(r))
+    if any(ref.get("verify_down") for ref in refs):
+        r.setdefault("source_issues", {})["shamela"] = "المكتبة الشاملة: تعذّر خادمها عند التحقق الآلي من النصوص المنقولة"
     r["citation_ids"] = [ref["id"] for ref in refs]
     out += ["## فهرس الإحالات والتحقق الآلي", ""]
     for ref in refs:
-        out.append(f"- {ref['id']} | {ref['status']} | {ref['reason']} | {ref['source']} | الجواب: {ref['answer_label']}")
+        out.append(f"- {ref['id']} | {ref['status']} | {ref['reason']} | {' '.join(str(ref['source']).split())[:160]} | الجواب: {ref['answer_label']}")
     if not refs:
         out.append("لم تُستخرج إحالات قابلة للفهرسة.")
     d = _dir() / r["round_id"]
@@ -437,6 +690,35 @@ def build_answers_file(r, only=None):
     p = d / "answers.md"
     p.write_text("\n".join(out), encoding="utf-8")
     return p, key
+
+
+def _shamela_verifier(r):
+    """في جولة بمصادر: مدقق النصوص المنقولة بلا رابط عبر خادم الشاملة (None بلا مصادر فيبقى السلوك القديم)."""
+    if not r.get("sources"):
+        return None
+
+    def verify(quote):
+        try:
+            return _s().shamela_verify(quote)
+        except Exception:
+            return None
+    return verify
+
+
+SOURCES_RULE = ("مصادر المستخدم: بعض الأجوبة في الملف عنوانها «من مصادر المستخدم (دفتر: …)»؛ هذه مبنية على مصادر المستخدم نفسه لا على بحث وكيل. "
+                "بيّن في التقرير أين وافقتها أجوبة الوكلاء وأين خالفتها، ولا تُجهِّل هويتها ولا تعاملها كأي جواب آخر.")
+UNVERIFIED_RULE = "لا تعتمد نصًّا علّمه التحقق الآلي ❓ (تعذّر) أو ❌ إلا مع تنبيه صريح في التقرير بأنه غير متحقق منه."
+
+
+def _sources_rules(r):
+    """تعليمات المحكِّم الإضافية في جولة المصادر ('' بلا مصادر)."""
+    if not r.get("sources"):
+        return ""
+    out = []
+    if any(_is_nb(ag) for ag in r.get("agents", {}).values()):
+        out.append(SOURCES_RULE)
+    out.append(UNVERIFIED_RULE)
+    return "\n".join(out)
 
 
 OUTPUT_ORDER = ("اكتب تقريرك بهذا الترتيب بالضبط، وبعناوين ## بهذه الأسماء حرفيًا:\n"
@@ -468,6 +750,8 @@ def judge_prompt(r, answers_path, vpath=None):
     if r["judge_also_answers"]:
         p.append("تنبيه: أحد الأجوبة كتبه المحكِّم نفسه (أنت)، وقد أُخفيت الأسماء ورُتّبت الأجوبة عشوائيًا بالرموز أ ب ج. لا تجامل جوابًا لظنك أنه جوابك؛ "
                  "ولا بد من درجة لكل معيار مع سبب مكتوب لكل جواب بلا استثناء. اذكر في التقرير: «المحكِّم شارك بالجواب (رمزه)» إن عرفته.")
+    if _sources_rules(r):
+        p.append(_sources_rules(r))
     p.append(OUTPUT_ORDER)
     p.append(STYLE_RULES)
     if r.get("length"):
@@ -652,6 +936,9 @@ def _finish_verdict(r, text, late, key, judge):
         if bad or extra:
             detail = [f"{i} ({counts[i]})" for i in bad] + [f"{i} (غير موجود في الفهرس)" for i in extra]
             text = text.rstrip() + "\n\n⚠️ فهرس الإحالات غير مكتمل أو فيه تكرار أو معرّفات زائدة: " + "، ".join(detail) + "."
+    issues = [str(v) for v in (r.get("source_issues") or {}).values() if v]
+    if issues:
+        text = text.rstrip() + "\n\n---\nمصادر تعذّر الوصول إليها في هذه الجولة (لم تُحسب في الحكم): " + "؛ ".join(issues) + "."
     if late:
         text = text.rstrip() + "\n\n---\nلم تدخل هذا التحكيم لأنها لم تكتمل عند بدئه: " + "، ".join(late) + "."
     if r["judge_also_answers"]:
@@ -745,6 +1032,8 @@ def web_judge_prompt(r, deep_verify=True):
     p = [f"⟦حكم:{r['round_id']}⟧ أنت محكِّم محايد بين أجوبة عدة وكلاء عن سؤال واحد (المادة: السؤال ثم الأجوبة).", WEB_VERIFY, VERIFY_PROTO]
     if r["judge_also_answers"]:
         p.append("تنبيه: الأسماء مخفية والأجوبة مرتبة عشوائيًا بالرموز أ ب ج؛ لا بد من درجة لكل معيار مع سبب مكتوب لكل جواب بلا استثناء.")
+    if _sources_rules(r):
+        p.append(_sources_rules(r))
     p += [OUTPUT_ORDER, STYLE_RULES,
           "حدّد حكمك بما تحققت منه فقط: التزام الجواب بصيغة السؤال (كالإيجاز المطلوب) يُحسب له أو عليه، ولا تُدخل في الخلاصة ما لم يثبت ✅."]
     if r.get("length"):
@@ -861,7 +1150,9 @@ def deepen(round_id, agent_id=""):
             own = False
             if not any(ag["selected"] and ag["answer"].strip() for ag in r["agents"].values()):
                 raise ValueError("اختر جوابًا واحدًا على الأقل ليُعمَّق منه.")
-            target = r["judge"] or get_default_judge() or next(iter(r["agents"]))
+            target = r["judge"] or get_default_judge() or next((a for a, ag in r["agents"].items() if not _is_nb(ag) and a != PERPLEXITY), "")
+            if not target:
+                raise ValueError("لا وكيل طرفية يتولى التعميق؛ اختر محكِّمًا.")
     if own:
         return reask(round_id, agent_id, deep=True)       # تعميق وكيل واحد: جوابه الأعمق في شاشته
     with _LOCK:
